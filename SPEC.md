@@ -51,15 +51,15 @@ The root Zarr group attributes (`/zarr.json`) MUST contain:
 
 ```json
 {
-  "pbz": {
+  "perbase_zarr": {
     "version": "0.1"
   }
 }
 ```
 
-| Field   | Type   | Required | Description                |
-|---------|--------|----------|----------------------------|
-| version | string | Yes      | PBZ specification version  |
+| Field   | Type   | Required | Description                          |
+|---------|--------|----------|--------------------------------------|
+| version | string | Yes      | Per-Base Zarr specification version  |
 
 ### 2.2 Contig Arrays
 
@@ -91,7 +91,7 @@ Track group attributes (`/tracks/{name}/zarr.json`) MUST contain:
 
 ```json
 {
-  "pbz_track": {
+  "perbase_zarr_track": {
     "dtype": "uint32",
     "chunk_size": 1000000,
     "column_chunk_size": 16,
@@ -111,7 +111,7 @@ Track group attributes (`/tracks/{name}/zarr.json`) MUST contain:
 | description       | string  | No             | Human-readable description                                                  |
 | source            | string  | No             | Tool/version that created this track                                        |
 
-Additional tool-specific metadata MAY be included in the `pbz_track` object.
+Additional tool-specific metadata MAY be included in the `perbase_zarr_track` object.
 
 ### 3.2 Columns Array
 
@@ -209,7 +209,7 @@ If `shard_size` is specified in track metadata, implementations MUST record it:
 
 ```json
 {
-  "pbz_track": {
+  "perbase_zarr_track": {
     "dtype": "uint32",
     "chunk_size": 1000000,
     "column_chunk_size": 16,
@@ -622,13 +622,13 @@ ds = store["depths"].to_xarray(region="chr1:1000000-2000000")
 
 ```
 depths.pbz.zarr/
-├── zarr.json                     # {"pbz": {"version": "0.1"}}
+├── zarr.json                     # {"perbase_zarr": {"version": "0.1"}}
 ├── contigs                       # ["chr1", "chr2"]
 ├── contig_lengths                # [248956422, 242193529]
 └── tracks/
     └── depths/
-        ├── zarr.json             # {"pbz_track": {"dtype": "uint32", "chunk_size": 1000000,
-        │                         #                "column_chunk_size": 16, "has_columns": true}}
+        ├── zarr.json             # {"perbase_zarr_track": {"dtype": "uint32", "chunk_size": 1000000,
+        │                         #                         "column_chunk_size": 16, "has_columns": true}}
         ├── columns               # ["sample_A", "sample_B", "sample_C"]
         ├── chr1/                 # shape: (248956422, 3)
         └── chr2/                 # shape: (242193529, 3)
@@ -669,7 +669,7 @@ analysis.pbz.zarr/
     │   └── ...
     └── masks/
         └── callable_by_pop/
-            ├── zarr.json         # {"pbz_track": {..., "population_map": {
+            ├── zarr.json         # {"perbase_zarr_track": {..., "population_map": {
             │                     #     "pop_A": ["sample_A", "sample_B"],
             │                     #     "pop_B": ["sample_C"]}}}
             ├── columns           # ["pop_A", "pop_B"]
@@ -681,14 +681,14 @@ analysis.pbz.zarr/
 
 ```
 depths.pbz.zarr/
-├── zarr.json                     # {"pbz": {"version": "0.1"}}
+├── zarr.json                     # {"perbase_zarr": {"version": "0.1"}}
 ├── contigs                       # ["chr1"]
 ├── contig_lengths                # [248956422]
 └── tracks/
     └── depths/
-        ├── zarr.json             # {"pbz_track": {"dtype": "uint32", "chunk_size": 1000000,
-        │                         #                "column_chunk_size": 16, "shard_size": 50000000,
-        │                         #                "shard_column_size": 16, "has_columns": true}}
+        ├── zarr.json             # {"perbase_zarr_track": {"dtype": "uint32", "chunk_size": 1000000,
+        │                         #                         "column_chunk_size": 16, "shard_size": 50000000,
+        │                         #                         "shard_column_size": 16, "has_columns": true}}
         ├── columns               # ["sample_A", "sample_B", "sample_C"]
         └── chr1/                 # 5 shard files instead of 249 chunk files
 ```
