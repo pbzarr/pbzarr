@@ -10,6 +10,7 @@ use zarrs::group::{Group, GroupBuilder};
 use zarrs::storage::ReadableWritableListableStorage;
 
 use crate::error::{PbzError, Result};
+use crate::track::{Track, TrackConfig};
 use crate::PERBASE_ZARR_VERSION;
 
 /// Attribute key on the root Zarr group identifying a PBZ store.
@@ -263,6 +264,25 @@ impl PbzStore {
         }
     }
 
+    /// Create a new track in this store.
+    pub fn create_track(&self, name: &str, config: TrackConfig) -> Result<Track> {
+        Track::create(self.store.clone(), name, &config, &self.contig_lengths)
+    }
+
+    /// Open an existing track by name.
+    ///
+    /// Returns `TrackNotFound` if the track does not exist.
+    pub fn track(&self, name: &str) -> Result<Track> {
+        let available = self.tracks()?;
+        if !available.contains(&name.to_string()) {
+            return Err(PbzError::TrackNotFound {
+                name: name.into(),
+                available,
+            });
+        }
+        Track::open(self.store.clone(), name, &self.contig_lengths)
+    }
+
     /// List all track names in this store.
     ///
     /// Walks the `/tracks/` group for child groups that have the
@@ -317,6 +337,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::track::TrackConfig;
     use tempfile::TempDir;
 
     fn test_contigs() -> (Vec<String>, Vec<u64>) {
@@ -506,5 +527,41 @@ mod tests {
 
         let tracks = store.tracks().unwrap();
         assert_eq!(tracks, vec!["masks/callable"]);
+    }
+
+    #[test]
+    fn create_and_get_track() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.pbz.zarr");
+        let (contigs, lengths) = test_contigs();
+
+        let store = PbzStore::create(&path, &contigs, &lengths).unwrap();
+
+        let config = TrackConfig {
+            dtype: "uint32".into(),
+            columns: Some(vec!["s1".into(), "s2".into()]),
+            chunk_size: 1_000_000,
+            ..Default::default()
+        };
+        let track = store.create_track("depths", config).unwrap();
+        assert_eq!(track.name(), "depths");
+
+        let track_names = store.tracks().unwrap();
+        assert_eq!(track_names, vec!["depths"]);
+
+        let track2 = store.track("depths").unwrap();
+        assert_eq!(track2.metadata().dtype, "uint32");
+        assert!(track2.has_columns());
+    }
+
+    #[test]
+    fn track_not_found() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.pbz.zarr");
+        let (contigs, lengths) = test_contigs();
+
+        let store = PbzStore::create(&path, &contigs, &lengths).unwrap();
+        let err = store.track("nonexistent").unwrap_err();
+        assert!(matches!(err, PbzError::TrackNotFound { .. }));
     }
 }
