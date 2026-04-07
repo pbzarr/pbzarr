@@ -3,15 +3,15 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use zarrs::array::data_type;
 use zarrs::array::ArrayBuilder;
+use zarrs::array::data_type;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::group::{Group, GroupBuilder};
 use zarrs::storage::ReadableWritableListableStorage;
 
+use crate::PERBASE_ZARR_VERSION;
 use crate::error::{PbzError, Result};
 use crate::track::{Track, TrackConfig};
-use crate::PERBASE_ZARR_VERSION;
 
 /// Attribute key on the root Zarr group identifying a PBZ store.
 const ROOT_ATTR_KEY: &str = "perbase_zarr";

@@ -3,11 +3,13 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use ndarray::{Array1, Array2, ArrayD};
+use zarrs::array::codec::array_to_bytes::packbits::PackBitsCodec;
 use zarrs::array::codec::bytes_to_bytes::blosc::{
     BloscCodec, BloscCompressionLevel, BloscCompressor, BloscShuffleMode,
 };
-use zarrs::array::codec::array_to_bytes::packbits::PackBitsCodec;
-use zarrs::array::{data_type, Array, ArrayBuilder, ArraySubset, DataType, ElementOwned, FillValue};
+use zarrs::array::{
+    Array, ArrayBuilder, ArraySubset, DataType, ElementOwned, FillValue, data_type,
+};
 use zarrs::group::{Group, GroupBuilder};
 use zarrs::storage::ReadableWritableListableStorage;
 
@@ -256,8 +258,8 @@ impl Track {
     ) -> Result<Self> {
         let group_path = format!("/tracks/{name}");
 
-        let group = Group::open(store.clone(), &group_path)
-            .map_err(|e| PbzError::Store(e.to_string()))?;
+        let group =
+            Group::open(store.clone(), &group_path).map_err(|e| PbzError::Store(e.to_string()))?;
 
         let track_meta = group
             .attributes()
@@ -453,10 +455,8 @@ impl Track {
                 .store_chunk(&[chunk_idx, 0], data)
                 .map_err(|e| PbzError::Store(e.to_string()))?;
         } else if data.nrows() == expected_rows && chunk_end == contig_length {
-            let subset = ArraySubset::new_with_ranges(&[
-                0..data.nrows() as u64,
-                0..data.ncols() as u64,
-            ]);
+            let subset =
+                ArraySubset::new_with_ranges(&[0..data.nrows() as u64, 0..data.ncols() as u64]);
             array
                 .store_chunk_subset(&[chunk_idx, 0], &subset, data)
                 .map_err(|e| PbzError::Store(e.to_string()))?;
@@ -477,11 +477,7 @@ impl Track {
     ///
     /// Returns shape `(chunk_positions, num_columns)`. The last chunk may
     /// have fewer rows than `chunk_size`.
-    pub fn read_chunk<T: ElementOwned>(
-        &self,
-        contig: &str,
-        chunk_idx: u64,
-    ) -> Result<Array2<T>> {
+    pub fn read_chunk<T: ElementOwned>(&self, contig: &str, chunk_idx: u64) -> Result<Array2<T>> {
         if !self.metadata.has_columns {
             return Err(PbzError::Metadata(
                 "read_chunk called on a scalar track; use read_chunk_1d instead".into(),
@@ -764,8 +760,7 @@ mod tests {
         )
         .unwrap();
 
-        let track =
-            Track::open(store.storage().clone(), "depths", store.contig_lengths()).unwrap();
+        let track = Track::open(store.storage().clone(), "depths", store.contig_lengths()).unwrap();
 
         assert_eq!(track.name(), "depths");
         assert_eq!(track.metadata().dtype, "uint32");
@@ -794,8 +789,7 @@ mod tests {
         )
         .unwrap();
 
-        let track =
-            Track::open(store.storage().clone(), "signal", store.contig_lengths()).unwrap();
+        let track = Track::open(store.storage().clone(), "signal", store.contig_lengths()).unwrap();
 
         assert!(!track.has_columns());
         assert!(track.columns().is_none());
@@ -830,8 +824,7 @@ mod tests {
         )
         .unwrap();
 
-        let track =
-            Track::open(store.storage().clone(), "mask", store.contig_lengths()).unwrap();
+        let track = Track::open(store.storage().clone(), "mask", store.contig_lengths()).unwrap();
 
         let clam_meta = track.metadata().extra.get("clam").unwrap();
         assert_eq!(clam_meta["callable_loci_type"], "sample_masks");

@@ -4,7 +4,7 @@ pub mod store;
 pub mod track;
 
 pub use error::{PbzError, Result};
-pub use region::{parse_region, Region};
+pub use region::{Region, parse_region};
 pub use store::PbzStore;
 pub use track::{Track, TrackConfig, TrackMetadata};
 
