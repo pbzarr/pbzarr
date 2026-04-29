@@ -5,6 +5,7 @@ pub mod export;
 pub mod export_engine;
 pub mod import;
 pub mod info;
+pub mod input_resolve;
 pub mod list;
 pub mod rename;
 pub mod set;

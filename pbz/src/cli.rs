@@ -64,6 +64,9 @@ pub enum Command {
 }
 
 #[derive(clap::Args, Debug)]
+#[command(group(
+    clap::ArgGroup::new("import_input").required(true).args(["input", "filelist"])
+))]
 pub struct ImportArgs {
     /// Path to the .pbz.zarr store.
     pub store: PathBuf,

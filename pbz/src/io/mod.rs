@@ -1,5 +1,7 @@
 pub mod bed_writer;
 pub mod bedgraph_writer;
+pub mod d4_reader;
+pub mod depth_reader;
 pub mod tsv_writer;
 
 use color_eyre::Result;
