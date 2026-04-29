@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod error;
+mod io;
 
 use clap::Parser;
 use color_eyre::Result;

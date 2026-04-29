@@ -2,6 +2,7 @@ pub mod cat;
 pub mod completions;
 pub mod drop_cmd;
 pub mod export;
+pub mod export_engine;
 pub mod import;
 pub mod info;
 pub mod list;
