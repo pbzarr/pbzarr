@@ -3,7 +3,11 @@ use color_eyre::Result;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "pbz", version, about = "PBZ (Per-Base Zarr) command-line tool")]
+#[command(
+    name = "pbz",
+    about = "PBZ (Per-Base Zarr) command-line tool",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (PBZ spec ", "0.1", ")")
+)]
 pub struct Cli {
     /// Increase log verbosity (-v info, -vv debug, -vvv trace)
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]

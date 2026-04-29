@@ -1,8 +1,11 @@
+use clap::CommandFactory;
 use color_eyre::Result;
-use color_eyre::eyre::eyre;
 
-use crate::cli::CompletionsArgs;
+use crate::cli::{Cli, CompletionsArgs};
 
-pub fn run(_args: CompletionsArgs) -> Result<()> {
-    Err(eyre!("not yet implemented"))
+pub fn run(args: CompletionsArgs) -> Result<()> {
+    let mut cmd = Cli::command();
+    let bin_name = "pbz".to_string();
+    clap_complete::generate(args.shell, &mut cmd, bin_name, &mut std::io::stdout());
+    Ok(())
 }
