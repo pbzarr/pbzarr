@@ -1,0 +1,22 @@
+[package]
+name = "pbzarr"
+version = "0.1.0"
+edition = "2024"
+authors = ["Cade Mirchandani <cmirchan@ucsc.edu>"]
+description = "A Zarr v3 convention for per-base resolution genomic data"
+license = "MIT"
+repository = "https://github.com/pbzarr/pbzarr-rs"
+readme = "README.md"
+keywords = ["zarr", "genomics", "bioinformatics", "depth"]
+categories = ["science", "encoding"]
+
+[dependencies]
+fs-err = "3"
+ndarray = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+zarrs = { version = "0.23", features = ["ndarray"] }
+
+[dev-dependencies]
+tempfile = "3"

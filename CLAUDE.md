@@ -4,10 +4,10 @@
 
 `pbzarr` is the Rust implementation of the PBZ (Per-Base Zarr) format — a Zarr v3 convention for storing per-base resolution genomic data (depths, methylation, masks, etc.). Counterpart to the Python `pbzarr` library.
 
-This repo currently holds two things:
+This repo is a Cargo workspace with two members:
 
-1. **The `pbzarr` library crate** (`src/lib.rs`) — store layout, metadata, region parsing, chunk I/O. Delegates array storage and compression to `zarrs`.
-2. **The `pbz` CLI binary** (planned, not yet present) — ingestion, inspection, reshaping. Will live here for now and eventually be split into its own repo. When adding CLI code, put it under `src/bin/pbz/` (or a `[[bin]]` target) so the library/binary boundary stays clean for the future split.
+1. **The `pbzarr` library crate** (`pbzarr/src/lib.rs`) — store layout, metadata, region parsing, chunk I/O. Delegates array storage and compression to `zarrs`.
+2. **The `pbz` CLI binary crate** (`pbz/src/main.rs`) — sibling crate for ingestion, inspection, reshaping. The directory and crate exist; the CLI itself is not implemented yet (populated in later phases). Lives here for now and may eventually be split into its own repo.
 
 PBZ is a **convention and domain layer** on top of Zarr v3 — the library doesn't reimplement what `zarrs` already does; it provides escape hatches (`Track::zarr_array(...)`) for callers that need raw access.
 
@@ -18,10 +18,10 @@ Targets PBZ spec **v0.1**. Spec lives in `../pbzarr-spec/SPEC.md`. Canonical met
 ## Commands
 
 ```bash
-cargo test                       # all tests (unit + tests/integration.rs)
-cargo clippy -- -D warnings      # lint (CI fails on any warning)
-cargo fmt -- --check             # formatting check (CI enforces)
-cargo doc --open                 # render API docs locally
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
+cargo fmt --all -- --check
+cargo doc --open
 ```
 
 CI runs all three on push/PR to `main` (`.github/workflows/ci.yml`).
@@ -29,14 +29,22 @@ CI runs all three on push/PR to `main` (`.github/workflows/ci.yml`).
 ## Project Structure
 
 ```
-src/
-├── lib.rs       # Public API re-exports + PERBASE_ZARR_VERSION constant
-├── error.rs     # PbzError (thiserror), Result alias
-├── region.rs    # Region, parse_region()
-├── store.rs     # PbzStore: create/open, contigs, track listing/access
-└── track.rs     # Track, TrackConfig, TrackMetadata, chunk I/O
-tests/
-└── integration.rs  # End-to-end round-trip
+pbzarr-rs/                  # workspace root
+├── Cargo.toml              # [workspace] members = ["pbzarr", "pbz"]
+├── pbzarr/                 # library crate
+│   ├── Cargo.toml
+│   ├── src/
+│   │   ├── lib.rs
+│   │   ├── error.rs
+│   │   ├── region.rs
+│   │   ├── store.rs
+│   │   └── track.rs
+│   └── tests/
+│       └── integration.rs
+└── pbz/                    # CLI binary crate
+    ├── Cargo.toml
+    └── src/
+        └── main.rs         # (populated in later phases)
 ```
 
 ## Public API Surface (high-level)
