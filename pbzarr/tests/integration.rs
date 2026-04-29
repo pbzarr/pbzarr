@@ -233,3 +233,55 @@ fn chunk_math_human_scale() {
     let chunks = track.overlapping_chunks(100_000_000, 100_500_000);
     assert_eq!(chunks, 100..101);
 }
+
+#[test]
+fn edit_lifecycle_round_trip() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("test.pbz.zarr");
+
+    // 1. Create store with one contig.
+    let store = PbzStore::create(&path, &["chr1".to_string()], &[100u64]).unwrap();
+
+    // 2. Create a track with description "v1".
+    store
+        .create_track(
+            "depths",
+            TrackConfig {
+                dtype: "uint32".into(),
+                columns: Some(vec!["s1".into()]),
+                chunk_size: 100,
+                column_chunk_size: 1,
+                description: Some("v1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    // 3. Reopen, set description to "v2", verify reopen sees "v2".
+    let store = PbzStore::open(&path).unwrap();
+    let mut track = store.track("depths").unwrap();
+    track.set_description(Some("v2")).unwrap();
+    drop(track);
+    drop(store);
+
+    let store = PbzStore::open(&path).unwrap();
+    let track = store.track("depths").unwrap();
+    assert_eq!(track.metadata().description.as_deref(), Some("v2"));
+    drop(track);
+
+    // 4. Rename "depths" -> "coverage"; verify list/track APIs reflect rename.
+    store.rename_track("depths", "coverage").unwrap();
+    let names = store.tracks().unwrap();
+    assert_eq!(names, vec!["coverage"]);
+    assert!(store.track("coverage").is_ok());
+    assert!(matches!(
+        store.track("depths"),
+        Err(pbzarr::PbzError::TrackNotFound { .. })
+    ));
+
+    // 5. Drop "coverage"; verify tracks() empty and directory gone.
+    store.drop_track("coverage").unwrap();
+    assert!(store.tracks().unwrap().is_empty());
+    assert!(!path.join("tracks/coverage").exists());
+}

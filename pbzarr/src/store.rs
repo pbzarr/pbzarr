@@ -283,6 +283,30 @@ impl PbzStore {
         Track::open(self.store.clone(), name, &self.contig_lengths)
     }
 
+    /// Recursively delete a track group. Errors if `name` doesn't exist.
+    pub fn drop_track(&self, name: &str) -> Result<()> {
+        let _ = self.track(name)?;
+        let path = self.path.join("tracks").join(name);
+        fs_err::remove_dir_all(&path)
+            .map_err(|e| PbzError::Store(format!("remove_dir_all failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Rename a track group on disk. Errors if `old` doesn't exist or `new` already does.
+    pub fn rename_track(&self, old: &str, new: &str) -> Result<()> {
+        let _ = self.track(old)?;
+        let old_path = self.path.join("tracks").join(old);
+        let new_path = self.path.join("tracks").join(new);
+        // Cheaper than `self.tracks()` (which walks the whole zarr hierarchy
+        // again); we only need to know whether the destination exists.
+        if fs_err::metadata(&new_path).is_ok() {
+            return Err(PbzError::Metadata(format!("track '{new}' already exists")));
+        }
+        fs_err::rename(&old_path, &new_path)
+            .map_err(|e| PbzError::Store(format!("rename failed: {e}")))?;
+        Ok(())
+    }
+
     /// List all track names in this store.
     ///
     /// Walks the `/tracks/` group for child groups that have the
@@ -562,6 +586,102 @@ mod tests {
 
         let store = PbzStore::create(&path, &contigs, &lengths).unwrap();
         let err = store.track("nonexistent").unwrap_err();
+        assert!(matches!(err, PbzError::TrackNotFound { .. }));
+    }
+
+    #[test]
+    fn rename_track_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
+        let cfg = crate::track::TrackConfig {
+            dtype: "uint32".into(),
+            columns: None,
+            chunk_size: 100,
+            column_chunk_size: 1,
+            description: None,
+            source: None,
+            extra: serde_json::Map::new(),
+        };
+        store.create_track("old", cfg).unwrap();
+        store.rename_track("old", "new").unwrap();
+
+        let mut tracks = store.tracks().unwrap();
+        tracks.sort();
+        assert_eq!(tracks, vec!["new"]);
+        assert!(store.track("new").is_ok());
+        assert!(matches!(
+            store.track("old"),
+            Err(PbzError::TrackNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn rename_track_old_missing() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
+        let err = store.rename_track("missing", "new").unwrap_err();
+        assert!(matches!(err, PbzError::TrackNotFound { .. }));
+    }
+
+    #[test]
+    fn rename_track_new_already_exists() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
+        let cfg_a = crate::track::TrackConfig {
+            dtype: "uint32".into(),
+            columns: None,
+            chunk_size: 100,
+            column_chunk_size: 1,
+            description: None,
+            source: None,
+            extra: serde_json::Map::new(),
+        };
+        let cfg_b = crate::track::TrackConfig {
+            dtype: "uint32".into(),
+            columns: None,
+            chunk_size: 100,
+            column_chunk_size: 1,
+            description: None,
+            source: None,
+            extra: serde_json::Map::new(),
+        };
+        store.create_track("a", cfg_a).unwrap();
+        store.create_track("b", cfg_b).unwrap();
+        let err = store.rename_track("a", "b").unwrap_err();
+        assert!(matches!(err, PbzError::Metadata(_)));
+    }
+
+    #[test]
+    fn drop_track_removes_directory() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
+        let cfg = crate::track::TrackConfig {
+            dtype: "uint32".into(),
+            columns: None,
+            chunk_size: 100,
+            column_chunk_size: 1,
+            description: None,
+            source: None,
+            extra: serde_json::Map::new(),
+        };
+        store.create_track("t", cfg).unwrap();
+        assert!(store_path.join("tracks/t").exists());
+
+        store.drop_track("t").unwrap();
+        assert!(!store_path.join("tracks/t").exists());
+        assert!(store.tracks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn drop_track_missing() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
+        let err = store.drop_track("nope").unwrap_err();
         assert!(matches!(err, PbzError::TrackNotFound { .. }));
     }
 }

@@ -366,6 +366,56 @@ impl Track {
         &self.metadata
     }
 
+    /// Update the `description` field of the track's metadata, preserving all
+    /// other fields including the `extra` namespaced map.
+    ///
+    /// `None` clears the field.
+    pub fn set_description(&mut self, description: Option<&str>) -> Result<()> {
+        self.update_metadata_field("description", description.map(serde_json::Value::from))?;
+        self.metadata.description = description.map(|s| s.to_string());
+        Ok(())
+    }
+
+    /// Update the `source` field of the track's metadata, preserving all other
+    /// fields including the `extra` namespaced map.
+    ///
+    /// `None` clears the field.
+    pub fn set_source(&mut self, source: Option<&str>) -> Result<()> {
+        self.update_metadata_field("source", source.map(serde_json::Value::from))?;
+        self.metadata.source = source.map(|s| s.to_string());
+        Ok(())
+    }
+
+    fn update_metadata_field(&self, field: &str, value: Option<serde_json::Value>) -> Result<()> {
+        // Mutate the existing group's attributes in place so additional_fields
+        // (set by other tools or future extensions) survive the rewrite.
+        // Rebuilding via GroupBuilder would silently drop them.
+        let mut group = Group::open(self.store.clone(), &self.group_path)
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+        let track_meta = group
+            .attributes_mut()
+            .get_mut(TRACK_ATTR_KEY)
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| {
+                PbzError::Metadata(format!(
+                    "track group '{}' missing '{TRACK_ATTR_KEY}' attribute",
+                    self.group_path
+                ))
+            })?;
+        match value {
+            Some(v) => {
+                track_meta.insert(field.to_string(), v);
+            }
+            None => {
+                track_meta.remove(field);
+            }
+        }
+        group
+            .store_metadata()
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+        Ok(())
+    }
+
     /// Whether this track has a column dimension.
     pub fn has_columns(&self) -> bool {
         self.metadata.has_columns
@@ -1082,5 +1132,222 @@ mod tests {
         let data_2d = Array2::<u32>::zeros((1000, 1));
         assert!(scalar_track.write_chunk("chr1", 0, data_2d).is_err());
         assert!(scalar_track.read_chunk::<u32>("chr1", 0).is_err());
+    }
+
+    #[test]
+    fn set_description_updates_attribute() {
+        use crate::store::PbzStore;
+        let dir = tempfile::TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[1000u64]).unwrap();
+        let cfg = TrackConfig {
+            dtype: "uint32".into(),
+            columns: Some(vec!["s1".into()]),
+            chunk_size: 100,
+            column_chunk_size: 1,
+            description: Some("orig".into()),
+            source: None,
+            extra: serde_json::Map::new(),
+        };
+        let mut track = store.create_track("t", cfg).unwrap();
+        track.set_description(Some("updated")).unwrap();
+
+        drop(track);
+        drop(store);
+        let store2 = PbzStore::open(&store_path).unwrap();
+        let track2 = store2.track("t").unwrap();
+        assert_eq!(track2.metadata().description.as_deref(), Some("updated"));
+    }
+
+    #[test]
+    fn set_description_clear_with_none() {
+        use crate::store::PbzStore;
+        let dir = tempfile::TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
+        let cfg = TrackConfig {
+            dtype: "uint32".into(),
+            columns: None,
+            chunk_size: 100,
+            column_chunk_size: 1,
+            description: Some("orig".into()),
+            source: None,
+            extra: serde_json::Map::new(),
+        };
+        let mut track = store.create_track("t", cfg).unwrap();
+        track.set_description(None).unwrap();
+        drop(track);
+        drop(store);
+        let store2 = PbzStore::open(&store_path).unwrap();
+        let track2 = store2.track("t").unwrap();
+        assert_eq!(track2.metadata().description, None);
+    }
+
+    #[test]
+    fn set_source_updates_attribute() {
+        use crate::store::PbzStore;
+        let dir = tempfile::TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[1000u64]).unwrap();
+        let cfg = TrackConfig {
+            dtype: "uint32".into(),
+            columns: Some(vec!["s1".into()]),
+            chunk_size: 100,
+            column_chunk_size: 1,
+            description: None,
+            source: Some("orig".into()),
+            extra: serde_json::Map::new(),
+        };
+        let mut track = store.create_track("t", cfg).unwrap();
+        track.set_source(Some("updated")).unwrap();
+
+        drop(track);
+        drop(store);
+        let store2 = PbzStore::open(&store_path).unwrap();
+        let track2 = store2.track("t").unwrap();
+        assert_eq!(track2.metadata().source.as_deref(), Some("updated"));
+    }
+
+    #[test]
+    fn set_description_preserves_extra_metadata() {
+        use crate::store::PbzStore;
+        let dir = tempfile::TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
+
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "clam".into(),
+            serde_json::json!({"populations": [{"name": "p1", "samples": ["s1"]}]}),
+        );
+        let cfg = TrackConfig {
+            dtype: "uint32".into(),
+            columns: None,
+            chunk_size: 100,
+            column_chunk_size: 1,
+            description: Some("orig".into()),
+            source: None,
+            extra,
+        };
+        let mut track = store.create_track("t", cfg).unwrap();
+        track.set_description(Some("updated")).unwrap();
+        drop(track);
+        drop(store);
+
+        let store2 = PbzStore::open(&store_path).unwrap();
+        let track2 = store2.track("t").unwrap();
+        assert_eq!(track2.metadata().description.as_deref(), Some("updated"));
+        let clam = track2.metadata().extra.get("clam").unwrap();
+        assert_eq!(clam["populations"][0]["name"], "p1");
+    }
+
+    #[test]
+    fn set_description_preserves_additional_fields() {
+        // Regression: update_metadata_field used to rebuild the group via
+        // GroupBuilder, which silently dropped any GroupMetadataV3 additional_fields
+        // (top-level JSON keys outside `attributes`). Mutating in-place via
+        // attributes_mut() preserves them. Exercise that here by injecting a
+        // non-empty additional_fields on the track group, then calling
+        // set_description and asserting the field survives the round-trip.
+        use crate::store::PbzStore;
+        use zarrs::group::GroupBuilder;
+        use zarrs::metadata::GroupMetadata;
+        use zarrs::metadata::v3::{AdditionalFieldV3, AdditionalFieldsV3};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
+        let cfg = TrackConfig {
+            dtype: "uint32".into(),
+            columns: None,
+            chunk_size: 100,
+            column_chunk_size: 1,
+            description: Some("orig".into()),
+            source: None,
+            extra: serde_json::Map::new(),
+        };
+        store.create_track("t", cfg).unwrap();
+
+        // Rewrite /tracks/t with the same attributes plus a custom
+        // additional_fields entry. must_understand=false so opening the group
+        // doesn't reject it.
+        let group_path = "/tracks/t";
+        let original_attrs = Group::open(store.storage().clone(), group_path)
+            .unwrap()
+            .attributes()
+            .clone();
+
+        let mut additional = AdditionalFieldsV3::new();
+        additional.insert(
+            "external_tool_marker".to_string(),
+            AdditionalFieldV3::new(serde_json::json!({"tag": "preserve_me"}), false),
+        );
+
+        let group = GroupBuilder::new()
+            .attributes(original_attrs)
+            .additional_fields(additional)
+            .build(store.storage().clone(), group_path)
+            .unwrap();
+        group.store_metadata().unwrap();
+
+        // Sanity: the field is on disk before set_description runs.
+        {
+            let g = Group::open(store.storage().clone(), group_path).unwrap();
+            if let GroupMetadata::V3(meta) = g.metadata() {
+                assert!(
+                    meta.additional_fields.contains_key("external_tool_marker"),
+                    "precondition failed: additional_fields not persisted"
+                );
+            } else {
+                panic!("expected V3 group metadata");
+            }
+        }
+
+        drop(store);
+        let store2 = PbzStore::open(&store_path).unwrap();
+        let mut track = store2.track("t").unwrap();
+        track.set_description(Some("changed")).unwrap();
+        drop(track);
+        drop(store2);
+
+        let store3 = PbzStore::open(&store_path).unwrap();
+        let track3 = store3.track("t").unwrap();
+        assert_eq!(track3.metadata().description.as_deref(), Some("changed"));
+
+        let g = Group::open(store3.storage().clone(), group_path).unwrap();
+        match g.metadata() {
+            GroupMetadata::V3(meta) => {
+                let field = meta
+                    .additional_fields
+                    .get("external_tool_marker")
+                    .expect("additional_fields entry was dropped by set_description");
+                assert_eq!(field.as_value()["tag"], "preserve_me");
+            }
+            _ => panic!("expected V3 group metadata"),
+        }
+    }
+
+    #[test]
+    fn set_source_clear_with_none() {
+        use crate::store::PbzStore;
+        let dir = tempfile::TempDir::new().unwrap();
+        let store_path = dir.path().join("s.pbz.zarr");
+        let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
+        let cfg = TrackConfig {
+            dtype: "uint32".into(),
+            columns: None,
+            chunk_size: 100,
+            column_chunk_size: 1,
+            description: None,
+            source: Some("orig".into()),
+            extra: serde_json::Map::new(),
+        };
+        let mut track = store.create_track("t", cfg).unwrap();
+        track.set_source(None).unwrap();
+        drop(track);
+        drop(store);
+        let store2 = PbzStore::open(&store_path).unwrap();
+        let track2 = store2.track("t").unwrap();
+        assert_eq!(track2.metadata().source, None);
     }
 }
