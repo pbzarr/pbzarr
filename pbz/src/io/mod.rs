@@ -1,8 +1,8 @@
 pub mod bed_writer;
 pub mod bedgraph_writer;
 pub mod d4_reader;
-pub mod depth_reader;
 pub mod tsv_writer;
+pub mod value_reader;
 
 use color_eyre::Result;
 use color_eyre::eyre::eyre;

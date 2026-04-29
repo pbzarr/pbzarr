@@ -1,4 +1,4 @@
-use crate::io::depth_reader::{DepthChunk, DepthReader};
+use crate::io::value_reader::{ValueChunk, ValueDtype, ValueReader};
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use crossbeam_channel::bounded;
@@ -9,14 +9,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 pub struct ImportPipeline {
-    pub readers: Vec<Box<dyn DepthReader>>,
+    pub readers: Vec<Box<dyn ValueReader>>,
     pub track: Arc<Track>,
     pub contigs: Vec<(String, u64)>,
     pub chunk_size: u64,
     pub reader_workers: usize,
     pub writer_workers: usize,
     pub progress: Option<ProgressBar>,
-    pub dtype: String,
+    pub dtype: ValueDtype,
     pub has_columns: bool,
 }
 
@@ -70,7 +70,7 @@ impl ImportPipeline {
         // Wrap readers in Arc<Mutex> so multiple worker threads can lock them when reading.
         // Each reader holds its own D4 view state; one mutex per reader avoids global contention
         // across N inputs.
-        let readers_locks: Vec<Arc<Mutex<Box<dyn DepthReader>>>> = self
+        let readers_locks: Vec<Arc<Mutex<Box<dyn ValueReader>>>> = self
             .readers
             .into_iter()
             .map(|r| Arc::new(Mutex::new(r)))
@@ -90,7 +90,7 @@ impl ImportPipeline {
         drop(task_tx);
 
         let chunk_size = self.chunk_size;
-        let dtype = self.dtype.clone();
+        let dtype = self.dtype;
         let has_columns = self.has_columns;
 
         let mut reader_handles = Vec::with_capacity(self.reader_workers);
@@ -98,15 +98,14 @@ impl ImportPipeline {
             let task_rx = task_rx.clone();
             let write_tx = write_tx.clone();
             let readers_locks = readers_locks.clone();
-            let dtype = dtype.clone();
             reader_handles.push(thread::spawn(move || -> Result<()> {
                 while let Ok(task) = task_rx.recv() {
                     let chunk_start = task.chunk_idx * chunk_size;
                     let chunk_end = (chunk_start + chunk_size).min(task.contig_length);
                     let len = (chunk_end - chunk_start) as usize;
 
-                    let payload = match dtype.as_str() {
-                        "uint32" => {
+                    let payload = match dtype {
+                        ValueDtype::U32 => {
                             if has_columns {
                                 let n = readers_locks.len();
                                 let mut data = ndarray::Array2::<u32>::zeros((len, n));
@@ -115,7 +114,7 @@ impl ImportPipeline {
                                     let chunk =
                                         r.read_chunk(&task.contig, chunk_start, chunk_end)?;
                                     let arr = match chunk {
-                                        DepthChunk::U32(a) => a,
+                                        ValueChunk::U32(a) => a,
                                         other => {
                                             return Err(eyre!(
                                                 "expected U32 from reader, got {:?}",
@@ -140,7 +139,7 @@ impl ImportPipeline {
                                 let mut r = readers_locks[0].lock().unwrap();
                                 let chunk = r.read_chunk(&task.contig, chunk_start, chunk_end)?;
                                 match chunk {
-                                    DepthChunk::U32(a) => ChunkPayload::U32_1D(a),
+                                    ValueChunk::U32(a) => ChunkPayload::U32_1D(a),
                                     other => {
                                         return Err(eyre!(
                                             "expected U32 chunk, got {:?}",
@@ -150,7 +149,7 @@ impl ImportPipeline {
                                 }
                             }
                         }
-                        d => return Err(eyre!("unsupported import dtype: {d}")),
+                        other => return Err(eyre!("unsupported import dtype: {other}")),
                     };
 
                     let wt = WriteTask {
@@ -267,16 +266,16 @@ mod tests {
         value: u32,
     }
 
-    impl DepthReader for MockReader {
-        fn dtype(&self) -> &str {
-            "uint32"
+    impl ValueReader for MockReader {
+        fn dtype(&self) -> ValueDtype {
+            ValueDtype::U32
         }
         fn contigs(&self) -> &[(String, u64)] {
             &self.contigs
         }
-        fn read_chunk(&mut self, _contig: &str, start: u64, end: u64) -> Result<DepthChunk> {
+        fn read_chunk(&mut self, _contig: &str, start: u64, end: u64) -> Result<ValueChunk> {
             let len = (end - start) as usize;
-            Ok(DepthChunk::U32(Array1::from_elem(len, self.value)))
+            Ok(ValueChunk::U32(Array1::from_elem(len, self.value)))
         }
     }
 
@@ -296,7 +295,7 @@ mod tests {
         };
         let track = Arc::new(store.create_track("depths", cfg).unwrap());
 
-        let readers: Vec<Box<dyn DepthReader>> = vec![
+        let readers: Vec<Box<dyn ValueReader>> = vec![
             Box::new(MockReader {
                 contigs: vec![("chr1".into(), 300)],
                 value: 5,
@@ -315,7 +314,7 @@ mod tests {
             reader_workers: 2,
             writer_workers: 2,
             progress: None,
-            dtype: "uint32".into(),
+            dtype: ValueDtype::U32,
             has_columns: true,
         };
         pipeline.run().unwrap();

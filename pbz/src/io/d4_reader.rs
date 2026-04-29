@@ -1,4 +1,4 @@
-use crate::io::depth_reader::{DepthChunk, DepthReader};
+use crate::io::value_reader::{ValueChunk, ValueDtype, ValueReader};
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
 use d4::ssio::D4TrackReader;
@@ -45,16 +45,16 @@ impl D4Reader {
     }
 }
 
-impl DepthReader for D4Reader {
-    fn dtype(&self) -> &str {
-        "uint32"
+impl ValueReader for D4Reader {
+    fn dtype(&self) -> ValueDtype {
+        ValueDtype::U32
     }
 
     fn contigs(&self) -> &[(String, u64)] {
         &self.contigs
     }
 
-    fn read_chunk(&mut self, contig: &str, start: u64, end: u64) -> Result<DepthChunk> {
+    fn read_chunk(&mut self, contig: &str, start: u64, end: u64) -> Result<ValueChunk> {
         let s32 = u32::try_from(start)
             .map_err(|_| eyre!("D4 reads require start <= u32::MAX, got {start}"))?;
         let e32 =
@@ -85,7 +85,7 @@ impl DepthReader for D4Reader {
             })?;
             buf.push(depth);
         }
-        Ok(DepthChunk::U32(Array1::from_vec(buf)))
+        Ok(ValueChunk::U32(Array1::from_vec(buf)))
     }
 }
 

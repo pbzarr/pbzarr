@@ -8,7 +8,7 @@ use crate::commands::input_resolve::{
     InputFormat, InputSpec, check_unique, parse_filelist, parse_input_spec,
 };
 use crate::io::d4_reader::D4Reader;
-use crate::io::depth_reader::DepthReader;
+use crate::io::value_reader::{ValueDtype, ValueReader};
 use crate::limits::check_fd_budget;
 use crate::pipeline::ImportPipeline;
 use crate::progress::maybe_bar;
@@ -38,29 +38,30 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
     let n_threads = threads.unwrap_or_else(num_cpus::get).max(1);
     check_fd_budget(specs.len(), n_threads)?;
 
-    let readers: Vec<Box<dyn DepthReader>> = specs
+    let readers: Vec<Box<dyn ValueReader>> = specs
         .iter()
         .map(|s| match s.format {
             InputFormat::D4 => {
                 let r = D4Reader::open(&s.path)?;
-                Ok(Box::new(r) as Box<dyn DepthReader>)
+                Ok(Box::new(r) as Box<dyn ValueReader>)
             }
         })
         .collect::<Result<_>>()?;
 
-    let dtype = match args.dtype.clone() {
-        Some(d) => d,
-        None => {
-            let dts: Vec<(String, &str)> = specs
+    let first_dtype = readers[0].dtype();
+    for r in readers.iter().skip(1) {
+        if r.dtype() != first_dtype {
+            let pairs: Vec<(String, ValueDtype)> = specs
                 .iter()
                 .zip(readers.iter())
                 .map(|(s, r)| (s.path.display().to_string(), r.dtype()))
                 .collect();
-            if dts.iter().any(|(_, d)| *d != dts[0].1) {
-                return Err(eyre!("input dtypes disagree: {:?}", dts));
-            }
-            dts[0].1.to_string()
+            return Err(eyre!("input dtypes disagree: {:?}", pairs));
         }
+    }
+    let dtype: ValueDtype = match args.dtype.as_deref() {
+        Some(d) => parse_dtype_override(d)?,
+        None => first_dtype,
     };
 
     let first_contigs = readers[0].contigs().to_vec();
@@ -94,7 +95,7 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
     // v1: every column is one input; track is always columnar.
     let cols: Vec<String> = specs.iter().map(|s| s.column_name.clone()).collect();
     let cfg = TrackConfig {
-        dtype: dtype.clone(),
+        dtype: dtype.as_str().to_string(),
         columns: Some(cols),
         chunk_size: args.chunk_size,
         column_chunk_size: args.column_chunk_size,
@@ -123,4 +124,19 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
     };
     pipeline.run()?;
     Ok(())
+}
+
+fn parse_dtype_override(s: &str) -> Result<ValueDtype> {
+    match s {
+        "uint8" => Ok(ValueDtype::U8),
+        "uint16" => Ok(ValueDtype::U16),
+        "uint32" => Ok(ValueDtype::U32),
+        "int8" => Ok(ValueDtype::I8),
+        "int16" => Ok(ValueDtype::I16),
+        "int32" => Ok(ValueDtype::I32),
+        "float32" => Ok(ValueDtype::F32),
+        "float64" => Ok(ValueDtype::F64),
+        "bool" => Ok(ValueDtype::Bool),
+        d => Err(eyre!("unsupported --dtype value: {d}")),
+    }
 }
