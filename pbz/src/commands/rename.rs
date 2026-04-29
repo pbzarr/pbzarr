@@ -1,8 +1,10 @@
 use color_eyre::Result;
-use color_eyre::eyre::eyre;
+use pbzarr::PbzStore;
 
 use crate::cli::RenameArgs;
 
-pub fn run(_args: RenameArgs) -> Result<()> {
-    Err(eyre!("not yet implemented"))
+pub fn run(args: RenameArgs) -> Result<()> {
+    let store = PbzStore::open(&args.store)?;
+    store.rename_track(&args.old_name, &args.new_name)?;
+    Ok(())
 }
