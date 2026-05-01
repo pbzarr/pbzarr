@@ -34,6 +34,18 @@ pub enum PbzError {
     #[error("metadata error: {0}")]
     Metadata(String),
 
+    #[error("track {track:?} missing required 'layout' attribute")]
+    MissingLayout { track: String },
+
+    #[error("track {track:?} has unrecognized layout {layout:?}")]
+    UnknownLayout { track: String, layout: String },
+
+    #[error(
+        "single-sample data MUST be stored as a 1D track (no samples array); \
+         use TrackConfig without samples for a single sample"
+    )]
+    SingleSampleMustBe1D,
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

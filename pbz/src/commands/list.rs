@@ -10,12 +10,12 @@ pub fn run(args: ListArgs) -> Result<()> {
         store.tracks()?
     } else if args.contigs {
         store.contigs().to_vec()
-    } else if let Some(track_name) = args.columns {
+    } else if let Some(track_name) = args.samples {
         let track = store.track(&track_name)?;
         track
-            .columns()
+            .samples()
             .map(|c| c.to_vec())
-            .ok_or_else(|| eyre!("track '{track_name}' is scalar; no columns to list"))?
+            .ok_or_else(|| eyre!("track '{track_name}' is scalar; no samples to list"))?
     } else {
         unreachable!("clap ArgGroup ensures one mode flag is set")
     };

@@ -11,7 +11,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
     let store = PbzStore::open(&args.store)?;
     let track = store.track(&args.track)?;
     let fmt = pick_format(args.format, Some(&args.output), &track)?;
-    let plan = build_plan(&store, &track, args.region.as_deref(), &args.column)?;
+    let plan = build_plan(&store, &track, args.region.as_deref(), &args.sample)?;
     let f = BufWriter::new(File::create(&args.output)?);
     let writer = make_writer(fmt, f, &track, args.include_zero)?;
     run_export(&track, &plan, writer)

@@ -17,7 +17,7 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
     if args.chunk_size == 0 {
         return Err(eyre!("--chunk-size must be greater than 0"));
     }
-    if args.column_chunk_size == 0 {
+    if args.sample_chunk_size == 0 {
         return Err(eyre!("--column-chunk-size must be greater than 0"));
     }
 
@@ -92,13 +92,15 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
         PbzStore::create(&args.store, &names, &lens)?
     };
 
-    // v1: every column is one input; track is always columnar.
-    let cols: Vec<String> = specs.iter().map(|s| s.column_name.clone()).collect();
+    // v1: every sample is one input. With a single input we use a 1D scalar
+    // track (per spec: single-sample data MUST be 1D); otherwise multi-sample 2D.
+    let sample_names: Vec<String> = specs.iter().map(|s| s.column_name.clone()).collect();
+    let has_samples = sample_names.len() > 1;
     let cfg = TrackConfig {
         dtype: dtype.as_str().to_string(),
-        columns: Some(cols),
+        samples: if has_samples { Some(sample_names) } else { None },
         chunk_size: args.chunk_size,
-        column_chunk_size: args.column_chunk_size,
+        sample_chunk_size: args.sample_chunk_size,
         description: args.description.clone(),
         source: args.source.clone(),
         extra: serde_json::Map::new(),
@@ -120,7 +122,7 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
         writer_workers: n_threads,
         progress,
         dtype,
-        has_columns: true,
+        has_samples,
     };
     pipeline.run()?;
     Ok(())

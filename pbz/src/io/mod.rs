@@ -54,11 +54,11 @@ pub fn validate_compatible(fmt: Format, track: &Track) -> Result<()> {
                     track.name()
                 ));
             }
-            if track.has_columns() && track.columns().map(|c| c.len()).unwrap_or(0) > 1 {
+            if track.has_samples() && track.samples().map(|c| c.len()).unwrap_or(0) > 1 {
                 return Err(eyre!(
                     "bedgraph requires a single-column track; '{}' has {} columns. Try --format tsv or --column NAME.",
                     track.name(),
-                    track.columns().map(|c| c.len()).unwrap_or(0)
+                    track.samples().map(|c| c.len()).unwrap_or(0)
                 ));
             }
         }

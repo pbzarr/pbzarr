@@ -17,7 +17,7 @@ pub struct ImportPipeline {
     pub writer_workers: usize,
     pub progress: Option<ProgressBar>,
     pub dtype: ValueDtype,
-    pub has_columns: bool,
+    pub has_samples: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -91,7 +91,7 @@ impl ImportPipeline {
 
         let chunk_size = self.chunk_size;
         let dtype = self.dtype;
-        let has_columns = self.has_columns;
+        let has_samples = self.has_samples;
 
         let mut reader_handles = Vec::with_capacity(self.reader_workers);
         for _ in 0..self.reader_workers {
@@ -106,7 +106,7 @@ impl ImportPipeline {
 
                     let payload = match dtype {
                         ValueDtype::U32 => {
-                            if has_columns {
+                            if has_samples {
                                 let n = readers_locks.len();
                                 let mut data = ndarray::Array2::<u32>::zeros((len, n));
                                 for (col_idx, reader) in readers_locks.iter().enumerate() {
@@ -286,9 +286,9 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[300u64]).unwrap();
         let cfg = TrackConfig {
             dtype: "uint32".into(),
-            columns: Some(vec!["a".into(), "b".into()]),
+            samples: Some(vec!["a".into(), "b".into()]),
             chunk_size: 100,
-            column_chunk_size: 2,
+            sample_chunk_size: 2,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
@@ -315,7 +315,7 @@ mod tests {
             writer_workers: 2,
             progress: None,
             dtype: ValueDtype::U32,
-            has_columns: true,
+            has_samples: true,
         };
         pipeline.run().unwrap();
 
