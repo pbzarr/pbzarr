@@ -19,6 +19,11 @@ const ROOT_ATTR_KEY: &str = "perbase_zarr";
 /// Attribute key on track groups identifying them as PBZ tracks.
 const TRACK_ATTR_KEY: &str = "perbase_zarr_track";
 
+/// Layouts this implementation knows how to enumerate. Tracks with any other
+/// layout are silently skipped (with a `log::warn!`) to allow forward-compat
+/// readers to coexist with older writers that don't recognize new layouts.
+const KNOWN_LAYOUTS: &[&str] = &[crate::track::PER_BASE_LAYOUT];
+
 /// A PBZ (Per-Base Zarr) store.
 ///
 /// Wraps a Zarr v3 root group and provides access to contigs and tracks.
@@ -28,6 +33,43 @@ pub struct PbzStore {
     path: PathBuf,
     contigs: Vec<String>,
     contig_lengths: HashMap<String, u64>,
+    coordinate_space: Option<String>,
+}
+
+/// Builder for [`PbzStore::create`] — required when supplying optional
+/// attributes such as `coordinate_space`.
+pub struct PbzStoreBuilder<'a> {
+    path: &'a Path,
+    contigs: Option<(&'a [String], &'a [u64])>,
+    coordinate_space: Option<String>,
+}
+
+impl<'a> PbzStoreBuilder<'a> {
+    pub fn new(path: &'a Path) -> Self {
+        Self {
+            path,
+            contigs: None,
+            coordinate_space: None,
+        }
+    }
+
+    pub fn contigs(mut self, names: &'a [String], lengths: &'a [u64]) -> Self {
+        self.contigs = Some((names, lengths));
+        self
+    }
+
+    /// Optional `coordinate_space` root attribute (e.g. `"GRCh38"`).
+    pub fn coordinate_space(mut self, name: impl Into<String>) -> Self {
+        self.coordinate_space = Some(name.into());
+        self
+    }
+
+    pub fn create(self) -> Result<PbzStore> {
+        let (contigs, lengths) = self
+            .contigs
+            .ok_or_else(|| PbzError::Metadata("contigs are required".into()))?;
+        PbzStore::create_inner(self.path, contigs, lengths, self.coordinate_space)
+    }
 }
 
 impl fmt::Debug for PbzStore {
@@ -57,6 +99,21 @@ impl PbzStore {
         contigs: &[String],
         contig_lengths: &[u64],
     ) -> Result<Self> {
+        Self::create_inner(path.as_ref(), contigs, contig_lengths, None)
+    }
+
+    /// Builder entry point for [`PbzStore`]. Use when you need to set
+    /// optional root attributes such as `coordinate_space`.
+    pub fn builder(path: &Path) -> PbzStoreBuilder<'_> {
+        PbzStoreBuilder::new(path)
+    }
+
+    fn create_inner(
+        path: &Path,
+        contigs: &[String],
+        contig_lengths: &[u64],
+        coordinate_space: Option<String>,
+    ) -> Result<Self> {
         if contigs.is_empty() {
             return Err(PbzError::Metadata("contigs must not be empty".into()));
         }
@@ -68,16 +125,20 @@ impl PbzStore {
             )));
         }
 
-        let path = path.as_ref().to_path_buf();
+        let path = path.to_path_buf();
         let store: ReadableWritableListableStorage =
             Arc::new(FilesystemStore::new(&path).map_err(|e| PbzError::Store(e.to_string()))?);
 
         // Root group with PBZ version attribute
+        // pbz[impl group.attrs.namespace]
+        // pbz[impl group.attrs.version]
         let mut root_attrs = serde_json::Map::new();
-        root_attrs.insert(
-            ROOT_ATTR_KEY.into(),
-            serde_json::json!({ "version": PERBASE_ZARR_VERSION }),
-        );
+        let mut pbz_meta = serde_json::json!({ "version": PERBASE_ZARR_VERSION });
+        // pbz[impl group.attrs.coordinate_space]
+        if let Some(ref cs) = coordinate_space {
+            pbz_meta["coordinate_space"] = serde_json::Value::String(cs.clone());
+        }
+        root_attrs.insert(ROOT_ATTR_KEY.into(), pbz_meta);
 
         let group = GroupBuilder::new()
             .attributes(root_attrs)
@@ -144,6 +205,7 @@ impl PbzStore {
             path,
             contigs: contigs.to_vec(),
             contig_lengths: contig_lengths_map,
+            coordinate_space,
         })
     }
 
@@ -180,6 +242,12 @@ impl PbzStore {
                 PbzError::Metadata("root 'perbase_zarr' attribute missing 'version' field".into())
             })?;
 
+        // Optional coordinate_space attribute (added in spec v0.1).
+        let coordinate_space = pbz_meta
+            .get("coordinate_space")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Read /contigs array
         let contigs_array = zarrs::array::Array::open(store.clone(), "/contigs")
             .map_err(|e| PbzError::Store(e.to_string()))?;
@@ -215,7 +283,14 @@ impl PbzStore {
             path,
             contigs,
             contig_lengths,
+            coordinate_space,
         })
+    }
+
+    /// Optional `coordinate_space` root attribute (e.g. `"GRCh38"`).
+    /// Returns `None` if the store was created without one.
+    pub fn coordinate_space(&self) -> Option<&str> {
+        self.coordinate_space.as_deref()
     }
 
     /// The filesystem path of this store.
@@ -354,8 +429,25 @@ where
             format!("{prefix}/{name_part}")
         };
 
-        if child.attributes().contains_key(TRACK_ATTR_KEY) {
-            out.push(relative_name.clone());
+        if let Some(meta) = child.attributes().get(TRACK_ATTR_KEY) {
+            // pbz[impl forward.layout.no-error]
+            // pbz[impl forward.layout.warn-skip]
+            let layout = meta.get("layout").and_then(|v| v.as_str());
+            match layout {
+                None => {
+                    log::warn!(
+                        "track {relative_name:?} missing 'layout' attribute; skipping"
+                    );
+                }
+                Some(l) if !KNOWN_LAYOUTS.contains(&l) => {
+                    log::warn!(
+                        "track {relative_name:?} has unrecognized layout {l:?}; skipping"
+                    );
+                }
+                Some(_) => {
+                    out.push(relative_name.clone());
+                }
+            }
         }
 
         // Recurse into subgroups to find nested tracks
@@ -508,10 +600,10 @@ mod tests {
         track_attrs.insert(
             TRACK_ATTR_KEY.into(),
             serde_json::json!({
+                "layout": "per_base",
                 "dtype": "uint32",
                 "chunk_size": 1_000_000,
-                "column_chunk_size": 16,
-                "has_columns": true
+                "sample_chunk_size": 16,
             }),
         );
 
@@ -544,9 +636,9 @@ mod tests {
         track_attrs.insert(
             TRACK_ATTR_KEY.into(),
             serde_json::json!({
+                "layout": "per_base",
                 "dtype": "bool",
                 "chunk_size": 1_000_000,
-                "has_columns": false
             }),
         );
 

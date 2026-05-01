@@ -1230,6 +1230,7 @@ name = "pbzarr"
 version = "0.1.0"
 dependencies = [
  "fs-err",
+ "log",
  "ndarray",
  "serde",
  "serde_json",

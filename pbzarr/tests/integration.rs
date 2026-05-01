@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2};
-use pbzarr::{PbzStore, TrackConfig};
+use pbzarr::{PbzError, PbzStore, TrackConfig};
 use tempfile::TempDir;
 
 #[test]
@@ -284,4 +284,259 @@ fn edit_lifecycle_round_trip() {
     store.drop_track("coverage").unwrap();
     assert!(store.tracks().unwrap().is_empty());
     assert!(!path.join("tracks/coverage").exists());
+}
+
+// pbz[verify track.attrs.layout]
+#[test]
+fn track_writes_layout_attribute() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.pbz.zarr");
+    let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
+    store
+        .create_track(
+            "t",
+            TrackConfig {
+                dtype: "float32".into(),
+                samples: Some(vec!["A".into(), "B".into()]),
+                chunk_size: 100,
+                sample_chunk_size: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    let raw_store: zarrs::storage::ReadableWritableListableStorage =
+        std::sync::Arc::new(zarrs::filesystem::FilesystemStore::new(&path).unwrap());
+    let group = zarrs::group::Group::open(raw_store, "/tracks/t").unwrap();
+    let attrs = group
+        .attributes()
+        .get("perbase_zarr_track")
+        .unwrap()
+        .clone();
+    assert_eq!(attrs["layout"], "per_base");
+}
+
+// pbz[verify track.attrs.layout]
+#[test]
+fn track_read_requires_layout() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.pbz.zarr");
+    let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
+    store
+        .create_track(
+            "t",
+            TrackConfig {
+                dtype: "float32".into(),
+                samples: None,
+                chunk_size: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    // Strip layout via raw zarr write
+    let raw_store: zarrs::storage::ReadableWritableListableStorage =
+        std::sync::Arc::new(zarrs::filesystem::FilesystemStore::new(&path).unwrap());
+    let mut group = zarrs::group::Group::open(raw_store.clone(), "/tracks/t").unwrap();
+    let mut attrs = group
+        .attributes()
+        .get("perbase_zarr_track")
+        .unwrap()
+        .clone();
+    attrs.as_object_mut().unwrap().remove("layout");
+    group
+        .attributes_mut()
+        .insert("perbase_zarr_track".into(), attrs);
+    group.store_metadata().unwrap();
+
+    // Track is still listed (collect_tracks now skips with a warn — the group
+    // has no recognizable layout). Calling track() directly errors with
+    // MissingLayout.
+    let store2 = PbzStore::open(&path).unwrap();
+    // Track should not appear in tracks() output (silent skip).
+    assert!(!store2.tracks().unwrap().contains(&"t".to_string()));
+}
+
+// pbz[verify group.attrs.coordinate_space]
+#[test]
+fn store_coordinate_space_roundtrip() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.pbz.zarr");
+    let names = vec!["chr1".to_string()];
+    let lens = vec![1000u64];
+    let store = PbzStore::builder(&path)
+        .contigs(&names, &lens)
+        .coordinate_space("GRCh38")
+        .create()
+        .unwrap();
+    drop(store);
+    let s = PbzStore::open(&path).unwrap();
+    assert_eq!(s.coordinate_space(), Some("GRCh38"));
+}
+
+// pbz[verify group.attrs.coordinate_space]
+#[test]
+fn store_coordinate_space_optional() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.pbz.zarr");
+    let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
+    drop(store);
+    let s = PbzStore::open(&path).unwrap();
+    assert_eq!(s.coordinate_space(), None);
+}
+
+// pbz[verify per_base.data.single-sample-1d]
+#[test]
+fn create_track_rejects_single_sample() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.pbz.zarr");
+    let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
+    let cfg = TrackConfig {
+        dtype: "float32".into(),
+        samples: Some(vec!["only".into()]),
+        chunk_size: 100,
+        sample_chunk_size: 1,
+        ..Default::default()
+    };
+    let err = store.create_track("t", cfg).unwrap_err();
+    assert!(matches!(err, PbzError::SingleSampleMustBe1D));
+}
+
+// pbz[verify forward.layout.no-error]
+// pbz[verify forward.layout.warn-skip]
+#[test]
+fn unknown_layout_skipped_on_list() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.pbz.zarr");
+    let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
+    store
+        .create_track(
+            "good",
+            TrackConfig {
+                dtype: "float32".into(),
+                samples: None,
+                chunk_size: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    // Inject a future-layout track via raw zarr write.
+    let raw_store: zarrs::storage::ReadableWritableListableStorage =
+        std::sync::Arc::new(zarrs::filesystem::FilesystemStore::new(&path).unwrap());
+    let mut group_attrs = serde_json::Map::new();
+    group_attrs.insert(
+        "perbase_zarr_track".into(),
+        serde_json::json!({"layout": "interval", "dtype": "float32"}),
+    );
+    let g = zarrs::group::GroupBuilder::new()
+        .attributes(group_attrs)
+        .build(raw_store, "/tracks/future")
+        .unwrap();
+    g.store_metadata().unwrap();
+    drop(store);
+
+    let s2 = PbzStore::open(&path).unwrap();
+    let names = s2.tracks().unwrap();
+    assert!(names.contains(&"good".to_string()));
+    assert!(!names.contains(&"future".to_string()));
+}
+
+// pbz[verify forward.layout.no-error]
+#[test]
+fn unknown_layout_does_not_error_on_open() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.pbz.zarr");
+    let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
+    drop(store);
+
+    let raw_store: zarrs::storage::ReadableWritableListableStorage =
+        std::sync::Arc::new(zarrs::filesystem::FilesystemStore::new(&path).unwrap());
+    let mut group_attrs = serde_json::Map::new();
+    group_attrs.insert(
+        "perbase_zarr_track".into(),
+        serde_json::json!({"layout": "interval"}),
+    );
+    let g = zarrs::group::GroupBuilder::new()
+        .attributes(group_attrs)
+        .build(raw_store, "/tracks/future")
+        .unwrap();
+    g.store_metadata().unwrap();
+
+    PbzStore::open(&path).expect("open must not error on unknown layout");
+}
+
+// pbz[verify forward.preserve-roundtrip]
+// pbz[verify track.attrs.preserve-unknown]
+#[test]
+fn track_preserves_unknown_attrs_roundtrip() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.pbz.zarr");
+    let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
+    store
+        .create_track(
+            "t",
+            TrackConfig {
+                dtype: "float32".into(),
+                samples: Some(vec!["A".into(), "B".into()]),
+                chunk_size: 100,
+                sample_chunk_size: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    // Inject an unknown attr via raw zarr.
+    let raw_store: zarrs::storage::ReadableWritableListableStorage =
+        std::sync::Arc::new(zarrs::filesystem::FilesystemStore::new(&path).unwrap());
+    {
+        let mut g = zarrs::group::Group::open(raw_store.clone(), "/tracks/t").unwrap();
+        let mut attrs = g
+            .attributes()
+            .get("perbase_zarr_track")
+            .unwrap()
+            .clone();
+        attrs["future_v2_field"] = serde_json::json!({"hello": "world"});
+        g.attributes_mut()
+            .insert("perbase_zarr_track".into(), attrs);
+        g.store_metadata().unwrap();
+    }
+
+    // Re-open via public API and rewrite metadata via set_description
+    // — unknown keys must survive.
+    let store2 = PbzStore::open(&path).unwrap();
+    let mut track = store2.track("t").unwrap();
+    track.set_description(Some("rewritten")).unwrap();
+    drop(track);
+    drop(store2);
+
+    let g2 = zarrs::group::Group::open(raw_store, "/tracks/t").unwrap();
+    let final_attrs = g2.attributes().get("perbase_zarr_track").unwrap();
+    assert_eq!(final_attrs["future_v2_field"]["hello"], "world");
+    assert_eq!(final_attrs["layout"], "per_base");
+    assert_eq!(final_attrs["description"], "rewritten");
+}
+
+// pbz[verify track.attrs.layout]
+#[test]
+fn track_layout_accessor_returns_per_base() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.pbz.zarr");
+    let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
+    store
+        .create_track(
+            "t",
+            TrackConfig {
+                dtype: "float32".into(),
+                samples: None,
+                chunk_size: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let track = store.track("t").unwrap();
+    assert_eq!(track.layout(), "per_base");
 }
