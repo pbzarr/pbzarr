@@ -148,6 +148,7 @@ impl Track {
 
         // Build track metadata attribute: standard fields + extra
         // pbz[impl track.attrs.namespace]
+        // pbz[impl per_base.attrs.namespace]
         // pbz[impl track.attrs.layout]
         // pbz[impl per_base.attrs.chunk_size]
         let mut track_meta = serde_json::json!({
@@ -165,6 +166,9 @@ impl Track {
             track_meta["source"] = serde_json::json!(src);
         }
         // pbz[impl track.attrs.preserve-unknown]
+        // pbz[impl reserved.namespace.perbase_zarr]
+        // pbz[impl reserved.preserve-unknown]
+        // pbz[impl forward.preserve-roundtrip]
         if let serde_json::Value::Object(ref mut map) = track_meta {
             for (k, v) in &config.extra {
                 map.insert(k.clone(), v.clone());
@@ -223,6 +227,7 @@ impl Track {
             let mut builder =
                 ArrayBuilder::new(shape, chunks, zarr_dtype.clone(), fill_value.clone());
 
+            // pbz[impl compression.codec-agnostic]
             if config.dtype == "bool" {
                 builder.array_to_bytes_codec(Arc::new(PackBitsCodec::default()));
             } else {
@@ -774,6 +779,7 @@ mod tests {
         assert!(matches!(err, PbzError::InvalidDtype { .. }));
     }
 
+    // pbz[verify missing.fill_value.defaults]
     #[test]
     fn fill_values() {
         assert_eq!(

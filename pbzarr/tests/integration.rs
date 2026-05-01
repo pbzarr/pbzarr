@@ -7,9 +7,11 @@ use tempfile::TempDir;
 // pbz[verify contigs.array]
 // pbz[verify contigs.lengths]
 // pbz[verify contigs.order]
+// pbz[verify coords.contig-name-match]
 // pbz[verify per_base.data.location]
 // pbz[verify per_base.data.shape-2d]
 // pbz[verify per_base.data.dim-names]
+// pbz[verify per_base.data.dtype-match]
 // pbz[verify per_base.samples.array]
 // pbz[verify per_base.samples.order]
 // pbz[verify per_base.attrs.dtype]
@@ -89,6 +91,7 @@ fn full_round_trip() {
 // pbz[verify per_base.data.shape-1d]
 // pbz[verify missing.fill_value]
 // pbz[verify compression.default]
+// pbz[verify compression.codec-agnostic]
 #[test]
 fn bool_scalar_track_round_trip() {
     let dir = TempDir::new().unwrap();
@@ -305,6 +308,8 @@ fn edit_lifecycle_round_trip() {
 }
 
 // pbz[verify track.attrs.layout]
+// pbz[verify track.attrs.namespace]
+// pbz[verify per_base.attrs.namespace]
 #[test]
 fn track_writes_layout_attribute() {
     let dir = TempDir::new().unwrap();
@@ -405,6 +410,23 @@ fn store_coordinate_space_optional() {
     assert_eq!(s.coordinate_space(), None);
 }
 
+// pbz[verify per_base.samples.unique]
+#[test]
+fn create_track_rejects_duplicate_samples() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.pbz.zarr");
+    let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
+    let cfg = TrackConfig {
+        dtype: "float32".into(),
+        samples: Some(vec!["s1".into(), "s2".into(), "s1".into()]),
+        chunk_size: 100,
+        sample_chunk_size: 1,
+        ..Default::default()
+    };
+    let err = store.create_track("t", cfg).unwrap_err();
+    assert!(matches!(err, PbzError::Metadata(_)));
+}
+
 // pbz[verify per_base.data.single-sample-1d]
 #[test]
 fn create_track_rejects_single_sample() {
@@ -488,6 +510,8 @@ fn unknown_layout_does_not_error_on_open() {
 
 // pbz[verify forward.preserve-roundtrip]
 // pbz[verify track.attrs.preserve-unknown]
+// pbz[verify reserved.namespace.perbase_zarr]
+// pbz[verify reserved.preserve-unknown]
 #[test]
 fn track_preserves_unknown_attrs_roundtrip() {
     let dir = TempDir::new().unwrap();

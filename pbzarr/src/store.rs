@@ -410,6 +410,7 @@ impl PbzStore {
 }
 
 /// Recursively walk child groups looking for ones with the track attribute.
+// pbz[impl group.tracks.nesting]
 fn collect_tracks<T>(group: &Group<T>, prefix: &str, out: &mut Vec<String>) -> Result<()>
 where
     T: zarrs::storage::ReadableStorageTraits + zarrs::storage::ListableStorageTraits + ?Sized,
@@ -621,6 +622,7 @@ mod tests {
         assert_eq!(tracks, vec!["depths"]);
     }
 
+    // pbz[verify group.tracks.nesting]
     #[test]
     fn tracks_nested() {
         let dir = TempDir::new().unwrap();
