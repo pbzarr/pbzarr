@@ -149,6 +149,9 @@ impl PbzStore {
             .map_err(|e| PbzError::Store(e.to_string()))?;
 
         // /contigs — variable-length string array
+        // pbz[impl contigs.array]
+        // pbz[impl contigs.order]
+        // pbz[impl coords.contig-name-match]
         let num_contigs = contigs.len() as u64;
 
         let contigs_array = ArrayBuilder::new(
@@ -169,6 +172,7 @@ impl PbzStore {
             .map_err(|e| PbzError::Store(e.to_string()))?;
 
         // /contig_lengths — int64 array
+        // pbz[impl contigs.lengths]
         let lengths_array = ArrayBuilder::new(
             vec![num_contigs],
             vec![num_contigs],

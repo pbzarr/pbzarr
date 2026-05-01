@@ -2,6 +2,19 @@ use ndarray::{Array1, Array2};
 use pbzarr::{PbzError, PbzStore, TrackConfig};
 use tempfile::TempDir;
 
+// pbz[verify group.attrs.namespace]
+// pbz[verify group.attrs.version]
+// pbz[verify contigs.array]
+// pbz[verify contigs.lengths]
+// pbz[verify contigs.order]
+// pbz[verify per_base.data.location]
+// pbz[verify per_base.data.shape-2d]
+// pbz[verify per_base.data.dim-names]
+// pbz[verify per_base.samples.array]
+// pbz[verify per_base.samples.order]
+// pbz[verify per_base.attrs.dtype]
+// pbz[verify per_base.attrs.chunk_size]
+// pbz[verify per_base.attrs.sample_chunk_size]
 #[test]
 fn full_round_trip() {
     let dir = TempDir::new().unwrap();
@@ -73,6 +86,9 @@ fn full_round_trip() {
     assert_eq!(raw.shape(), &[5000, 3]);
 }
 
+// pbz[verify per_base.data.shape-1d]
+// pbz[verify missing.fill_value]
+// pbz[verify compression.default]
 #[test]
 fn bool_scalar_track_round_trip() {
     let dir = TempDir::new().unwrap();
@@ -159,6 +175,7 @@ fn multiple_tracks_same_store() {
     assert_eq!(track_names, vec!["depths", "mask"]);
 }
 
+// pbz[verify track.attrs.preserve-unknown]
 #[test]
 fn extra_metadata_round_trip_integration() {
     let dir = TempDir::new().unwrap();
@@ -201,6 +218,7 @@ fn extra_metadata_round_trip_integration() {
     assert_eq!(clam["populations"][1]["samples"][0], "s3");
 }
 
+// pbz[verify coords.zero-based-half-open]
 #[test]
 fn chunk_math_human_scale() {
     let dir = TempDir::new().unwrap();

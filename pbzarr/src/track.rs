@@ -504,6 +504,7 @@ impl Track {
 
     // -- Chunk math ---------------------------------------------------------
 
+    // pbz[impl coords.zero-based-half-open]
     /// Convert a 0-based position to a chunk index.
     pub fn position_to_chunk(&self, position: u64) -> u64 {
         position / self.metadata.chunk_size
