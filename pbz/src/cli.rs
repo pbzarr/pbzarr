@@ -98,6 +98,11 @@ pub struct ImportArgs {
     /// Override the inferred dtype.
     #[arg(long)]
     pub dtype: Option<String>,
+    /// Path to a FAI / chrom.sizes file with contigs (name and length, tab-separated).
+    /// Required only when creating a new store from BED inputs (BED files don't carry
+    /// contig info). Rejected when the store already exists or when all inputs are D4.
+    #[arg(long, value_name = "PATH")]
+    pub contigs: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]

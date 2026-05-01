@@ -4,9 +4,10 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InputFormat {
     D4,
+    Bed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,9 +57,15 @@ fn detect_format(path: &str) -> Result<InputFormat> {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".d4") || lower.ends_with(".d4.gz") {
         Ok(InputFormat::D4)
+    } else if lower.ends_with(".bed.gz") {
+        Ok(InputFormat::Bed)
+    } else if lower.ends_with(".bed") {
+        Err(eyre!(
+            "plain .bed not supported; only bgzipped .bed.gz: {path}"
+        ))
     } else {
         Err(eyre!(
-            "unsupported input extension for {path}: only .d4 and .d4.gz are recognized"
+            "unsupported input extension for {path}: only .d4, .d4.gz, and .bed.gz are recognized"
         ))
     }
 }
@@ -71,7 +78,9 @@ fn default_column_name(path: &str) -> Result<String> {
         .ok_or_else(|| eyre!("cannot derive column name from path: {path}"))?;
 
     let lower = file_name.to_ascii_lowercase();
-    let stem = if lower.ends_with(".d4.gz") {
+    let stem = if lower.ends_with(".bed.gz") {
+        &file_name[..file_name.len() - ".bed.gz".len()]
+    } else if lower.ends_with(".d4.gz") {
         &file_name[..file_name.len() - ".d4.gz".len()]
     } else if lower.ends_with(".d4") {
         &file_name[..file_name.len() - ".d4".len()]
@@ -182,6 +191,27 @@ mod tests {
         let s = parse_input_spec("/abs/sample.d4.gz").unwrap();
         assert_eq!(s.path, PathBuf::from("/abs/sample.d4.gz"));
         assert_eq!(s.column_name, "sample");
+    }
+
+    #[test]
+    fn parses_bed_gz() {
+        let s = parse_input_spec("/path/sample.bed.gz").unwrap();
+        assert_eq!(s.path, PathBuf::from("/path/sample.bed.gz"));
+        assert_eq!(s.column_name, "sample");
+        assert_eq!(s.format, InputFormat::Bed);
+    }
+
+    #[test]
+    fn parses_bed_gz_with_sample() {
+        let s = parse_input_spec("/path/foo.bed.gz:RENAMED").unwrap();
+        assert_eq!(s.column_name, "RENAMED");
+        assert_eq!(s.format, InputFormat::Bed);
+    }
+
+    #[test]
+    fn rejects_plain_bed() {
+        let err = parse_input_spec("file.bed").unwrap_err();
+        assert!(err.to_string().contains("unsupported") || err.to_string().contains("bgzipped"));
     }
 
     #[test]
