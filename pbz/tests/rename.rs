@@ -42,9 +42,9 @@ fn rename_track_new_exists() {
     let store = pbzarr::PbzStore::open(&f.path).unwrap();
     let cfg = pbzarr::TrackConfig {
         dtype: "uint32".into(),
-        columns: Some(vec!["x".into()]),
+        samples: None,
         chunk_size: 100,
-        column_chunk_size: 1,
+        sample_chunk_size: 1,
         description: None,
         source: None,
         extra: serde_json::Map::new(),

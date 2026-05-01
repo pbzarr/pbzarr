@@ -68,7 +68,7 @@ fn import_two_d4s_round_trips() {
         .args(["-i"])
         .arg(&d4_b)
         .args(["--chunk-size", "100"])
-        .args(["--column-chunk-size", "2"])
+        .args(["--sample-chunk-size", "2"])
         .args(["--no-progress"])
         .assert()
         .success();
@@ -130,7 +130,7 @@ fn import_filelist_round_trips() {
         .unwrap()
         .args(["list"])
         .arg(&store_path)
-        .args(["--columns", "depths"])
+        .args(["--samples", "depths"])
         .output()
         .unwrap();
     let s = String::from_utf8(out.stdout).unwrap();

@@ -5,7 +5,7 @@
 
 #![allow(dead_code)] // each test binary uses a subset
 
-use ndarray::Array2;
+use ndarray::{Array1, Array2};
 use pbzarr::{PbzStore, TrackConfig};
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -29,39 +29,76 @@ impl StoreFixture {
         Self { _dir: dir, path }
     }
 
-    /// Create a store and add a u32 columnar track named `name` with `num_samples`
-    /// columns each filled with `value`.
+    /// Create a store and add a u32 multi-sample track named `name` with
+    /// `num_samples` samples each filled with `value`. Requires `num_samples >= 2`
+    /// (single-sample data must be 1D per spec v0.1).
     pub fn with_uint32_track(name: &str, value: u32, num_samples: usize) -> Self {
+        assert!(
+            num_samples != 1,
+            "with_uint32_track: num_samples=1 is invalid; use with_single_sample_uint32 \
+             for the 1D single-sample case"
+        );
         let f = Self::empty();
         let store = PbzStore::open(&f.path).unwrap();
         let cfg = TrackConfig {
             dtype: "uint32".into(),
-            columns: Some((0..num_samples).map(|i| format!("s{i}")).collect()),
+            samples: Some((0..num_samples).map(|i| format!("s{i}")).collect()),
             chunk_size: 100,
-            column_chunk_size: 4,
+            sample_chunk_size: 4,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
         };
         let track = store.create_track(name, cfg).unwrap();
         let chr1 = Array2::<u32>::from_elem((1000, num_samples), value);
-        for chunk_idx in 0..10 {
+        for chunk_idx in 0..10usize {
             let start = chunk_idx * 100;
-            let chunk = chr1.slice(ndarray::s![start..start + 100, ..]).to_owned();
+            let chunk = chr1
+                .slice(ndarray::s![start..start + 100, ..])
+                .to_owned();
             track.write_chunk("chr1", chunk_idx as u64, chunk).unwrap();
         }
         let chr2 = Array2::<u32>::from_elem((500, num_samples), value);
-        for chunk_idx in 0..5 {
+        for chunk_idx in 0..5usize {
             let start = chunk_idx * 100;
-            let chunk = chr2.slice(ndarray::s![start..start + 100, ..]).to_owned();
+            let chunk = chr2
+                .slice(ndarray::s![start..start + 100, ..])
+                .to_owned();
             track.write_chunk("chr2", chunk_idx as u64, chunk).unwrap();
         }
         f
     }
 
-    /// Create a store with a single-column u32 track for bedGraph testing.
+    /// Create a store with a single-sample (1D) u32 track for bedGraph testing.
+    /// Per spec v0.1, single-sample data MUST be 1D (no `samples` array).
+    pub fn with_single_sample_uint32(name: &str) -> Self {
+        let f = Self::empty();
+        let store = PbzStore::open(&f.path).unwrap();
+        let cfg = TrackConfig {
+            dtype: "uint32".into(),
+            samples: None,
+            chunk_size: 100,
+            sample_chunk_size: 1,
+            description: None,
+            source: None,
+            extra: serde_json::Map::new(),
+        };
+        let track = store.create_track(name, cfg).unwrap();
+        let value: u32 = 7;
+        for chunk_idx in 0..10u64 {
+            let chunk = Array1::<u32>::from_elem(100, value);
+            track.write_chunk_1d("chr1", chunk_idx, chunk).unwrap();
+        }
+        for chunk_idx in 0..5u64 {
+            let chunk = Array1::<u32>::from_elem(100, value);
+            track.write_chunk_1d("chr2", chunk_idx, chunk).unwrap();
+        }
+        f
+    }
+
+    /// Backwards-compatible alias for tests that haven't been migrated yet.
     pub fn with_single_col_uint32(name: &str) -> Self {
-        Self::with_uint32_track(name, 7, 1)
+        Self::with_single_sample_uint32(name)
     }
 
     /// Create a store with a bool scalar track for BED testing.
@@ -70,16 +107,16 @@ impl StoreFixture {
         let store = PbzStore::open(&f.path).unwrap();
         let cfg = TrackConfig {
             dtype: "bool".into(),
-            columns: None,
+            samples: None,
             chunk_size: 100,
-            column_chunk_size: 1,
+            sample_chunk_size: 1,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
         };
         let track = store.create_track(name, cfg).unwrap();
         // Write all-true for chr1 first chunk (positions 0..100), default-false elsewhere.
-        let true_chunk = ndarray::Array1::<bool>::from_elem(100, true);
+        let true_chunk = Array1::<bool>::from_elem(100, true);
         track.write_chunk_1d("chr1", 0, true_chunk).unwrap();
         f
     }

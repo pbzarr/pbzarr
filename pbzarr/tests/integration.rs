@@ -14,7 +14,7 @@ fn full_round_trip() {
 
     let config = TrackConfig {
         dtype: "uint32".into(),
-        columns: Some(vec!["s1".into(), "s2".into(), "s3".into()]),
+        samples: Some(vec!["s1".into(), "s2".into(), "s3".into()]),
         chunk_size: 1000,
         description: Some("depth data".into()),
         source: Some("integration test".into()),
@@ -50,8 +50,8 @@ fn full_round_trip() {
 
     let track2 = store2.track("depths").unwrap();
     assert_eq!(track2.dtype(), "uint32");
-    assert!(track2.has_columns());
-    assert_eq!(track2.columns().unwrap(), &["s1", "s2", "s3"]);
+    assert!(track2.has_samples());
+    assert_eq!(track2.samples().unwrap(), &["s1", "s2", "s3"]);
     assert_eq!(track2.metadata().description.as_deref(), Some("depth data"));
 
     // Verify chr1 data
@@ -82,7 +82,7 @@ fn bool_scalar_track_round_trip() {
 
     let config = TrackConfig {
         dtype: "bool".into(),
-        columns: None,
+        samples: None,
         chunk_size: 1000,
         ..Default::default()
     };
@@ -108,7 +108,7 @@ fn bool_scalar_track_round_trip() {
     let track2 = store2.track("mask").unwrap();
 
     assert_eq!(track2.dtype(), "bool");
-    assert!(!track2.has_columns());
+    assert!(!track2.has_samples());
 
     let read0: Array1<bool> = track2.read_chunk_1d("chr1", 0).unwrap();
     assert!(read0.iter().all(|&v| v));
@@ -134,7 +134,7 @@ fn multiple_tracks_same_store() {
             "depths",
             TrackConfig {
                 dtype: "uint32".into(),
-                columns: Some(vec!["s1".into()]),
+                samples: Some(vec!["s1".into(), "s2".into()]),
                 chunk_size: 1000,
                 ..Default::default()
             },
@@ -146,7 +146,7 @@ fn multiple_tracks_same_store() {
             "mask",
             TrackConfig {
                 dtype: "bool".into(),
-                columns: None,
+                samples: None,
                 chunk_size: 1000,
                 ..Default::default()
             },
@@ -183,7 +183,7 @@ fn extra_metadata_round_trip_integration() {
             "callable",
             TrackConfig {
                 dtype: "uint16".into(),
-                columns: Some(vec!["pop1".into(), "pop2".into()]),
+                samples: Some(vec!["pop1".into(), "pop2".into()]),
                 chunk_size: 1000,
                 extra,
                 ..Default::default()
@@ -213,7 +213,7 @@ fn chunk_math_human_scale() {
             "depths",
             TrackConfig {
                 dtype: "uint32".into(),
-                columns: Some(vec!["s1".into()]),
+                samples: Some(vec!["s1".into(), "s2".into()]),
                 chunk_size: 1_000_000,
                 ..Default::default()
             },
@@ -248,9 +248,9 @@ fn edit_lifecycle_round_trip() {
             "depths",
             TrackConfig {
                 dtype: "uint32".into(),
-                columns: Some(vec!["s1".into()]),
+                samples: Some(vec!["s1".into(), "s2".into()]),
                 chunk_size: 100,
-                column_chunk_size: 1,
+                sample_chunk_size: 1,
                 description: Some("v1".into()),
                 ..Default::default()
             },

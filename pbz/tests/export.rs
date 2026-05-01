@@ -42,7 +42,7 @@ fn export_tsv_column_filter() {
         .arg("-o")
         .arg(&out)
         .args(["--region", "chr1:0-2"])
-        .args(["--column", "s1"])
+        .args(["--sample", "s1"])
         .assert()
         .success();
     let contents = fs::read_to_string(&out).unwrap();
@@ -135,7 +135,7 @@ fn export_unknown_column_errors() {
         .arg("depths")
         .arg("-o")
         .arg(&out)
-        .args(["--column", "nonexistent"])
+        .args(["--sample", "nonexistent"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("column not found"));
@@ -143,8 +143,8 @@ fn export_unknown_column_errors() {
 
 #[test]
 fn export_bedgraph_include_zero_changes_output() {
-    // Build a single-col uint32 track manually so we have known zeros.
-    use ndarray::Array2;
+    // Build a single-sample (1D) uint32 track manually so we have known zeros.
+    use ndarray::Array1;
     use pbzarr::{PbzStore, TrackConfig};
     use tempfile::TempDir;
     let dir = TempDir::new().unwrap();
@@ -153,21 +153,21 @@ fn export_bedgraph_include_zero_changes_output() {
     let store = PbzStore::open(&path).unwrap();
     let cfg = TrackConfig {
         dtype: "uint32".into(),
-        columns: Some(vec!["s0".into()]),
+        samples: None,
         chunk_size: 100,
-        column_chunk_size: 1,
+        sample_chunk_size: 1,
         description: None,
         source: None,
         extra: serde_json::Map::new(),
     };
     let track = store.create_track("d", cfg).unwrap();
     // [0,0,5,5,0,0,7,7,0,0]
-    let mut data = Array2::<u32>::zeros((10, 1));
-    data[[2, 0]] = 5;
-    data[[3, 0]] = 5;
-    data[[6, 0]] = 7;
-    data[[7, 0]] = 7;
-    track.write_chunk("chr1", 0, data).unwrap();
+    let mut data = Array1::<u32>::zeros(10);
+    data[2] = 5;
+    data[3] = 5;
+    data[6] = 7;
+    data[7] = 7;
+    track.write_chunk_1d("chr1", 0, data).unwrap();
     drop(track);
     drop(store);
 
