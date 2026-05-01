@@ -33,14 +33,21 @@ struct WriteTask {
     payload: ChunkPayload,
 }
 
-// `Bool_1D` and `U32_1D` cover scalar tracks that the v1 D4 import doesn't
-// produce (it's always columnar uint32). Kept here so future ingest paths
-// (BED masks, methylation) can plug into the same pipeline without reshaping it.
+// 1D variants cover scalar tracks (single-sample BED masks / bedGraphs);
+// 2D variants cover columnar multi-sample inputs. The dtype mix matches
+// what BED ingest can produce (bool for masks, numeric/float for bedGraph).
 #[allow(non_camel_case_types, dead_code)]
 enum ChunkPayload {
-    U32_2D(Array2<u32>),
+    U8_1D(Array1<u8>),
+    U16_1D(Array1<u16>),
     U32_1D(Array1<u32>),
+    F32_1D(Array1<f32>),
     Bool_1D(Array1<bool>),
+    U8_2D(Array2<u8>),
+    U16_2D(Array2<u16>),
+    U32_2D(Array2<u32>),
+    F32_2D(Array2<f32>),
+    Bool_2D(Array2<bool>),
 }
 
 impl ImportPipeline {
@@ -104,20 +111,24 @@ impl ImportPipeline {
                     let chunk_end = (chunk_start + chunk_size).min(task.contig_length);
                     let len = (chunk_end - chunk_start) as usize;
 
-                    let payload = match dtype {
-                        ValueDtype::U32 => {
+                    // For each dtype we have two paths: columnar (multi-sample → 2D)
+                    // and scalar (single reader → 1D). The repetition keeps the
+                    // hot loop monomorphic per dtype.
+                    macro_rules! collect_chunks {
+                        ($variant:ident, $ty:ty, $payload2d:ident, $payload1d:ident, $zero:expr) => {{
                             if has_samples {
                                 let n = readers_locks.len();
-                                let mut data = ndarray::Array2::<u32>::zeros((len, n));
+                                let mut data = ndarray::Array2::<$ty>::from_elem((len, n), $zero);
                                 for (col_idx, reader) in readers_locks.iter().enumerate() {
                                     let mut r = reader.lock().unwrap();
                                     let chunk =
                                         r.read_chunk(&task.contig, chunk_start, chunk_end)?;
                                     let arr = match chunk {
-                                        ValueChunk::U32(a) => a,
+                                        ValueChunk::$variant(a) => a,
                                         other => {
                                             return Err(eyre!(
-                                                "expected U32 from reader, got {:?}",
+                                                "expected {} from reader, got {:?}",
+                                                stringify!($variant),
                                                 std::mem::discriminant(&other)
                                             ));
                                         }
@@ -133,21 +144,32 @@ impl ImportPipeline {
                                         data[(i, col_idx)] = *v;
                                     }
                                 }
-                                ChunkPayload::U32_2D(data)
+                                ChunkPayload::$payload2d(data)
                             } else {
-                                // Single-reader scalar path (not used by D4 import — D4 always columnar)
                                 let mut r = readers_locks[0].lock().unwrap();
-                                let chunk = r.read_chunk(&task.contig, chunk_start, chunk_end)?;
+                                let chunk =
+                                    r.read_chunk(&task.contig, chunk_start, chunk_end)?;
                                 match chunk {
-                                    ValueChunk::U32(a) => ChunkPayload::U32_1D(a),
+                                    ValueChunk::$variant(a) => ChunkPayload::$payload1d(a),
                                     other => {
                                         return Err(eyre!(
-                                            "expected U32 chunk, got {:?}",
+                                            "expected {} chunk, got {:?}",
+                                            stringify!($variant),
                                             std::mem::discriminant(&other)
                                         ));
                                     }
                                 }
                             }
+                        }};
+                    }
+
+                    let payload = match dtype {
+                        ValueDtype::U8 => collect_chunks!(U8, u8, U8_2D, U8_1D, 0u8),
+                        ValueDtype::U16 => collect_chunks!(U16, u16, U16_2D, U16_1D, 0u16),
+                        ValueDtype::U32 => collect_chunks!(U32, u32, U32_2D, U32_1D, 0u32),
+                        ValueDtype::F32 => collect_chunks!(F32, f32, F32_2D, F32_1D, 0.0f32),
+                        ValueDtype::Bool => {
+                            collect_chunks!(Bool, bool, Bool_2D, Bool_1D, false)
                         }
                         other => return Err(eyre!("unsupported import dtype: {other}")),
                     };
@@ -174,40 +196,43 @@ impl ImportPipeline {
             let progress = self.progress.clone();
             writer_handles.push(thread::spawn(move || -> Result<()> {
                 while let Ok(wt) = write_rx.recv() {
-                    match wt.payload {
-                        ChunkPayload::U32_2D(arr) => {
+                    macro_rules! write2d {
+                        ($arr:expr, $ty:ty) => {
                             track
-                                .write_chunk::<u32>(&wt.contig, wt.chunk_idx, arr)
+                                .write_chunk::<$ty>(&wt.contig, wt.chunk_idx, $arr)
                                 .map_err(|e| {
                                     eyre!(
                                         "write_chunk failed at {}:{}: {e}",
                                         wt.contig,
                                         wt.chunk_idx
                                     )
-                                })?;
-                        }
-                        ChunkPayload::U32_1D(arr) => {
+                                })?
+                        };
+                    }
+                    macro_rules! write1d {
+                        ($arr:expr, $ty:ty) => {
                             track
-                                .write_chunk_1d::<u32>(&wt.contig, wt.chunk_idx, arr)
+                                .write_chunk_1d::<$ty>(&wt.contig, wt.chunk_idx, $arr)
                                 .map_err(|e| {
                                     eyre!(
                                         "write_chunk_1d failed at {}:{}: {e}",
                                         wt.contig,
                                         wt.chunk_idx
                                     )
-                                })?;
-                        }
-                        ChunkPayload::Bool_1D(arr) => {
-                            track
-                                .write_chunk_1d::<bool>(&wt.contig, wt.chunk_idx, arr)
-                                .map_err(|e| {
-                                    eyre!(
-                                        "write_chunk_1d failed at {}:{}: {e}",
-                                        wt.contig,
-                                        wt.chunk_idx
-                                    )
-                                })?;
-                        }
+                                })?
+                        };
+                    }
+                    match wt.payload {
+                        ChunkPayload::U8_2D(a) => write2d!(a, u8),
+                        ChunkPayload::U16_2D(a) => write2d!(a, u16),
+                        ChunkPayload::U32_2D(a) => write2d!(a, u32),
+                        ChunkPayload::F32_2D(a) => write2d!(a, f32),
+                        ChunkPayload::Bool_2D(a) => write2d!(a, bool),
+                        ChunkPayload::U8_1D(a) => write1d!(a, u8),
+                        ChunkPayload::U16_1D(a) => write1d!(a, u16),
+                        ChunkPayload::U32_1D(a) => write1d!(a, u32),
+                        ChunkPayload::F32_1D(a) => write1d!(a, f32),
+                        ChunkPayload::Bool_1D(a) => write1d!(a, bool),
                     }
                     if let Some(ref p) = progress {
                         p.inc(1);

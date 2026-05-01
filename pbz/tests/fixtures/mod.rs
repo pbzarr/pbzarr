@@ -6,9 +6,40 @@
 #![allow(dead_code)] // each test binary uses a subset
 
 use ndarray::{Array1, Array2};
+use noodles::bgzf;
 use pbzarr::{PbzStore, TrackConfig};
+use std::io::Write;
 use std::path::PathBuf;
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
+
+/// Build a bgzipped BED file in a tempfile from the given BED text. Returns the
+/// tempfile (caller must keep it alive while the path is in use).
+pub fn build_bgz_bed(text: &str) -> NamedTempFile {
+    let f = tempfile::Builder::new()
+        .prefix("test-bed-")
+        .suffix(".bed.gz")
+        .tempfile()
+        .unwrap();
+    let mut writer = bgzf::io::Writer::new(std::fs::File::create(f.path()).unwrap());
+    writer.write_all(text.as_bytes()).unwrap();
+    writer.finish().unwrap();
+    f
+}
+
+/// Write a chrom.sizes / FAI file (2-column tab-separated). Returns the tempfile.
+pub fn build_chrom_sizes(contigs: &[(&str, u64)]) -> NamedTempFile {
+    let f = tempfile::Builder::new()
+        .prefix("contigs-")
+        .suffix(".txt")
+        .tempfile()
+        .unwrap();
+    let mut s = String::new();
+    for (name, len) in contigs {
+        s.push_str(&format!("{name}\t{len}\n"));
+    }
+    std::fs::write(f.path(), s).unwrap();
+    f
+}
 
 pub struct StoreFixture {
     pub _dir: TempDir,
