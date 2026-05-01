@@ -27,6 +27,8 @@ rlimit = "0.10"
 ndarray = "0.17"
 fs-err = "3"
 d4 = { git = "https://github.com/cademirch/d4-format.git", default-features = false, features = ["reader_only"] }
+noodles = { version = "0.105", features = ["bgzf"] }
+thiserror = "2"
 
 [dev-dependencies]
 assert_cmd = "2"

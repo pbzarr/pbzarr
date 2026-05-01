@@ -1,6 +1,9 @@
+pub mod bed_error;
+pub mod bed_reader;
 pub mod bed_writer;
 pub mod bedgraph_writer;
 pub mod d4_reader;
+pub mod interval_to_per_base;
 pub mod tsv_writer;
 pub mod value_reader;
 
