@@ -10,3 +10,6 @@ pub use track::{Track, TrackConfig, TrackMetadata};
 
 /// PBZ specification version implemented by this crate.
 pub const PERBASE_ZARR_VERSION: &str = "0.1";
+
+/// PBZ spec version this implementation targets. See pbzarr-spec/SPEC.md.
+pub const SPEC_VERSION_TARGET: &str = "0.1";
