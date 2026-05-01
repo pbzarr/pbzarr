@@ -265,7 +265,14 @@ impl PbzStore {
     }
 
     /// Create a new track in this store.
+    ///
+    /// Errors with [`PbzError::Metadata`] if a track with this name already
+    /// exists. To replace a track, drop it first via
+    /// [`PbzStore::drop_track`].
     pub fn create_track(&self, name: &str, config: TrackConfig) -> Result<Track> {
+        if self.tracks()?.iter().any(|t| t == name) {
+            return Err(PbzError::Metadata(format!("track '{name}' already exists")));
+        }
         Track::create(self.store.clone(), name, &config, &self.contig_lengths)
     }
 
@@ -563,7 +570,7 @@ mod tests {
 
         let config = TrackConfig {
             dtype: "uint32".into(),
-            columns: Some(vec!["s1".into(), "s2".into()]),
+            samples: Some(vec!["s1".into(), "s2".into()]),
             chunk_size: 1_000_000,
             ..Default::default()
         };
@@ -575,7 +582,7 @@ mod tests {
 
         let track2 = store.track("depths").unwrap();
         assert_eq!(track2.metadata().dtype, "uint32");
-        assert!(track2.has_columns());
+        assert!(track2.has_samples());
     }
 
     #[test]
@@ -596,9 +603,9 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
         let cfg = crate::track::TrackConfig {
             dtype: "uint32".into(),
-            columns: None,
+            samples: None,
             chunk_size: 100,
-            column_chunk_size: 1,
+            sample_chunk_size: 1,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
@@ -632,18 +639,18 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
         let cfg_a = crate::track::TrackConfig {
             dtype: "uint32".into(),
-            columns: None,
+            samples: None,
             chunk_size: 100,
-            column_chunk_size: 1,
+            sample_chunk_size: 1,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
         };
         let cfg_b = crate::track::TrackConfig {
             dtype: "uint32".into(),
-            columns: None,
+            samples: None,
             chunk_size: 100,
-            column_chunk_size: 1,
+            sample_chunk_size: 1,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
@@ -661,9 +668,9 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
         let cfg = crate::track::TrackConfig {
             dtype: "uint32".into(),
-            columns: None,
+            samples: None,
             chunk_size: 100,
-            column_chunk_size: 1,
+            sample_chunk_size: 1,
             description: None,
             source: None,
             extra: serde_json::Map::new(),

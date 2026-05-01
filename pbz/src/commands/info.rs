@@ -23,7 +23,7 @@ struct TrackEntry {
     name: String,
     dtype: String,
     chunk_size: u64,
-    column_chunk_size: Option<u64>,
+    sample_chunk_size: Option<u64>,
     columns: Option<Vec<String>>,
     description: Option<String>,
     source: Option<String>,
@@ -46,8 +46,8 @@ pub fn run(args: InfoArgs) -> Result<()> {
             name: name.clone(),
             dtype: m.dtype.clone(),
             chunk_size: m.chunk_size,
-            column_chunk_size: m.column_chunk_size,
-            columns: track.columns().map(|cs| cs.to_vec()),
+            sample_chunk_size: m.sample_chunk_size,
+            columns: track.samples().map(|cs| cs.to_vec()),
             description: m.description.clone(),
             source: m.source.clone(),
         });
@@ -78,8 +78,8 @@ fn print_human(info: &StoreInfo) {
         println!("  track: {}", t.name);
         println!("    dtype: {}", t.dtype);
         println!("    chunk_size: {}", t.chunk_size);
-        if let Some(c) = t.column_chunk_size {
-            println!("    column_chunk_size: {}", c);
+        if let Some(c) = t.sample_chunk_size {
+            println!("    sample_chunk_size: {}", c);
         }
         if let Some(cols) = &t.columns {
             println!("    columns ({}): {}", cols.len(), cols.join(", "));

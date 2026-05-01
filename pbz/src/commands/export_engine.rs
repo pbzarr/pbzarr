@@ -65,12 +65,12 @@ pub fn build_plan(
     };
 
     let column_indices = if columns.is_empty() {
-        match track.columns() {
+        match track.samples() {
             Some(cs) => (0..cs.len()).collect(),
             None => Vec::new(),
         }
     } else {
-        let track_cols = track.columns().ok_or_else(|| {
+        let track_cols = track.samples().ok_or_else(|| {
             eyre!(
                 "track '{}' has no columns; --column cannot be used",
                 track.name()
@@ -169,8 +169,8 @@ pub fn run_export<W: Write>(
 ) -> Result<()> {
     // Emit TSV header up-front.
     if let WriterChoice::Tsv(ref mut w) = writer {
-        if track.has_columns() {
-            let cols = track.columns().unwrap_or(&[]);
+        if track.has_samples() {
+            let cols = track.samples().unwrap_or(&[]);
             let selected: Vec<&str> = plan
                 .column_indices
                 .iter()
@@ -264,7 +264,7 @@ macro_rules! emit_numeric {
             plan: &ExportPlan,
             writer: &mut WriterChoice<W>,
         ) -> Result<()> {
-            if track.has_columns() {
+            if track.has_samples() {
                 let chunk: Array2<$ty> = track.read_chunk::<$ty>(contig, chunk_idx)?;
                 match writer {
                     WriterChoice::Tsv(w) => {
@@ -377,7 +377,7 @@ fn emit_bool<W: Write>(
     pos_slice: Range<u64>,
     writer: &mut WriterChoice<W>,
 ) -> Result<()> {
-    if track.has_columns() {
+    if track.has_samples() {
         return Err(eyre!(
             "columnar bool tracks are not supported by export/cat (track '{}')",
             track.name()
