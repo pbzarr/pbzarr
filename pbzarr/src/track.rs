@@ -531,8 +531,12 @@ impl Track {
 
     /// Xarray dimension name for the columns axis.
     ///
-    /// Returns the stored `column_dim_name` attribute, or `"column"` if the
-    /// track is 1D or the attribute was absent (i.e. the default).
+    /// For 2D (columnar) tracks, returns the stored `column_dim_name`
+    /// attribute, or the default `"column"` when the attribute is absent.
+    ///
+    /// For 1D (scalar) tracks the return value is meaningless — the track
+    /// has no columns axis. Callers should gate on [`Track::has_columns`]
+    /// before using this value.
     pub fn column_dim_name(&self) -> &str {
         self.metadata
             .column_dim_name
@@ -1574,5 +1578,28 @@ mod tests {
                 .contains_key("column_dim_name"),
             "column_dim_name should not be written to disk when using the default"
         );
+    }
+
+    #[test]
+    fn create_rejects_empty_column_dim_name() {
+        let (_dir, store) = test_store();
+        let config = TrackConfig {
+            dtype: "uint32".into(),
+            columns: Some(vec!["c1".into(), "c2".into()]),
+            chunk_size: 1000,
+            column_dim_name: Some("".into()),
+            ..Default::default()
+        };
+        let err = Track::create(
+            store.storage().clone(),
+            "t",
+            &config,
+            store.contig_lengths(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, PbzError::Metadata(_)));
+
+        // No partial state: the track group must not exist on disk after the failure.
+        assert!(Group::open(store.storage().clone(), "/tracks/t").is_err());
     }
 }
