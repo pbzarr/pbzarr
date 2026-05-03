@@ -604,7 +604,7 @@ mod tests {
                 "layout": "per_base",
                 "dtype": "uint32",
                 "chunk_size": 1_000_000,
-                "sample_chunk_size": 16,
+                "column_chunk_size": 16,
             }),
         );
 

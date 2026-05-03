@@ -1557,5 +1557,22 @@ mod tests {
 
         let track = Track::open(store.storage().clone(), "t", store.contig_lengths()).unwrap();
         assert_eq!(track.column_dim_name(), "column");
+
+        // Verify that the default is not persisted on disk: "column_dim_name" must be absent
+        // from the perbase_zarr_track attribute map so that future spec changes to the default
+        // won't silently break files written with the old default.
+        let group = Group::open(store.storage().clone(), "/tracks/t").unwrap();
+        let track_attr = group
+            .attributes()
+            .get("perbase_zarr_track")
+            .expect("perbase_zarr_track attribute must be present")
+            .clone();
+        assert!(
+            !track_attr
+                .as_object()
+                .expect("perbase_zarr_track must be a JSON object")
+                .contains_key("column_dim_name"),
+            "column_dim_name should not be written to disk when using the default"
+        );
     }
 }
