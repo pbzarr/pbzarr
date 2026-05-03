@@ -66,7 +66,7 @@ impl StoreFixture {
     pub fn with_uint32_track(name: &str, value: u32, num_columns: usize) -> Self {
         assert!(
             num_columns != 1,
-            "with_uint32_track: num_columns=1 is invalid; use with_single_sample_uint32 \
+            "with_uint32_track: num_columns=1 is invalid; use with_single_col_uint32 \
              for the 1D single-column case"
         );
         let f = Self::empty();
@@ -99,7 +99,7 @@ impl StoreFixture {
 
     /// Create a store with a single-column (1D) u32 track for bedGraph testing.
     /// Per spec v0.1, single-column data MUST be 1D (no `columns` array).
-    pub fn with_single_sample_uint32(name: &str) -> Self {
+    pub fn with_single_col_uint32(name: &str) -> Self {
         let f = Self::empty();
         let store = PbzStore::open(&f.path).unwrap();
         let cfg = TrackConfig {
@@ -123,11 +123,6 @@ impl StoreFixture {
             track.write_chunk_1d("chr2", chunk_idx, chunk).unwrap();
         }
         f
-    }
-
-    /// Backwards-compatible alias for tests that haven't been migrated yet.
-    pub fn with_single_col_uint32(name: &str) -> Self {
-        Self::with_single_sample_uint32(name)
     }
 
     /// Create a store with a bool scalar track for BED testing.

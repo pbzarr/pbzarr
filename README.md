@@ -22,9 +22,14 @@ let contigs = vec!["chr1".into(), "chr2".into()];
 let lengths = vec![248_956_422, 242_193_529];
 let store = PbzStore::create("sample.pbz.zarr", &contigs, &lengths)?;
 
-// Create a track
-let config = TrackConfig::new("uint32")
-    .columns(vec!["sample_A".into(), "sample_B".into()]);
+// Create a track. For cohort tracks, set `column_dim_name = Some("sample")`
+// so downstream Xarray-aware tools see the second axis as the cohort axis.
+let config = TrackConfig {
+    dtype: "uint32".into(),
+    columns: Some(vec!["sample_A".into(), "sample_B".into()]),
+    column_dim_name: Some("sample".into()),
+    ..Default::default()
+};
 let track = store.create_track("depths", config)?;
 
 // Write a chunk

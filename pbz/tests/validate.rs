@@ -55,7 +55,7 @@ fn validate_json_emits_findings_array() {
 
 #[test]
 fn validate_does_not_crash_on_malformed_track_zarr_json() {
-    let f = fixtures::StoreFixture::with_single_sample_uint32("depths");
+    let f = fixtures::StoreFixture::with_single_col_uint32("depths");
     // corrupt the track group's zarr.json with non-JSON content
     let track_zarr_json = f.path.join("tracks").join("depths").join("zarr.json");
     std::fs::write(&track_zarr_json, "this is not json").unwrap();

@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_round_trips_uint32_two_samples() {
+    fn pipeline_round_trips_uint32_two_columns() {
         let dir = tempfile::TempDir::new().unwrap();
         let store_path = dir.path().join("s.pbz.zarr");
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[300u64]).unwrap();
