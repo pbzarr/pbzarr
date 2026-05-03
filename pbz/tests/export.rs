@@ -143,7 +143,7 @@ fn export_unknown_column_errors() {
 
 #[test]
 fn export_bedgraph_include_zero_changes_output() {
-    // Build a single-sample (1D) uint32 track manually so we have known zeros.
+    // Build a single-column (1D) uint32 track manually so we have known zeros.
     use ndarray::Array1;
     use pbzarr::{PbzStore, TrackConfig};
     use tempfile::TempDir;

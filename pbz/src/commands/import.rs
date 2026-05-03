@@ -202,7 +202,7 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
         },
         chunk_size: args.chunk_size,
         column_chunk_size: args.column_chunk_size,
-        column_dim_name: Some("sample".into()),
+        column_dim_name: if has_columns { Some("sample".into()) } else { None },
         description: args.description.clone(),
         source: args.source.clone(),
         extra: serde_json::Map::new(),

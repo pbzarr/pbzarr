@@ -138,13 +138,16 @@ pub struct ExportArgs {
 pub struct CatArgs {
     pub store: PathBuf,
     pub track: String,
+    /// Region in `chr1`, `chr1:1000-2000`, or `chr1:1000` form (0-based half-open).
     #[arg(long)]
     pub region: Option<String>,
+    /// Filter to specific column names (TSV only). Repeatable.
     #[arg(long)]
     pub column: Vec<String>,
     /// Format (default: tsv).
     #[arg(long, value_enum, default_value_t = ExportFormat::Tsv)]
     pub format: ExportFormat,
+    /// Include runs of fill_value (e.g. zero) in output.
     #[arg(long)]
     pub include_zero: bool,
 }
