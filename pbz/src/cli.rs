@@ -53,7 +53,7 @@ pub enum Command {
     Cat(CatArgs),
     /// Show store and track metadata.
     Info(InfoArgs),
-    /// List tracks, contigs, or samples.
+    /// List tracks, contigs, or columns.
     List(ListArgs),
     /// Edit a track's description or source metadata.
     Set(SetArgs),
@@ -86,9 +86,9 @@ pub struct ImportArgs {
     /// Position-axis chunk size.
     #[arg(long, default_value_t = 1_000_000)]
     pub chunk_size: u64,
-    /// Sample-axis chunk size.
+    /// Column-axis chunk size.
     #[arg(long, default_value_t = 16)]
-    pub sample_chunk_size: u64,
+    pub column_chunk_size: u64,
     /// Track description.
     #[arg(long)]
     pub description: Option<String>,
@@ -120,9 +120,9 @@ pub struct ExportArgs {
     /// Region in `chr1`, `chr1:1000-2000`, or `chr1:1000` form (0-based half-open).
     #[arg(long)]
     pub region: Option<String>,
-    /// Filter to specific sample names (TSV only). Repeatable.
+    /// Filter to specific column names (TSV only). Repeatable.
     #[arg(long)]
-    pub sample: Vec<String>,
+    pub column: Vec<String>,
     /// Output file path.
     #[arg(short, long)]
     pub output: PathBuf,
@@ -141,7 +141,7 @@ pub struct CatArgs {
     #[arg(long)]
     pub region: Option<String>,
     #[arg(long)]
-    pub sample: Vec<String>,
+    pub column: Vec<String>,
     /// Format (default: tsv).
     #[arg(long, value_enum, default_value_t = ExportFormat::Tsv)]
     pub format: ExportFormat,
@@ -158,7 +158,7 @@ pub struct InfoArgs {
 
 #[derive(clap::Args, Debug)]
 #[command(group(
-    clap::ArgGroup::new("list_mode").required(true).args(["tracks", "contigs", "samples"])
+    clap::ArgGroup::new("list_mode").required(true).args(["tracks", "contigs", "columns"])
 ))]
 pub struct ListArgs {
     pub store: PathBuf,
@@ -166,9 +166,9 @@ pub struct ListArgs {
     pub tracks: bool,
     #[arg(long)]
     pub contigs: bool,
-    /// List sample names for the given track.
+    /// List column names for the given track.
     #[arg(long, value_name = "TRACK")]
-    pub samples: Option<String>,
+    pub columns: Option<String>,
     #[arg(long)]
     pub json: bool,
 }

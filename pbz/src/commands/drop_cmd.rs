@@ -10,10 +10,10 @@ pub fn run(args: DropArgs) -> Result<()> {
     let track = store.track(&args.track)?;
     let m = track.metadata();
     let dtype = m.dtype.clone();
-    let cols_msg = if track.has_samples() {
+    let cols_msg = if track.has_columns() {
         format!(
-            ", {} samples",
-            track.samples().map(|c| c.len()).unwrap_or(0)
+            ", {} columns",
+            track.columns().map(|c| c.len()).unwrap_or(0)
         )
     } else {
         ", scalar".to_string()

@@ -22,7 +22,7 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
     if args.chunk_size == 0 {
         return Err(eyre!("--chunk-size must be greater than 0"));
     }
-    if args.sample_chunk_size == 0 {
+    if args.column_chunk_size == 0 {
         return Err(eyre!("--column-chunk-size must be greater than 0"));
     }
 
@@ -83,9 +83,9 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
             let lens = s.contig_lengths();
             let mut out = Vec::with_capacity(names.len());
             for n in &names {
-                let l = *lens.get(n).ok_or_else(|| {
-                    eyre!("store missing length for contig {n}")
-                })?;
+                let l = *lens
+                    .get(n)
+                    .ok_or_else(|| eyre!("store missing length for contig {n}"))?;
                 out.push((n.clone(), l));
             }
             out
@@ -98,7 +98,7 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
     };
 
     let user_dtype = args.dtype.as_deref();
-    let worker_count = NonZero::new(n_threads.min(4).max(1)).unwrap();
+    let worker_count = NonZero::new(n_threads.clamp(1, 4)).unwrap();
 
     let mut bed_flavors: Vec<BedFlavor> = Vec::new();
     let mut readers: Vec<Box<dyn ValueReader>> = Vec::with_capacity(specs.len());
@@ -109,11 +109,7 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
                 readers.push(Box::new(r));
             }
             InputFormat::Bed => {
-                let src = BedIntervalSource::open(
-                    &s.path,
-                    resolved_contigs.clone(),
-                    worker_count,
-                )?;
+                let src = BedIntervalSource::open(&s.path, resolved_contigs.clone(), worker_count)?;
                 let flavor = src.flavor;
                 bed_flavors.push(flavor);
                 let dtype = match (flavor, user_dtype) {
@@ -191,15 +187,22 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
         PbzStore::create(&args.store, &names, &lens)?
     };
 
-    // v1: every sample is one input. With a single input we use a 1D scalar
-    // track (per spec: single-sample data MUST be 1D); otherwise multi-sample 2D.
-    let sample_names: Vec<String> = specs.iter().map(|s| s.column_name.clone()).collect();
-    let has_samples = sample_names.len() > 1;
+    // v1: every column is one input file. With a single input we create a 1D
+    // scalar track (per spec: single-column data MUST be 1D); otherwise a 2D
+    // columnar track. Each column corresponds to one sample in a cohort, so
+    // column_dim_name is set to "sample" to name the Xarray dimension correctly.
+    let column_names: Vec<String> = specs.iter().map(|s| s.column_name.clone()).collect();
+    let has_columns = column_names.len() > 1;
     let cfg = TrackConfig {
         dtype: dtype.as_str().to_string(),
-        samples: if has_samples { Some(sample_names) } else { None },
+        columns: if has_columns {
+            Some(column_names)
+        } else {
+            None
+        },
         chunk_size: args.chunk_size,
-        sample_chunk_size: args.sample_chunk_size,
+        column_chunk_size: args.column_chunk_size,
+        column_dim_name: Some("sample".into()),
         description: args.description.clone(),
         source: args.source.clone(),
         extra: serde_json::Map::new(),
@@ -221,7 +224,7 @@ pub fn run(args: ImportArgs, threads: Option<usize>, no_progress: bool) -> Resul
         writer_workers: n_threads,
         progress,
         dtype,
-        has_samples,
+        has_columns,
     };
     pipeline.run()?;
     Ok(())
@@ -249,13 +252,16 @@ pub(crate) fn parse_contigs_file(path: &Path) -> Result<Vec<(String, u64)>> {
     let mut out: Vec<(String, u64)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for (lineno, line) in r.lines().enumerate() {
-        let line = line.map_err(|e| eyre!("error reading {}:{}: {e}", path.display(), lineno + 1))?;
+        let line =
+            line.map_err(|e| eyre!("error reading {}:{}: {e}", path.display(), lineno + 1))?;
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         let mut it = trimmed.split('\t');
-        let name = it.next().ok_or_else(|| eyre!("malformed line {}:{}", path.display(), lineno + 1))?;
+        let name = it
+            .next()
+            .ok_or_else(|| eyre!("malformed line {}:{}", path.display(), lineno + 1))?;
         let length_s = it.next().ok_or_else(|| {
             eyre!(
                 "malformed line {}:{}: expected at least 2 tab-separated columns",
@@ -280,7 +286,10 @@ pub(crate) fn parse_contigs_file(path: &Path) -> Result<Vec<(String, u64)>> {
         out.push((name.to_string(), length));
     }
     if out.is_empty() {
-        return Err(eyre!("--contigs file {} is empty (no contigs)", path.display()));
+        return Err(eyre!(
+            "--contigs file {} is empty (no contigs)",
+            path.display()
+        ));
     }
     Ok(out)
 }
@@ -303,10 +312,13 @@ mod fai_tests {
     fn parses_chrom_sizes_two_columns() {
         let f = write_fai("chr1\t1000000\nchr2\t500000\n");
         let v = parse_contigs_file(f.path()).unwrap();
-        assert_eq!(v, vec![
-            ("chr1".to_string(), 1_000_000),
-            ("chr2".to_string(), 500_000),
-        ]);
+        assert_eq!(
+            v,
+            vec![
+                ("chr1".to_string(), 1_000_000),
+                ("chr2".to_string(), 500_000),
+            ]
+        );
     }
 
     #[test]

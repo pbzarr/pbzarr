@@ -15,7 +15,7 @@ pub fn run(args: CatArgs) -> Result<()> {
         f => f,
     };
     let fmt = pick_format(effective_format, None, &track)?;
-    let plan = build_plan(&store, &track, args.region.as_deref(), &args.sample)?;
+    let plan = build_plan(&store, &track, args.region.as_deref(), &args.column)?;
     let stdout = io::stdout();
     let writer = make_writer(
         fmt,

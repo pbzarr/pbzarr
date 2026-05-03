@@ -17,7 +17,7 @@ pub struct ImportPipeline {
     pub writer_workers: usize,
     pub progress: Option<ProgressBar>,
     pub dtype: ValueDtype,
-    pub has_samples: bool,
+    pub has_columns: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -33,9 +33,9 @@ struct WriteTask {
     payload: ChunkPayload,
 }
 
-// 1D variants cover scalar tracks (single-sample BED masks / bedGraphs);
-// 2D variants cover columnar multi-sample inputs. The dtype mix matches
-// what BED ingest can produce (bool for masks, numeric/float for bedGraph).
+// 1D variants cover scalar tracks (single-column BED masks / bedGraphs);
+// 2D variants cover columnar inputs. The dtype mix matches what BED ingest
+// can produce (bool for masks, numeric/float for bedGraph).
 #[allow(non_camel_case_types, dead_code)]
 enum ChunkPayload {
     U8_1D(Array1<u8>),
@@ -98,7 +98,7 @@ impl ImportPipeline {
 
         let chunk_size = self.chunk_size;
         let dtype = self.dtype;
-        let has_samples = self.has_samples;
+        let has_columns = self.has_columns;
 
         let mut reader_handles = Vec::with_capacity(self.reader_workers);
         for _ in 0..self.reader_workers {
@@ -111,12 +111,11 @@ impl ImportPipeline {
                     let chunk_end = (chunk_start + chunk_size).min(task.contig_length);
                     let len = (chunk_end - chunk_start) as usize;
 
-                    // For each dtype we have two paths: columnar (multi-sample → 2D)
-                    // and scalar (single reader → 1D). The repetition keeps the
-                    // hot loop monomorphic per dtype.
+                    // For each dtype we have two paths: columnar (2D) and scalar (1D).
+                    // The repetition keeps the hot loop monomorphic per dtype.
                     macro_rules! collect_chunks {
                         ($variant:ident, $ty:ty, $payload2d:ident, $payload1d:ident, $zero:expr) => {{
-                            if has_samples {
+                            if has_columns {
                                 let n = readers_locks.len();
                                 let mut data = ndarray::Array2::<$ty>::from_elem((len, n), $zero);
                                 for (col_idx, reader) in readers_locks.iter().enumerate() {
@@ -311,9 +310,10 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[300u64]).unwrap();
         let cfg = TrackConfig {
             dtype: "uint32".into(),
-            samples: Some(vec!["a".into(), "b".into()]),
+            columns: Some(vec!["a".into(), "b".into()]),
             chunk_size: 100,
-            sample_chunk_size: 2,
+            column_chunk_size: 2,
+            column_dim_name: Some("sample".into()),
             description: None,
             source: None,
             extra: serde_json::Map::new(),
@@ -340,7 +340,7 @@ mod tests {
             writer_workers: 2,
             progress: None,
             dtype: ValueDtype::U32,
-            has_samples: true,
+            has_columns: true,
         };
         pipeline.run().unwrap();
 
