@@ -12,11 +12,11 @@ use tempfile::TempDir;
 // pbz[verify per_base.data.shape-2d]
 // pbz[verify per_base.data.dim-names]
 // pbz[verify per_base.data.dtype-match]
-// pbz[verify per_base.samples.array]
-// pbz[verify per_base.samples.order]
+// pbz[verify per_base.columns.array]
+// pbz[verify per_base.columns.order]
 // pbz[verify per_base.attrs.dtype]
 // pbz[verify per_base.attrs.chunk_size]
-// pbz[verify per_base.attrs.sample_chunk_size]
+// pbz[verify per_base.attrs.column_chunk_size]
 #[test]
 fn full_round_trip() {
     let dir = TempDir::new().unwrap();
@@ -29,7 +29,7 @@ fn full_round_trip() {
 
     let config = TrackConfig {
         dtype: "uint32".into(),
-        samples: Some(vec!["s1".into(), "s2".into(), "s3".into()]),
+        columns: Some(vec!["s1".into(), "s2".into(), "s3".into()]),
         chunk_size: 1000,
         description: Some("depth data".into()),
         source: Some("integration test".into()),
@@ -65,8 +65,8 @@ fn full_round_trip() {
 
     let track2 = store2.track("depths").unwrap();
     assert_eq!(track2.dtype(), "uint32");
-    assert!(track2.has_samples());
-    assert_eq!(track2.samples().unwrap(), &["s1", "s2", "s3"]);
+    assert!(track2.has_columns());
+    assert_eq!(track2.columns().unwrap(), &["s1", "s2", "s3"]);
     assert_eq!(track2.metadata().description.as_deref(), Some("depth data"));
 
     // Verify chr1 data
@@ -101,7 +101,7 @@ fn bool_scalar_track_round_trip() {
 
     let config = TrackConfig {
         dtype: "bool".into(),
-        samples: None,
+        columns: None,
         chunk_size: 1000,
         ..Default::default()
     };
@@ -127,7 +127,7 @@ fn bool_scalar_track_round_trip() {
     let track2 = store2.track("mask").unwrap();
 
     assert_eq!(track2.dtype(), "bool");
-    assert!(!track2.has_samples());
+    assert!(!track2.has_columns());
 
     let read0: Array1<bool> = track2.read_chunk_1d("chr1", 0).unwrap();
     assert!(read0.iter().all(|&v| v));
@@ -153,7 +153,7 @@ fn multiple_tracks_same_store() {
             "depths",
             TrackConfig {
                 dtype: "uint32".into(),
-                samples: Some(vec!["s1".into(), "s2".into()]),
+                columns: Some(vec!["s1".into(), "s2".into()]),
                 chunk_size: 1000,
                 ..Default::default()
             },
@@ -165,7 +165,7 @@ fn multiple_tracks_same_store() {
             "mask",
             TrackConfig {
                 dtype: "bool".into(),
-                samples: None,
+                columns: None,
                 chunk_size: 1000,
                 ..Default::default()
             },
@@ -203,7 +203,7 @@ fn extra_metadata_round_trip_integration() {
             "callable",
             TrackConfig {
                 dtype: "uint16".into(),
-                samples: Some(vec!["pop1".into(), "pop2".into()]),
+                columns: Some(vec!["pop1".into(), "pop2".into()]),
                 chunk_size: 1000,
                 extra,
                 ..Default::default()
@@ -234,7 +234,7 @@ fn chunk_math_human_scale() {
             "depths",
             TrackConfig {
                 dtype: "uint32".into(),
-                samples: Some(vec!["s1".into(), "s2".into()]),
+                columns: Some(vec!["s1".into(), "s2".into()]),
                 chunk_size: 1_000_000,
                 ..Default::default()
             },
@@ -269,9 +269,9 @@ fn edit_lifecycle_round_trip() {
             "depths",
             TrackConfig {
                 dtype: "uint32".into(),
-                samples: Some(vec!["s1".into(), "s2".into()]),
+                columns: Some(vec!["s1".into(), "s2".into()]),
                 chunk_size: 100,
-                sample_chunk_size: 1,
+                column_chunk_size: 1,
                 description: Some("v1".into()),
                 ..Default::default()
             },
@@ -320,9 +320,9 @@ fn track_writes_layout_attribute() {
             "t",
             TrackConfig {
                 dtype: "float32".into(),
-                samples: Some(vec!["A".into(), "B".into()]),
+                columns: Some(vec!["A".into(), "B".into()]),
                 chunk_size: 100,
-                sample_chunk_size: 2,
+                column_chunk_size: 2,
                 ..Default::default()
             },
         )
@@ -351,7 +351,7 @@ fn track_read_requires_layout() {
             "t",
             TrackConfig {
                 dtype: "float32".into(),
-                samples: None,
+                columns: None,
                 chunk_size: 100,
                 ..Default::default()
             },
@@ -410,38 +410,38 @@ fn store_coordinate_space_optional() {
     assert_eq!(s.coordinate_space(), None);
 }
 
-// pbz[verify per_base.samples.unique]
+// pbz[verify per_base.columns.unique]
 #[test]
-fn create_track_rejects_duplicate_samples() {
+fn create_track_rejects_duplicate_columns() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("x.pbz.zarr");
     let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
     let cfg = TrackConfig {
         dtype: "float32".into(),
-        samples: Some(vec!["s1".into(), "s2".into(), "s1".into()]),
+        columns: Some(vec!["s1".into(), "s2".into(), "s1".into()]),
         chunk_size: 100,
-        sample_chunk_size: 1,
+        column_chunk_size: 1,
         ..Default::default()
     };
     let err = store.create_track("t", cfg).unwrap_err();
     assert!(matches!(err, PbzError::Metadata(_)));
 }
 
-// pbz[verify per_base.data.single-sample-1d]
+// pbz[verify per_base.data.single-column-1d]
 #[test]
-fn create_track_rejects_single_sample() {
+fn create_track_rejects_single_column() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("x.pbz.zarr");
     let store = PbzStore::create(&path, &["chr1".to_string()], &[1000]).unwrap();
     let cfg = TrackConfig {
         dtype: "float32".into(),
-        samples: Some(vec!["only".into()]),
+        columns: Some(vec!["only".into()]),
         chunk_size: 100,
-        sample_chunk_size: 1,
+        column_chunk_size: 1,
         ..Default::default()
     };
     let err = store.create_track("t", cfg).unwrap_err();
-    assert!(matches!(err, PbzError::SingleSampleMustBe1D));
+    assert!(matches!(err, PbzError::SingleColumnMustBe1D));
 }
 
 // pbz[verify forward.layout.no-error]
@@ -456,7 +456,7 @@ fn unknown_layout_skipped_on_list() {
             "good",
             TrackConfig {
                 dtype: "float32".into(),
-                samples: None,
+                columns: None,
                 chunk_size: 100,
                 ..Default::default()
             },
@@ -522,9 +522,9 @@ fn track_preserves_unknown_attrs_roundtrip() {
             "t",
             TrackConfig {
                 dtype: "float32".into(),
-                samples: Some(vec!["A".into(), "B".into()]),
+                columns: Some(vec!["A".into(), "B".into()]),
                 chunk_size: 100,
-                sample_chunk_size: 2,
+                column_chunk_size: 2,
                 ..Default::default()
             },
         )
@@ -536,11 +536,7 @@ fn track_preserves_unknown_attrs_roundtrip() {
         std::sync::Arc::new(zarrs::filesystem::FilesystemStore::new(&path).unwrap());
     {
         let mut g = zarrs::group::Group::open(raw_store.clone(), "/tracks/t").unwrap();
-        let mut attrs = g
-            .attributes()
-            .get("perbase_zarr_track")
-            .unwrap()
-            .clone();
+        let mut attrs = g.attributes().get("perbase_zarr_track").unwrap().clone();
         attrs["future_v2_field"] = serde_json::json!({"hello": "world"});
         g.attributes_mut()
             .insert("perbase_zarr_track".into(), attrs);
@@ -573,7 +569,7 @@ fn track_layout_accessor_returns_per_base() {
             "t",
             TrackConfig {
                 dtype: "float32".into(),
-                samples: None,
+                columns: None,
                 chunk_size: 100,
                 ..Default::default()
             },
