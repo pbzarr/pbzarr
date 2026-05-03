@@ -41,10 +41,10 @@ pub enum PbzError {
     UnknownLayout { track: String, layout: String },
 
     #[error(
-        "single-sample data MUST be stored as a 1D track (no samples array); \
-         use TrackConfig without samples for a single sample"
+        "single-column data MUST be stored as a 1D track (columns=None); \
+         use TrackConfig without columns for a single column"
     )]
-    SingleSampleMustBe1D,
+    SingleColumnMustBe1D,
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

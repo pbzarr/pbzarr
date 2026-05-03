@@ -23,7 +23,8 @@ const STANDARD_FIELDS: &[&str] = &[
     "layout",
     "dtype",
     "chunk_size",
-    "sample_chunk_size",
+    "column_chunk_size",
+    "column_dim_name",
     "description",
     "source",
 ];
@@ -31,8 +32,11 @@ const STANDARD_FIELDS: &[&str] = &[
 /// Default chunk size along the position axis (1 million base pairs).
 pub const DEFAULT_CHUNK_SIZE: u64 = 1_000_000;
 
-/// Default chunk size along the sample axis.
-pub const DEFAULT_SAMPLE_CHUNK_SIZE: u64 = 16;
+/// Default chunk size along the columns axis.
+pub const DEFAULT_COLUMN_CHUNK_SIZE: u64 = 16;
+
+/// Default Xarray dimension name for the columns axis.
+pub const DEFAULT_COLUMN_DIM_NAME: &str = "column";
 
 /// Layout identifier for the per_base track layout (the only layout in spec v0.1).
 pub const PER_BASE_LAYOUT: &str = "per_base";
@@ -40,9 +44,14 @@ pub const PER_BASE_LAYOUT: &str = "per_base";
 /// Configuration for creating a new track.
 pub struct TrackConfig {
     pub dtype: String,
-    pub samples: Option<Vec<String>>,
+    pub columns: Option<Vec<String>>,
     pub chunk_size: u64,
-    pub sample_chunk_size: u64,
+    pub column_chunk_size: u64,
+    /// Xarray dimension name for the columns axis. `None` defaults to
+    /// `"column"` and is not written to the track attribute. Ignored when
+    /// `columns` is `None`. Cohort tracks should set this to `"sample"`;
+    /// feature pileups to `"feature"`; etc.
+    pub column_dim_name: Option<String>,
     pub description: Option<String>,
     pub source: Option<String>,
     /// Tool-specific metadata. Stored in the `perbase_zarr_track` attribute
@@ -55,9 +64,10 @@ impl Default for TrackConfig {
     fn default() -> Self {
         Self {
             dtype: "uint32".into(),
-            samples: None,
+            columns: None,
             chunk_size: DEFAULT_CHUNK_SIZE,
-            sample_chunk_size: DEFAULT_SAMPLE_CHUNK_SIZE,
+            column_chunk_size: DEFAULT_COLUMN_CHUNK_SIZE,
+            column_dim_name: None,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
@@ -71,7 +81,11 @@ pub struct TrackMetadata {
     pub layout: String,
     pub dtype: String,
     pub chunk_size: u64,
-    pub sample_chunk_size: Option<u64>,
+    pub column_chunk_size: Option<u64>,
+    /// Resolved dimension name for the columns axis. `Some(...)` if the
+    /// track has columns (defaulting to `"column"` when the attr was absent);
+    /// `None` for 1D tracks.
+    pub column_dim_name: Option<String>,
     pub description: Option<String>,
     pub source: Option<String>,
     /// Tool-specific metadata preserved from the `perbase_zarr_track` attribute.
@@ -87,7 +101,7 @@ pub struct Track {
     name: String,
     group_path: String,
     metadata: TrackMetadata,
-    samples: Option<Vec<String>>,
+    columns: Option<Vec<String>>,
     contig_lengths: HashMap<String, u64>,
 }
 
@@ -96,7 +110,7 @@ impl std::fmt::Debug for Track {
         f.debug_struct("Track")
             .field("name", &self.name)
             .field("metadata", &self.metadata)
-            .field("samples", &self.samples)
+            .field("columns", &self.columns)
             .finish_non_exhaustive()
     }
 }
@@ -113,17 +127,17 @@ impl Track {
         config: &TrackConfig,
         contig_lengths: &HashMap<String, u64>,
     ) -> Result<Self> {
-        // pbz[impl per_base.data.single-sample-1d]
-        if let Some(ref s) = config.samples {
+        // pbz[impl per_base.data.single-column-1d]
+        if let Some(ref s) = config.columns {
             if s.len() == 1 {
-                return Err(PbzError::SingleSampleMustBe1D);
+                return Err(PbzError::SingleColumnMustBe1D);
             }
-            // pbz[impl per_base.samples.unique]
+            // pbz[impl per_base.columns.unique]
             let mut seen = std::collections::HashSet::new();
             for name in s {
                 if !seen.insert(name.as_str()) {
                     return Err(PbzError::Metadata(format!(
-                        "duplicate sample id {name:?} in track samples"
+                        "duplicate column id {name:?} in track columns"
                     )));
                 }
             }
@@ -134,16 +148,16 @@ impl Track {
         // pbz[impl missing.fill_value]
         // pbz[impl missing.fill_value.defaults]
         let fill_value = fill_value_for_dtype(&config.dtype)?;
-        let has_samples = config.samples.is_some();
+        let has_columns = config.columns.is_some();
         let group_path = format!("/tracks/{name}");
-        let num_samples = config.samples.as_ref().map(|c| c.len() as u64).unwrap_or(0);
+        let num_columns = config.columns.as_ref().map(|c| c.len() as u64).unwrap_or(0);
 
-        // Cap sample chunk size so chunks are always full along the sample axis.
-        // pbz[impl per_base.attrs.sample_chunk_size]
-        let actual_sample_chunk = if has_samples {
-            config.sample_chunk_size.min(num_samples)
+        // Cap column chunk size so chunks are always full along the columns axis.
+        // pbz[impl per_base.attrs.column_chunk_size]
+        let actual_column_chunk = if has_columns {
+            config.column_chunk_size.min(num_columns)
         } else {
-            config.sample_chunk_size
+            config.column_chunk_size
         };
 
         // Build track metadata attribute: standard fields + extra
@@ -156,8 +170,17 @@ impl Track {
             "dtype": config.dtype,
             "chunk_size": config.chunk_size,
         });
-        if has_samples {
-            track_meta["sample_chunk_size"] = serde_json::json!(actual_sample_chunk);
+        if has_columns {
+            track_meta["column_chunk_size"] = serde_json::json!(actual_column_chunk);
+            // pbz[impl per_base.attrs.column_dim_name]
+            if let Some(ref dim) = config.column_dim_name {
+                if dim.is_empty() {
+                    return Err(PbzError::Metadata(
+                        "column_dim_name must be a non-empty string".into(),
+                    ));
+                }
+                track_meta["column_dim_name"] = serde_json::json!(dim);
+            }
         }
         if let Some(ref desc) = config.description {
             track_meta["description"] = serde_json::json!(desc);
@@ -186,23 +209,30 @@ impl Track {
             .store_metadata()
             .map_err(|e| PbzError::Store(e.to_string()))?;
 
-        // Samples array (if multi-sample)
-        // pbz[impl per_base.samples.array]
-        // pbz[impl per_base.samples.order]
-        if let Some(ref cols) = config.samples {
-            let samples_path = format!("{group_path}/samples");
-            let samples_array = ArrayBuilder::new(
-                vec![num_samples],
-                vec![num_samples],
+        let effective_dim_name = config
+            .column_dim_name
+            .as_deref()
+            .unwrap_or(DEFAULT_COLUMN_DIM_NAME);
+
+        // Columns array (if multi-column)
+        // pbz[impl per_base.columns.array]
+        // pbz[impl per_base.columns.order]
+        if let Some(ref cols) = config.columns {
+            let columns_path = format!("{group_path}/columns");
+            let columns_array = ArrayBuilder::new(
+                vec![num_columns],
+                vec![num_columns],
                 data_type::string(),
                 "",
             )
-            .build(store.clone(), &samples_path)
+            // The columns array's own dimension name mirrors the second axis name.
+            .dimension_names(Some([effective_dim_name]))
+            .build(store.clone(), &columns_path)
             .map_err(|e| PbzError::Store(e.to_string()))?;
-            samples_array
+            columns_array
                 .store_metadata()
                 .map_err(|e| PbzError::Store(e.to_string()))?;
-            samples_array
+            columns_array
                 .store_chunk(&[0], cols.clone())
                 .map_err(|e| PbzError::Store(e.to_string()))?;
         }
@@ -213,11 +243,11 @@ impl Track {
         for (contig, &length) in contig_lengths {
             let array_path = format!("{group_path}/{contig}");
 
-            let (shape, chunks) = if has_samples {
+            let (shape, chunks) = if has_columns {
                 // pbz[impl per_base.data.shape-2d]
                 (
-                    vec![length, num_samples],
-                    vec![config.chunk_size, actual_sample_chunk],
+                    vec![length, num_columns],
+                    vec![config.chunk_size, actual_column_chunk],
                 )
             } else {
                 // pbz[impl per_base.data.shape-1d]
@@ -247,12 +277,13 @@ impl Track {
             }
 
             // pbz[impl per_base.data.dim-names]
-            let dim_names: Vec<&str> = if has_samples {
-                vec!["position", "sample"]
+            // pbz[impl per_base.attrs.column_dim_name]
+            let dim_names: Vec<&str> = if has_columns {
+                vec!["position", effective_dim_name]
             } else {
                 vec!["position"]
             };
-            builder.dimension_names(dim_names.into());
+            builder.dimension_names(Some(dim_names));
 
             let array = builder
                 .build(store.clone(), &array_path)
@@ -266,8 +297,13 @@ impl Track {
             layout: PER_BASE_LAYOUT.to_string(),
             dtype: config.dtype.clone(),
             chunk_size: config.chunk_size,
-            sample_chunk_size: if has_samples {
-                Some(actual_sample_chunk)
+            column_chunk_size: if has_columns {
+                Some(actual_column_chunk)
+            } else {
+                None
+            },
+            column_dim_name: if has_columns {
+                Some(effective_dim_name.to_string())
             } else {
                 None
             },
@@ -281,7 +317,7 @@ impl Track {
             name: name.to_string(),
             group_path,
             metadata,
-            samples: config.samples.clone(),
+            columns: config.columns.clone(),
             contig_lengths: contig_lengths.clone(),
         })
     }
@@ -341,20 +377,30 @@ impl Track {
             .and_then(|v| v.as_u64())
             .ok_or_else(|| PbzError::Metadata("track metadata missing 'chunk_size'".into()))?;
 
-        // Authoritative: presence of the samples array determines multi-sample.
-        let samples_path = format!("{group_path}/samples");
-        let has_samples = Array::open(store.clone(), &samples_path).is_ok();
+        // Authoritative: presence of the columns array determines multi-column.
+        let columns_path = format!("{group_path}/columns");
+        let has_columns = Array::open(store.clone(), &columns_path).is_ok();
 
-        let sample_chunk_size = if has_samples {
+        let column_chunk_size = if has_columns {
             Some(
                 track_obj
-                    .get("sample_chunk_size")
+                    .get("column_chunk_size")
                     .and_then(|v| v.as_u64())
                     .ok_or_else(|| {
-                        PbzError::Metadata(
-                            "multi-sample track missing 'sample_chunk_size'".into(),
-                        )
+                        PbzError::Metadata("multi-column track missing 'column_chunk_size'".into())
                     })?,
+            )
+        } else {
+            None
+        };
+
+        let column_dim_name = if has_columns {
+            Some(
+                track_obj
+                    .get("column_dim_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(DEFAULT_COLUMN_DIM_NAME)
+                    .to_string(),
             )
         } else {
             None
@@ -379,10 +425,10 @@ impl Track {
             }
         }
 
-        let samples = if has_samples {
-            let samples_array = Array::open(store.clone(), &samples_path)
+        let columns = if has_columns {
+            let columns_array = Array::open(store.clone(), &columns_path)
                 .map_err(|e| PbzError::Store(e.to_string()))?;
-            let cols: Vec<String> = samples_array
+            let cols: Vec<String> = columns_array
                 .retrieve_chunk::<Vec<String>>(&[0])
                 .map_err(|e| PbzError::Store(e.to_string()))?;
             Some(cols)
@@ -394,7 +440,8 @@ impl Track {
             layout: PER_BASE_LAYOUT.to_string(),
             dtype,
             chunk_size,
-            sample_chunk_size,
+            column_chunk_size,
+            column_dim_name,
             description,
             source,
             extra,
@@ -405,7 +452,7 @@ impl Track {
             name: name.to_string(),
             group_path,
             metadata,
-            samples,
+            columns,
             contig_lengths: contig_lengths.clone(),
         })
     }
@@ -472,14 +519,25 @@ impl Track {
         Ok(())
     }
 
-    /// Whether this track has a sample dimension.
-    pub fn has_samples(&self) -> bool {
-        self.samples.is_some()
+    /// Whether this track has a columns dimension.
+    pub fn has_columns(&self) -> bool {
+        self.columns.is_some()
     }
 
-    /// Sample names, if this is a multi-sample track.
-    pub fn samples(&self) -> Option<&[String]> {
-        self.samples.as_deref()
+    /// Column names, if this is a multi-column track.
+    pub fn columns(&self) -> Option<&[String]> {
+        self.columns.as_deref()
+    }
+
+    /// Xarray dimension name for the columns axis.
+    ///
+    /// Returns the stored `column_dim_name` attribute, or `"column"` if the
+    /// track is 1D or the attribute was absent (i.e. the default).
+    pub fn column_dim_name(&self) -> &str {
+        self.metadata
+            .column_dim_name
+            .as_deref()
+            .unwrap_or(DEFAULT_COLUMN_DIM_NAME)
     }
 
     /// The track layout (always `"per_base"` for spec v0.1).
@@ -542,13 +600,13 @@ impl Track {
         chunk_idx: u64,
         data: Array2<T>,
     ) -> Result<()> {
-        if !self.has_samples() {
+        if !self.has_columns() {
             return Err(PbzError::Metadata(
                 "write_chunk called on a scalar track; use write_chunk_1d instead".into(),
             ));
         }
 
-        let expected_cols = self.samples.as_ref().map(|c| c.len()).unwrap_or(0);
+        let expected_cols = self.columns.as_ref().map(|c| c.len()).unwrap_or(0);
         if data.ncols() != expected_cols {
             return Err(PbzError::Metadata(format!(
                 "column count mismatch: data has {} columns but track has {}",
@@ -590,14 +648,14 @@ impl Track {
     /// Returns shape `(chunk_positions, num_columns)`. The last chunk may
     /// have fewer rows than `chunk_size`.
     pub fn read_chunk<T: ElementOwned>(&self, contig: &str, chunk_idx: u64) -> Result<Array2<T>> {
-        if !self.has_samples() {
+        if !self.has_columns() {
             return Err(PbzError::Metadata(
                 "read_chunk called on a scalar track; use read_chunk_1d instead".into(),
             ));
         }
 
         let contig_length = self.contig_length(contig)?;
-        let num_columns = self.samples.as_ref().map(|c| c.len() as u64).unwrap_or(0);
+        let num_columns = self.columns.as_ref().map(|c| c.len() as u64).unwrap_or(0);
         let (start, end) = self.chunk_bounds(chunk_idx, contig_length);
         let subset = ArraySubset::new_with_ranges(&[start..end, 0..num_columns]);
 
@@ -619,7 +677,7 @@ impl Track {
         chunk_idx: u64,
         data: Array1<T>,
     ) -> Result<()> {
-        if self.has_samples() {
+        if self.has_columns() {
             return Err(PbzError::Metadata(
                 "write_chunk_1d called on a columnar track; use write_chunk instead".into(),
             ));
@@ -659,7 +717,7 @@ impl Track {
         contig: &str,
         chunk_idx: u64,
     ) -> Result<Array1<T>> {
-        if self.has_samples() {
+        if self.has_columns() {
             return Err(PbzError::Metadata(
                 "read_chunk_1d called on a columnar track; use read_chunk instead".into(),
             ));
@@ -798,8 +856,8 @@ mod tests {
         let config = TrackConfig::default();
         assert_eq!(config.dtype, "uint32");
         assert_eq!(config.chunk_size, 1_000_000);
-        assert_eq!(config.sample_chunk_size, 16);
-        assert!(config.samples.is_none());
+        assert_eq!(config.column_chunk_size, 16);
+        assert!(config.columns.is_none());
         assert!(config.extra.is_empty());
     }
 
@@ -810,9 +868,9 @@ mod tests {
         let (_dir, store) = test_store();
         let config = TrackConfig {
             dtype: "uint32".into(),
-            samples: Some(vec!["s1".into(), "s2".into(), "s3".into()]),
+            columns: Some(vec!["s1".into(), "s2".into(), "s3".into()]),
             chunk_size: 1000,
-            sample_chunk_size: 16,
+            column_chunk_size: 16,
             ..Default::default()
         };
         let track = Track::create(
@@ -825,8 +883,8 @@ mod tests {
 
         assert_eq!(track.name(), "depths");
         assert_eq!(track.metadata().dtype, "uint32");
-        assert!(track.has_samples());
-        assert_eq!(track.samples().unwrap(), &["s1", "s2", "s3"]);
+        assert!(track.has_columns());
+        assert_eq!(track.columns().unwrap(), &["s1", "s2", "s3"]);
     }
 
     #[test]
@@ -834,7 +892,7 @@ mod tests {
         let (_dir, store) = test_store();
         let config = TrackConfig {
             dtype: "bool".into(),
-            samples: None,
+            columns: None,
             chunk_size: 1000,
             ..Default::default()
         };
@@ -846,8 +904,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!track.has_samples());
-        assert!(track.samples().is_none());
+        assert!(!track.has_columns());
+        assert!(track.columns().is_none());
         assert_eq!(track.metadata().dtype, "bool");
     }
 
@@ -858,9 +916,9 @@ mod tests {
         let (_dir, store) = test_store();
         let config = TrackConfig {
             dtype: "uint32".into(),
-            samples: Some(vec!["s1".into(), "s2".into()]),
+            columns: Some(vec!["s1".into(), "s2".into()]),
             chunk_size: 1000,
-            sample_chunk_size: 16,
+            column_chunk_size: 16,
             description: Some("test track".into()),
             source: Some("unit test".into()),
             ..Default::default()
@@ -878,9 +936,9 @@ mod tests {
         assert_eq!(track.name(), "depths");
         assert_eq!(track.metadata().dtype, "uint32");
         assert_eq!(track.metadata().chunk_size, 1000);
-        assert_eq!(track.metadata().sample_chunk_size, Some(2));
-        assert!(track.has_samples());
-        assert_eq!(track.samples().unwrap(), &["s1", "s2"]);
+        assert_eq!(track.metadata().column_chunk_size, Some(2));
+        assert!(track.has_columns());
+        assert_eq!(track.columns().unwrap(), &["s1", "s2"]);
         assert_eq!(track.metadata().description.as_deref(), Some("test track"));
         assert_eq!(track.metadata().source.as_deref(), Some("unit test"));
     }
@@ -890,7 +948,7 @@ mod tests {
         let (_dir, store) = test_store();
         let config = TrackConfig {
             dtype: "float32".into(),
-            samples: None,
+            columns: None,
             chunk_size: 500,
             ..Default::default()
         };
@@ -904,10 +962,10 @@ mod tests {
 
         let track = Track::open(store.storage().clone(), "signal", store.contig_lengths()).unwrap();
 
-        assert!(!track.has_samples());
-        assert!(track.samples().is_none());
+        assert!(!track.has_columns());
+        assert!(track.columns().is_none());
         assert_eq!(track.metadata().chunk_size, 500);
-        assert!(track.metadata().sample_chunk_size.is_none());
+        assert!(track.metadata().column_chunk_size.is_none());
     }
 
     #[test]
@@ -924,7 +982,7 @@ mod tests {
 
         let config = TrackConfig {
             dtype: "bool".into(),
-            samples: Some(vec!["s1".into(), "s2".into()]),
+            columns: Some(vec!["s1".into(), "s2".into()]),
             chunk_size: 1000,
             extra,
             ..Default::default()
@@ -952,7 +1010,7 @@ mod tests {
         let config = TrackConfig {
             dtype: "uint32".into(),
             chunk_size: 1000,
-            samples: Some(vec!["s1".into(), "s2".into()]),
+            columns: Some(vec!["s1".into(), "s2".into()]),
             ..Default::default()
         };
         let track = Track::create(
@@ -985,9 +1043,9 @@ mod tests {
         let (_dir, store) = test_store();
         let config = TrackConfig {
             dtype: "uint32".into(),
-            samples: Some(vec!["s1".into(), "s2".into()]),
+            columns: Some(vec!["s1".into(), "s2".into()]),
             chunk_size: 1000,
-            sample_chunk_size: 16,
+            column_chunk_size: 16,
             ..Default::default()
         };
         let track = Track::create(
@@ -1018,9 +1076,9 @@ mod tests {
         // chr2 is 3000bp, chunk_size=1100 → 2 full chunks + partial (800 rows)
         let config = TrackConfig {
             dtype: "uint32".into(),
-            samples: Some(vec!["s1".into(), "s2".into()]),
+            columns: Some(vec!["s1".into(), "s2".into()]),
             chunk_size: 1100,
-            sample_chunk_size: 16,
+            column_chunk_size: 16,
             ..Default::default()
         };
         let track = Track::create(
@@ -1045,9 +1103,9 @@ mod tests {
         let (_dir, store) = test_store();
         let config = TrackConfig {
             dtype: "bool".into(),
-            samples: Some(vec!["s1".into(), "s2".into()]),
+            columns: Some(vec!["s1".into(), "s2".into()]),
             chunk_size: 1000,
-            sample_chunk_size: 16,
+            column_chunk_size: 16,
             ..Default::default()
         };
         let track = Track::create(
@@ -1079,9 +1137,9 @@ mod tests {
         let (_dir, store) = test_store();
         let config = TrackConfig {
             dtype: "uint32".into(),
-            samples: Some(vec!["s1".into(), "s2".into()]),
+            columns: Some(vec!["s1".into(), "s2".into()]),
             chunk_size: 1000,
-            sample_chunk_size: 16,
+            column_chunk_size: 16,
             ..Default::default()
         };
         let track = Track::create(
@@ -1104,7 +1162,7 @@ mod tests {
         let (_dir, store) = test_store();
         let config = TrackConfig {
             dtype: "float32".into(),
-            samples: None,
+            columns: None,
             chunk_size: 1000,
             ..Default::default()
         };
@@ -1132,7 +1190,7 @@ mod tests {
         // Use chunk_size=1100 for partial: 3000/1100 = 2 full + 800 partial
         let config = TrackConfig {
             dtype: "bool".into(),
-            samples: None,
+            columns: None,
             chunk_size: 1100,
             ..Default::default()
         };
@@ -1164,7 +1222,7 @@ mod tests {
             "col",
             &TrackConfig {
                 dtype: "uint32".into(),
-                samples: Some(vec!["s1".into(), "s2".into()]),
+                columns: Some(vec!["s1".into(), "s2".into()]),
                 chunk_size: 1000,
                 ..Default::default()
             },
@@ -1178,7 +1236,7 @@ mod tests {
             "scalar",
             &TrackConfig {
                 dtype: "uint32".into(),
-                samples: None,
+                columns: None,
                 chunk_size: 1000,
                 ..Default::default()
             },
@@ -1205,12 +1263,13 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[1000u64]).unwrap();
         let cfg = TrackConfig {
             dtype: "uint32".into(),
-            samples: Some(vec!["s1".into(), "s2".into()]),
+            columns: Some(vec!["s1".into(), "s2".into()]),
             chunk_size: 100,
-            sample_chunk_size: 1,
+            column_chunk_size: 1,
             description: Some("orig".into()),
             source: None,
             extra: serde_json::Map::new(),
+            column_dim_name: None,
         };
         let mut track = store.create_track("t", cfg).unwrap();
         track.set_description(Some("updated")).unwrap();
@@ -1230,12 +1289,13 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
         let cfg = TrackConfig {
             dtype: "uint32".into(),
-            samples: None,
+            columns: None,
             chunk_size: 100,
-            sample_chunk_size: 1,
+            column_chunk_size: 1,
             description: Some("orig".into()),
             source: None,
             extra: serde_json::Map::new(),
+            column_dim_name: None,
         };
         let mut track = store.create_track("t", cfg).unwrap();
         track.set_description(None).unwrap();
@@ -1254,12 +1314,13 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[1000u64]).unwrap();
         let cfg = TrackConfig {
             dtype: "uint32".into(),
-            samples: Some(vec!["s1".into(), "s2".into()]),
+            columns: Some(vec!["s1".into(), "s2".into()]),
             chunk_size: 100,
-            sample_chunk_size: 1,
+            column_chunk_size: 1,
             description: None,
             source: Some("orig".into()),
             extra: serde_json::Map::new(),
+            column_dim_name: None,
         };
         let mut track = store.create_track("t", cfg).unwrap();
         track.set_source(Some("updated")).unwrap();
@@ -1285,12 +1346,13 @@ mod tests {
         );
         let cfg = TrackConfig {
             dtype: "uint32".into(),
-            samples: None,
+            columns: None,
             chunk_size: 100,
-            sample_chunk_size: 1,
+            column_chunk_size: 1,
             description: Some("orig".into()),
             source: None,
             extra,
+            column_dim_name: None,
         };
         let mut track = store.create_track("t", cfg).unwrap();
         track.set_description(Some("updated")).unwrap();
@@ -1322,12 +1384,13 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
         let cfg = TrackConfig {
             dtype: "uint32".into(),
-            samples: None,
+            columns: None,
             chunk_size: 100,
-            sample_chunk_size: 1,
+            column_chunk_size: 1,
             description: Some("orig".into()),
             source: None,
             extra: serde_json::Map::new(),
+            column_dim_name: None,
         };
         store.create_track("t", cfg).unwrap();
 
@@ -1398,12 +1461,13 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
         let cfg = TrackConfig {
             dtype: "uint32".into(),
-            samples: None,
+            columns: None,
             chunk_size: 100,
-            sample_chunk_size: 1,
+            column_chunk_size: 1,
             description: None,
             source: Some("orig".into()),
             extra: serde_json::Map::new(),
+            column_dim_name: None,
         };
         let mut track = store.create_track("t", cfg).unwrap();
         track.set_source(None).unwrap();
@@ -1412,5 +1476,86 @@ mod tests {
         let store2 = PbzStore::open(&store_path).unwrap();
         let track2 = store2.track("t").unwrap();
         assert_eq!(track2.metadata().source, None);
+    }
+
+    #[test]
+    fn create_with_column_dim_name() {
+        let (_dir, store) = test_store();
+        let config = TrackConfig {
+            dtype: "uint16".into(),
+            columns: Some(vec!["m6A_h1".into(), "m6A_h2".into(), "nuc_all".into()]),
+            chunk_size: 1000,
+            column_chunk_size: 16,
+            column_dim_name: Some("feature".into()),
+            ..Default::default()
+        };
+        let track = Track::create(
+            store.storage().clone(),
+            "pileup",
+            &config,
+            store.contig_lengths(),
+        )
+        .unwrap();
+
+        assert!(track.has_columns());
+        assert_eq!(track.columns().unwrap(), &["m6A_h1", "m6A_h2", "nuc_all"]);
+        assert_eq!(track.column_dim_name(), "feature");
+
+        // Verify the data array's dimension names include "feature" as the column dim.
+        let arr = track.zarr_array("chr1").unwrap();
+        let dims: Vec<String> = arr
+            .dimension_names()
+            .as_ref()
+            .expect("dimension names should be set")
+            .iter()
+            .map(|d| d.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(dims, vec!["position".to_string(), "feature".to_string()]);
+    }
+
+    #[test]
+    fn open_preserves_column_dim_name() {
+        let (_dir, store) = test_store();
+        let config = TrackConfig {
+            dtype: "uint32".into(),
+            columns: Some(vec!["s1".into(), "s2".into()]),
+            chunk_size: 1000,
+            column_chunk_size: 16,
+            column_dim_name: Some("sample".into()),
+            ..Default::default()
+        };
+        Track::create(
+            store.storage().clone(),
+            "depths",
+            &config,
+            store.contig_lengths(),
+        )
+        .unwrap();
+
+        let track = Track::open(store.storage().clone(), "depths", store.contig_lengths()).unwrap();
+        assert_eq!(track.column_dim_name(), "sample");
+    }
+
+    #[test]
+    fn column_dim_name_defaults_to_column_when_absent() {
+        let (_dir, store) = test_store();
+        let config = TrackConfig {
+            dtype: "uint32".into(),
+            columns: Some(vec!["c1".into(), "c2".into()]),
+            chunk_size: 1000,
+            column_chunk_size: 16,
+            column_dim_name: None,
+            ..Default::default()
+        };
+        Track::create(
+            store.storage().clone(),
+            "t",
+            &config,
+            store.contig_lengths(),
+        )
+        .unwrap();
+
+        let track = Track::open(store.storage().clone(), "t", store.contig_lengths()).unwrap();
+        assert_eq!(track.column_dim_name(), "column");
     }
 }

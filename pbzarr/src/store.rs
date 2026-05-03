@@ -440,14 +440,10 @@ where
             let layout = meta.get("layout").and_then(|v| v.as_str());
             match layout {
                 None => {
-                    log::warn!(
-                        "track {relative_name:?} missing 'layout' attribute; skipping"
-                    );
+                    log::warn!("track {relative_name:?} missing 'layout' attribute; skipping");
                 }
                 Some(l) if !KNOWN_LAYOUTS.contains(&l) => {
-                    log::warn!(
-                        "track {relative_name:?} has unrecognized layout {l:?}; skipping"
-                    );
+                    log::warn!("track {relative_name:?} has unrecognized layout {l:?}; skipping");
                 }
                 Some(_) => {
                     out.push(relative_name.clone());
@@ -668,7 +664,7 @@ mod tests {
 
         let config = TrackConfig {
             dtype: "uint32".into(),
-            samples: Some(vec!["s1".into(), "s2".into()]),
+            columns: Some(vec!["s1".into(), "s2".into()]),
             chunk_size: 1_000_000,
             ..Default::default()
         };
@@ -680,7 +676,7 @@ mod tests {
 
         let track2 = store.track("depths").unwrap();
         assert_eq!(track2.metadata().dtype, "uint32");
-        assert!(track2.has_samples());
+        assert!(track2.has_columns());
     }
 
     #[test]
@@ -701,12 +697,13 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
         let cfg = crate::track::TrackConfig {
             dtype: "uint32".into(),
-            samples: None,
+            columns: None,
             chunk_size: 100,
-            sample_chunk_size: 1,
+            column_chunk_size: 1,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
+            column_dim_name: None,
         };
         store.create_track("old", cfg).unwrap();
         store.rename_track("old", "new").unwrap();
@@ -737,21 +734,23 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
         let cfg_a = crate::track::TrackConfig {
             dtype: "uint32".into(),
-            samples: None,
+            columns: None,
             chunk_size: 100,
-            sample_chunk_size: 1,
+            column_chunk_size: 1,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
+            column_dim_name: None,
         };
         let cfg_b = crate::track::TrackConfig {
             dtype: "uint32".into(),
-            samples: None,
+            columns: None,
             chunk_size: 100,
-            sample_chunk_size: 1,
+            column_chunk_size: 1,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
+            column_dim_name: None,
         };
         store.create_track("a", cfg_a).unwrap();
         store.create_track("b", cfg_b).unwrap();
@@ -766,12 +765,13 @@ mod tests {
         let store = PbzStore::create(&store_path, &["chr1".to_string()], &[100u64]).unwrap();
         let cfg = crate::track::TrackConfig {
             dtype: "uint32".into(),
-            samples: None,
+            columns: None,
             chunk_size: 100,
-            sample_chunk_size: 1,
+            column_chunk_size: 1,
             description: None,
             source: None,
             extra: serde_json::Map::new(),
+            column_dim_name: None,
         };
         store.create_track("t", cfg).unwrap();
         assert!(store_path.join("tracks/t").exists());
