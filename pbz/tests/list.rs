@@ -37,7 +37,7 @@ fn list_columns_for_columnar_track() {
         .unwrap()
         .args(["list"])
         .arg(&f.path)
-        .args(["--samples", "depths"])
+        .args(["--columns", "depths"])
         .assert()
         .success()
         .stdout("s0\ns1\ns2\n");
@@ -50,7 +50,7 @@ fn list_columns_on_scalar_track_errors() {
         .unwrap()
         .args(["list"])
         .arg(&f.path)
-        .args(["--samples", "mask"])
+        .args(["--columns", "mask"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("scalar"));

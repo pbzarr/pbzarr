@@ -38,7 +38,7 @@ fn import_single_bed3_creates_1d_bool_track() {
 }
 
 #[test]
-fn import_two_bed3_with_sample_suffix_creates_2d_track() {
+fn import_two_bed3_with_column_suffix_creates_2d_track() {
     let store_dir = TempDir::new().unwrap();
     let store_path = store_dir.path().join("s.pbz.zarr");
     let a = build_bgz_bed("chr1\t100\t200\n");
@@ -65,7 +65,7 @@ fn import_two_bed3_with_sample_suffix_creates_2d_track() {
         .args([
             "list",
             store_path.to_str().unwrap(),
-            "--samples",
+            "--columns",
             "callable",
         ])
         .assert()

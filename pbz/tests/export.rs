@@ -42,7 +42,7 @@ fn export_tsv_column_filter() {
         .arg("-o")
         .arg(&out)
         .args(["--region", "chr1:0-2"])
-        .args(["--sample", "s1"])
+        .args(["--column", "s1"])
         .assert()
         .success();
     let contents = fs::read_to_string(&out).unwrap();
@@ -135,7 +135,7 @@ fn export_unknown_column_errors() {
         .arg("depths")
         .arg("-o")
         .arg(&out)
-        .args(["--sample", "nonexistent"])
+        .args(["--column", "nonexistent"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("column not found"));
@@ -153,9 +153,10 @@ fn export_bedgraph_include_zero_changes_output() {
     let store = PbzStore::open(&path).unwrap();
     let cfg = TrackConfig {
         dtype: "uint32".into(),
-        samples: None,
+        columns: None,
         chunk_size: 100,
-        sample_chunk_size: 1,
+        column_chunk_size: 1,
+        column_dim_name: None,
         description: None,
         source: None,
         extra: serde_json::Map::new(),
