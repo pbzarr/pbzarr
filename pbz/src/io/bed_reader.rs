@@ -15,6 +15,7 @@ pub(crate) enum BedFlavor {
 }
 
 impl BedFlavor {
+    #[allow(dead_code)] // exposed for future column-count validation
     pub(crate) fn expected_cols(self) -> usize {
         match self {
             BedFlavor::Mask => 3,
@@ -254,17 +255,18 @@ impl BedIntervalSource {
             }
 
             // Sortedness within contig
-            if let Some((prev_contig, prev_start)) = &prev {
-                if *prev_contig == contig && rec.start < *prev_start {
-                    return Err(BedError::Unsorted {
-                        path: path.to_path_buf(),
-                        line: lineno,
-                        contig: contig.clone(),
-                        this_start: rec.start,
-                        prev_contig: prev_contig.clone(),
-                        prev_start: *prev_start,
-                    });
-                }
+            if let Some((prev_contig, prev_start)) = &prev
+                && *prev_contig == contig
+                && rec.start < *prev_start
+            {
+                return Err(BedError::Unsorted {
+                    path: path.to_path_buf(),
+                    line: lineno,
+                    contig: contig.clone(),
+                    this_start: rec.start,
+                    prev_contig: prev_contig.clone(),
+                    prev_start: *prev_start,
+                });
             }
             prev = Some((contig.clone(), rec.start));
 
@@ -350,6 +352,7 @@ impl BedPerBaseReader {
         Ok(Self { source, dtype })
     }
 
+    #[allow(dead_code)] // exposed for callers that switch behavior on flavor
     pub fn flavor(&self) -> BedFlavor {
         self.source.flavor
     }

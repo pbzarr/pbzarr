@@ -3,6 +3,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum BedError {
+    #[allow(dead_code)] // raised by future plain-BED detection path
     #[error("file must be bgzipped (.bed.gz); plain BED not supported: {path}")]
     NotBgzipped { path: PathBuf },
 

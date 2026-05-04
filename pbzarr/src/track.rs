@@ -1131,7 +1131,7 @@ mod tests {
 
         assert_eq!(read_back.shape(), &[1000, 2]);
         for i in 0..1000 {
-            assert_eq!(read_back[[i, 0]], true);
+            assert!(read_back[[i, 0]]);
             assert_eq!(read_back[[i, 1]], i % 2 == 0);
         }
     }
@@ -1211,9 +1211,9 @@ mod tests {
 
         let read_back: Array1<bool> = track.read_chunk_1d("chr2", 2).unwrap();
         assert_eq!(read_back.len(), 800);
-        assert_eq!(read_back[0], true);
-        assert_eq!(read_back[1], false);
-        assert_eq!(read_back[799], false);
+        assert!(read_back[0]);
+        assert!(!read_back[1]);
+        assert!(!read_back[799]);
     }
 
     #[test]

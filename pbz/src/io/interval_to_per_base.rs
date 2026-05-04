@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn single_interval_filled() {
-        let recs = vec![rec(12, 15)];
+        let recs = [rec(12, 15)];
         let arr = expand_intervals_into::<bool>(
             recs.iter(),
             "chr1",
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn interval_clipped_to_region() {
-        let recs = vec![rec(5, 12), rec(18, 25)];
+        let recs = [rec(5, 12), rec(18, 25)];
         let arr = expand_intervals_into::<bool>(
             recs.iter(),
             "chr1",
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn intervals_outside_region_skipped() {
-        let recs = vec![rec(0, 5), rec(25, 30)];
+        let recs = [rec(0, 5), rec(25, 30)];
         let arr = expand_intervals_into::<bool>(
             recs.iter(),
             "chr1",
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn overlap_within_region_is_error() {
-        let recs = vec![rec(10, 15), rec(14, 18)];
+        let recs = [rec(10, 15), rec(14, 18)];
         let err = expand_intervals_into::<bool>(
             recs.iter(),
             "chr1",
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn expand_with_numeric_fills_correctly() {
-        let recs = vec![nrec(10, 13, 5.0), nrec(15, 18, 7.0)];
+        let recs = [nrec(10, 13, 5.0), nrec(15, 18, 7.0)];
         let arr = expand_intervals_into::<u8>(
             recs.iter(),
             "chr1",
