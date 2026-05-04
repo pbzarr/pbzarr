@@ -1,0 +1,33 @@
+[workspace]
+name = "pbzarr-rs"
+description = "Rust workspace for the PBZ (Per-Base Zarr) library and pbz CLI"
+authors = ["Cade Mirchandani <cmirchan@ucsc.edu>"]
+channels = ["conda-forge", "bioconda"]
+platforms = ["osx-arm64", "osx-64", "linux-64"]
+
+[dependencies]
+rust = "1.93.0.*"
+pkg-config = "0.29.2.*"
+
+[tasks]
+build = "cargo build --workspace"
+build-release = "cargo build --workspace --release"
+test = "cargo test --workspace"
+clippy = "cargo clippy --workspace -- -D warnings"
+fmt = "cargo fmt --all"
+fmt-check = "cargo fmt --all -- --check"
+check = { depends-on = ["fmt-check", "clippy", "test"] }
+clean = "cargo clean"
+doc = "cargo doc --workspace --no-deps --open"
+
+# --- dev feature: tooling for running the import e2e tests ---
+[feature.dev.dependencies]
+# osx-arm64 has 0.3.11; linux-64/osx-64 ship 0.3.10. Pin to the 0.3 line.
+d4tools = ">=0.3.10,<0.4"
+
+[feature.dev.tasks]
+test-import = "cargo test -p pbz --test import -- --nocapture"
+
+# --- environments ---
+[environments]
+default = { features = ["dev"], solve-group = "default" }
