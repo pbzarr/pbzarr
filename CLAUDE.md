@@ -91,6 +91,13 @@ CLI uses `color-eyre` for errors, `tracing`/`tracing-subscriber` for logs (env-f
 - Public API gets `///` doc comments; internal helpers don't need them.
 - All coordinates are 0-based, half-open. No 1-based conversion in the library — callers handle their own coordinate systems (the CLI is where 1-based input formats get converted at the boundary).
 - Tests use `tempfile::TempDir` for write paths.
+- **Adding a new attribute to `perbase_zarr_track`?** Update the `STANDARD_FIELDS` array in `pbzarr/src/track.rs` so `Track::open` doesn't shove the new key into `extra` (round-trip would silently double-store it). Mirror the on-disk default behavior used by `column_dim_name`: omit the key from JSON when the user passes `None`; reader falls back to a default.
+- **`zarrs` `DimensionName` is `Option<String>`**, not a wrapper struct. Extract with `.clone().unwrap_or_default()` or `.expect("dim name set")` in tests.
+- **Cohort tracks** should set `TrackConfig::column_dim_name = Some("sample".into())`, gated on `has_columns` (don't set it on 1D tracks). Generic tracks leave it `None` (default `"column"`).
+
+## Lint Caveat
+
+The `feat/pbz-cli-v1` branch carries pre-existing clippy errors in `pbz/src/io/bed_error.rs` and `pbz/src/io/bed_reader.rs` (unused variant, unused methods, collapsible `if`). They are unrelated to any current task; do not "fix" them as part of unrelated work.
 
 ## Historical Reference
 
