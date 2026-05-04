@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Mirrors clam's plain `D4Reader` pattern: opens a single track via
 /// `D4TrackReader::from_reader` and reads dense per-base depths via the
-/// streaming view API. No multisample / Bgzf support — that's deferred.
+/// streaming view API.
 pub struct D4Reader {
     // Kept for diagnostic messages so chunk-read errors can name the offending input.
     path: PathBuf,

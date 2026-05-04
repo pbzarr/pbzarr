@@ -18,9 +18,7 @@ pub enum BedError {
         got_cols: usize,
     },
 
-    #[error(
-        "flavor changed mid-file at {path}:{line}: expected {expected} columns, got {got}"
-    )]
+    #[error("flavor changed mid-file at {path}:{line}: expected {expected} columns, got {got}")]
     FlavorMixed {
         path: PathBuf,
         line: usize,
@@ -52,9 +50,7 @@ pub enum BedError {
         prev_end: u64,
     },
 
-    #[error(
-        "BED references contig '{contig}' at {path}:{line} not present in --contigs / store"
-    )]
+    #[error("BED references contig '{contig}' at {path}:{line} not present in --contigs / store")]
     UnknownContig {
         path: PathBuf,
         line: usize,

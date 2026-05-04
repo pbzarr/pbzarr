@@ -107,7 +107,12 @@ where
     Ok(U::try_from(x as u64).expect("range checked above"))
 }
 
-fn cast_f64_to_int<I>(v: &IntervalValue, min: f64, max: f64, dtype: &'static str) -> Result<I, BedError>
+fn cast_f64_to_int<I>(
+    v: &IntervalValue,
+    min: f64,
+    max: f64,
+    dtype: &'static str,
+) -> Result<I, BedError>
 where
     I: TryFrom<i64>,
     <I as TryFrom<i64>>::Error: std::fmt::Debug,
@@ -144,7 +149,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn rec(start: u64, end: u64) -> IntervalRecord {
-        IntervalRecord { start, end, value: IntervalValue::Mask }
+        IntervalRecord {
+            start,
+            end,
+            value: IntervalValue::Mask,
+        }
     }
 
     fn p() -> PathBuf {
@@ -180,7 +189,9 @@ mod tests {
             &p(),
         )
         .unwrap();
-        let expected = [false, false, true, true, true, false, false, false, false, false];
+        let expected = [
+            false, false, true, true, true, false, false, false, false, false,
+        ];
         for (i, &v) in arr.iter().enumerate() {
             assert_eq!(v, expected[i], "mismatch at index {i}");
         }
@@ -199,7 +210,9 @@ mod tests {
             &p(),
         )
         .unwrap();
-        let expected = [true, true, false, false, false, false, false, false, true, true];
+        let expected = [
+            true, true, false, false, false, false, false, false, true, true,
+        ];
         for (i, &v) in arr.iter().enumerate() {
             assert_eq!(v, expected[i], "mismatch at index {i}");
         }
@@ -238,7 +251,11 @@ mod tests {
     }
 
     fn nrec(start: u64, end: u64, v: f64) -> IntervalRecord {
-        IntervalRecord { start, end, value: IntervalValue::Numeric(v) }
+        IntervalRecord {
+            start,
+            end,
+            value: IntervalValue::Numeric(v),
+        }
     }
 
     #[test]
@@ -252,7 +269,10 @@ mod tests {
         let too_big = IntervalValue::Numeric(1.0e40);
         assert!(matches!(
             super::cast_f64_to_f32(&too_big),
-            Err(BedError::ValueOutOfRange { dtype: "float32", .. })
+            Err(BedError::ValueOutOfRange {
+                dtype: "float32",
+                ..
+            })
         ));
     }
 

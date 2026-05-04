@@ -330,10 +330,7 @@ pub struct BedPerBaseReader {
 }
 
 impl BedPerBaseReader {
-    pub fn from_source(
-        source: BedIntervalSource,
-        dtype: ValueDtype,
-    ) -> color_eyre::Result<Self> {
+    pub fn from_source(source: BedIntervalSource, dtype: ValueDtype) -> color_eyre::Result<Self> {
         match (source.flavor, dtype) {
             (BedFlavor::Mask, ValueDtype::Bool) => {}
             (BedFlavor::Mask, _) => {
@@ -366,12 +363,7 @@ impl ValueReader for BedPerBaseReader {
         &self.source.contigs
     }
 
-    fn read_chunk(
-        &mut self,
-        contig: &str,
-        start: u64,
-        end: u64,
-    ) -> color_eyre::Result<ValueChunk> {
+    fn read_chunk(&mut self, contig: &str, start: u64, end: u64) -> color_eyre::Result<ValueChunk> {
         let iter = self.source.intervals_in_region(contig, start, end);
         let p = self.source.path.as_path();
         let chunk = match self.dtype {
