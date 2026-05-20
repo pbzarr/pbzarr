@@ -7,6 +7,7 @@
 //!
 use hashbrown::HashMap;
 use crate::error::{PbzError, Result};
+use crate::region_query::RegionQuery;
 
 /// Index of a contig in a [`Genome`]. 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -104,6 +105,32 @@ impl Genome {
             .enumerate()
             .map(|(i, c)| (ContigId(i as u32), c))
     }
+    /// Resolve a [`RegionQuery`] against this genome.
+    ///
+    /// - The contig name is looked up; an unknown name returns
+    ///   [`PbzError::ContigNotFound`].
+    /// - `start` defaults to 0; `end` defaults to the contig's length.
+    /// - `end` is clamped to the contig length (so `"chr1:0-99999999"` on a
+    ///   1000-bp contig becomes `[0, 1000)`).
+    /// - An empty range (after clamping) returns [`PbzError::InvalidRegion`].
+    pub fn resolve(&self, query: &RegionQuery) -> Result<Region> {
+        let id = self.id(&query.contig).ok_or_else(|| PbzError::ContigNotFound {
+            contig: query.contig.clone(),
+            available: self.contigs.iter().map(|c| c.name.clone()).collect(),
+        })?;
+        let length = self.contigs[id.as_usize()].length;
+        let start = query.start.unwrap_or(0);
+        let end = query.end.unwrap_or(length).min(length);
+        if start >= end {
+            return Err(PbzError::InvalidRegion {
+                message: format!(
+                    "resolved range is empty on {} (length {}): start={}, end={}",
+                    query.contig, length, start, end
+                ),
+            });
+        }
+        Ok(Region { contig: id, start, end })
+    }
 }
 
 /// A half-open `[start, end)` range on a [`ContigId`].
@@ -133,3 +160,4 @@ impl std::fmt::Display for Region {
         write!(f, "{}:{}-{}", self.contig, self.start, self.end)
     }
 }
+
