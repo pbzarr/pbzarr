@@ -2,6 +2,9 @@ pub mod error;
 pub mod region;
 pub mod store;
 pub mod track;
+pub mod io;
+pub mod genome;
+
 
 pub use error::{PbzError, Result};
 pub use region::{Region, parse_region};
