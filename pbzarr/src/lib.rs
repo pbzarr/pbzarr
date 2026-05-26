@@ -9,6 +9,7 @@ pub mod genome;
 pub use error::{PbzError, Result};
 pub use region_query::{RegionQuery, parse_region_query};
 pub use genome::{Contig, ContigId, Genome, Region};
+pub use store::PbzStore;
 
 /// PBZ on-disk format version this implementation writes.
 pub const PBZ_FORMAT_VERSION: &str = "0.1";
