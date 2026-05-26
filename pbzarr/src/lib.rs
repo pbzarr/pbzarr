@@ -2,6 +2,7 @@ pub mod error;
 pub mod region_query;
 pub mod store;
 pub mod track;
+pub mod ingest;
 pub mod io;
 pub mod genome;
 
