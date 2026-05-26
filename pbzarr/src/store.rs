@@ -12,6 +12,9 @@ use zarrs::array::data_type;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableWritableListableStorage;
 
+use zarrs::array::codec::api::BytesToBytesCodecTraits;
+use zarrs::array::codec::{BloscCodec, BloscCompressionLevel, BloscCompressor, BloscShuffleMode};
+
 use crate::error::PbzError;
 use crate::genome::{Contig, Genome};
 use crate::io::Dtype;
@@ -273,6 +276,7 @@ impl PbzStore {
 
         let zarrs_dt = dtype_to_zarrs(config.dtype);
         let default_fill = default_fill_value(config.dtype);
+        let data_codecs = default_data_codecs(config.dtype)?;
 
         for contig in self.genome.contigs() {
             let contig_len = contig.length;
@@ -304,6 +308,7 @@ impl PbzStore {
                     default_fill.clone(),
                 )
                 .dimension_names(["position", col_dim_name].into())
+                .bytes_to_bytes_codecs(data_codecs.clone())
                 .build(self.fs.clone(), &data_path)
                 .map_err(|e| PbzError::Store(e.to_string()))?;
                 arr.store_metadata()
@@ -338,6 +343,7 @@ impl PbzStore {
                     default_fill.clone(),
                 )
                 .dimension_names(["position"].into())
+                .bytes_to_bytes_codecs(data_codecs.clone())
                 .build(self.fs.clone(), &data_path)
                 .map_err(|e| PbzError::Store(e.to_string()))?;
                 arr.store_metadata()
@@ -377,6 +383,35 @@ impl PbzStore {
         );
 
         Ok(self.track_handles.get(name).expect("just inserted"))
+    }
+}
+
+/// Default compression: Blosc(zstd, level 5, byte shuffle), per the pbzarr spec.
+///
+/// Built per-array so `typesize` matches the element size. Returns the
+/// vec-form that `ArrayBuilder::bytes_to_bytes_codecs` consumes.
+fn default_data_codecs(dtype: Dtype) -> Result<Vec<Arc<dyn BytesToBytesCodecTraits>>> {
+    let typesize = dtype_size(dtype);
+    let clevel = BloscCompressionLevel::try_from(5u8)
+        .map_err(|e| PbzError::Store(format!("invalid blosc clevel: {e}")))?;
+    let codec = BloscCodec::new(
+        BloscCompressor::Zstd,
+        clevel,
+        None,
+        BloscShuffleMode::Shuffle,
+        Some(typesize),
+    )
+    .map_err(|e| PbzError::Store(format!("blosc codec init: {e}")))?;
+    Ok(vec![Arc::new(codec)])
+}
+
+/// Element size in bytes for each dtype. Drives the blosc `typesize`.
+fn dtype_size(d: Dtype) -> usize {
+    match d {
+        Dtype::U8 | Dtype::I8 | Dtype::Bool => 1,
+        Dtype::U16 | Dtype::I16 => 2,
+        Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
+        Dtype::F64 => 8,
     }
 }
 
