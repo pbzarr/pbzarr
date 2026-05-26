@@ -16,12 +16,6 @@ pub enum PbzError {
         available: Vec<String>,
     },
 
-    #[error("column not found: {name} (available: {available:?})")]
-    ColumnNotFound {
-        name: String,
-        available: Option<Vec<String>>,
-    },
-
     #[error("invalid region: {message}")]
     InvalidRegion { message: String },
 

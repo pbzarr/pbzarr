@@ -25,9 +25,6 @@ doc = "cargo doc --workspace --no-deps --open"
 # osx-arm64 has 0.3.11; linux-64/osx-64 ship 0.3.10. Pin to the 0.3 line.
 d4tools = ">=0.3.10,<0.4"
 
-[feature.dev.tasks]
-test-import = "cargo test -p pbz --test import -- --nocapture"
-
 # --- validate feature: cross-language xarray round-trip ---
 [feature.validate.dependencies]
 python = ">=3.11,<3.13"
