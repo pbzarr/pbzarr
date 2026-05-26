@@ -110,6 +110,11 @@ impl Track {
         &self.name
     }
 
+    /// The genome shared with the owning store.
+    pub fn genome(&self) -> &Arc<Genome> {
+        &self.genome
+    }
+
     pub fn metadata(&self) -> &TrackMetadata {
         &self.metadata
     }

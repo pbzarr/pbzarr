@@ -7,5 +7,5 @@
 mod pipeline;
 mod d4_import;
 
-pub use pipeline::{ImportConfig, ImportReport, ProgressSink};
+pub use pipeline::{ImportConfig, ImportReport, ProgressSink, run_pipeline};
 pub use d4_import::{D4Source, import_d4};
