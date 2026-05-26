@@ -25,7 +25,7 @@ pub struct PbzStore {
     pub(crate) storage: ReadableWritableListableStorage,
     /// Concrete filesystem store for `Array::open` (needs the concrete type).
     pub(crate) fs: Arc<FilesystemStore>,
-    pub(crate) genome: Genome,
+    pub(crate) genome: Arc<Genome>,
     pub(crate) coordinate_space: Option<String>,
     pub(crate) tracks: Map<String, Value>,
     pub(crate) track_handles: HashMap<String, Track>,
@@ -122,7 +122,7 @@ impl PbzStore {
         Ok(Self {
             storage,
             fs,
-            genome,
+            genome: Arc::new(genome),
             coordinate_space,
             tracks: Map::new(),
             track_handles: HashMap::new(),
@@ -204,7 +204,7 @@ impl PbzStore {
             .map(|(name, length)| Contig { name, length: length as u64 })
             .collect();
 
-        let genome = Genome::new(contigs)?;
+        let genome = Arc::new(Genome::new(contigs)?);
 
         // Hydrate track handles from the tracks map.
         let mut track_handles: HashMap<String, Track> = HashMap::new();
@@ -212,7 +212,15 @@ impl PbzStore {
             let metadata: TrackMetadata = serde_json::from_value(val.clone()).map_err(|e| {
                 PbzError::Metadata(format!("invalid track metadata for '{name}': {e}"))
             })?;
-            track_handles.insert(name.clone(), Track { name: name.clone(), metadata });
+            track_handles.insert(
+                name.clone(),
+                Track {
+                    name: name.clone(),
+                    metadata,
+                    fs: Arc::clone(&fs),
+                    genome: Arc::clone(&genome),
+                },
+            );
         }
 
         Ok(Self {
@@ -365,8 +373,15 @@ impl PbzStore {
             .map_err(|e| PbzError::Store(e.to_string()))?;
 
         // Cache the new track handle.
-        self.track_handles
-            .insert(name.to_owned(), Track { name: name.to_owned(), metadata });
+        self.track_handles.insert(
+            name.to_owned(),
+            Track {
+                name: name.to_owned(),
+                metadata,
+                fs: Arc::clone(&self.fs),
+                genome: Arc::clone(&self.genome),
+            },
+        );
 
         Ok(self.track_handles.get(name).expect("just inserted"))
     }
