@@ -153,6 +153,25 @@ impl Track {
         self.metadata.chunk_size
     }
 
+    /// Number of columns: 1 for scalar (rank-1) tracks; for cohort (rank-2)
+    /// tracks, reads shape[1] from the zarr array on the first contig.
+    ///
+    /// Returns 0 only if the store was created with no contigs (degenerate case).
+    pub fn columns_count(&self) -> usize {
+        if self.rank() == 1 {
+            return 1;
+        }
+        let first = match self.genome.contigs().first() {
+            Some(c) => c,
+            None => return 0,
+        };
+        let path = format!("/{}/{}", first.name, self.name);
+        match zarrs::array::Array::open(std::sync::Arc::clone(&self.fs), &path) {
+            Ok(arr) => arr.shape()[1] as usize,
+            Err(_) => 0,
+        }
+    }
+
     /// Read an arbitrary region. Returns an `ArrayD<T>` whose rank matches the
     /// track: shape `[len]` for scalar tracks, `[len, n_cols]` for cohort tracks.
     ///
