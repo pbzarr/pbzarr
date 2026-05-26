@@ -1,18 +1,13 @@
 pub mod error;
-pub mod region;
+pub mod region_query;
 pub mod store;
 pub mod track;
 pub mod io;
 pub mod genome;
 
-
 pub use error::{PbzError, Result};
-pub use region::{Region, parse_region};
-pub use store::PbzStore;
-pub use track::{Track, TrackConfig, TrackMetadata};
+pub use region_query::{RegionQuery, parse_region_query};
+pub use genome::{Contig, ContigId, Genome, Region};
 
-/// PBZ specification version implemented by this crate.
-pub const PERBASE_ZARR_VERSION: &str = "0.1";
-
-/// PBZ spec version this implementation targets. See pbzarr-spec/SPEC.md.
-pub const SPEC_VERSION_TARGET: &str = "0.1";
+/// PBZ on-disk format version this implementation writes.
+pub const PBZ_FORMAT_VERSION: &str = "0.1";
