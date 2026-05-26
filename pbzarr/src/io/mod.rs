@@ -1,9 +1,9 @@
-pub mod reader;
+pub mod d4;
 pub mod dtype;
 pub mod error;
-pub mod d4;
+pub mod reader;
 
-pub use reader::ValueReader;
+pub use d4::D4Reader;
 pub use dtype::{Dtype, Numeric};
 pub use error::{ReaderError, Result};
-pub use d4::D4Reader;
+pub use reader::ValueReader;

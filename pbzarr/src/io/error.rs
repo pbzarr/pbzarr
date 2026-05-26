@@ -56,7 +56,6 @@ pub enum ReaderError {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
-
 }
 
 /// Result alias for reader operations.

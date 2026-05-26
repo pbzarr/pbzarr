@@ -8,10 +8,10 @@ use serde_json::{Map, Value};
 use zarrs::array::ArraySubset;
 use zarrs::filesystem::FilesystemStore;
 
+use crate::Result;
 use crate::error::PbzError;
 use crate::genome::{Genome, Region};
 use crate::io::{Dtype, Numeric};
-use crate::Result;
 
 /// User-supplied configuration for a new track.
 #[derive(Debug, Clone)]
@@ -140,7 +140,11 @@ impl Track {
 
     /// Rank of this track: 1 for scalar, 2 for cohort (has `column_dim`).
     pub fn rank(&self) -> usize {
-        if self.metadata.column_dim.is_some() { 2 } else { 1 }
+        if self.metadata.column_dim.is_some() {
+            2
+        } else {
+            1
+        }
     }
 
     /// The column dimension name if this is a cohort track.
@@ -217,11 +221,7 @@ impl Track {
     /// Partial-chunk writes trigger a read-modify-write internally inside zarrs.
     /// Returns `Err` if `T::DTYPE` doesn't match the track dtype, or if the
     /// data rank doesn't match the track rank.
-    pub fn write_region<T: Numeric>(
-        &self,
-        region: &Region,
-        data: ArrayViewD<'_, T>,
-    ) -> Result<()> {
+    pub fn write_region<T: Numeric>(&self, region: &Region, data: ArrayViewD<'_, T>) -> Result<()> {
         if T::DTYPE != self.dtype() {
             return Err(PbzError::InvalidDtype {
                 dtype: format!(
@@ -257,10 +257,7 @@ impl Track {
             let ranges = [region.start..region.end];
             ArraySubset::new_with_ranges(&ranges)
         } else {
-            ArraySubset::new_with_ranges(&[
-                region.start..region.end,
-                0..(data.shape()[1] as u64),
-            ])
+            ArraySubset::new_with_ranges(&[region.start..region.end, 0..(data.shape()[1] as u64)])
         };
         // store_array_subset requires owned ndarray; to_owned converts the view.
         arr.store_array_subset(&subset, data.to_owned())

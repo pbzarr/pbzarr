@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use crate::error::PbzError;
-use crate::ingest::pipeline::{run_pipeline, ImportConfig, ImportReport};
-use crate::io::{D4Reader, Dtype};
 use crate::PbzStore;
 use crate::Result;
+use crate::error::PbzError;
+use crate::ingest::pipeline::{ImportConfig, ImportReport, run_pipeline};
+use crate::io::{D4Reader, Dtype};
 
 #[derive(Debug, Clone)]
 pub struct D4Source {
@@ -26,10 +26,12 @@ pub fn import_d4(
     sources: &[D4Source],
     config: ImportConfig,
 ) -> Result<ImportReport> {
-    let track = store.track(track_name).ok_or_else(|| PbzError::TrackNotFound {
-        name: track_name.to_owned(),
-        available: store.track_names().map(|s| s.to_owned()).collect(),
-    })?;
+    let track = store
+        .track(track_name)
+        .ok_or_else(|| PbzError::TrackNotFound {
+            name: track_name.to_owned(),
+            available: store.track_names().map(|s| s.to_owned()).collect(),
+        })?;
 
     if track.dtype() != Dtype::U32 {
         return Err(PbzError::InvalidDtype {
@@ -55,9 +57,8 @@ pub fn import_d4(
     let readers: Result<Vec<D4Reader>> = sources
         .iter()
         .map(|s| {
-            D4Reader::open(&s.path).map_err(|e| {
-                PbzError::Store(format!("open {}: {e}", s.path.display()))
-            })
+            D4Reader::open(&s.path)
+                .map_err(|e| PbzError::Store(format!("open {}: {e}", s.path.display())))
         })
         .collect();
     let readers = readers?;

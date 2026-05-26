@@ -7,8 +7,14 @@ fn create_writes_contigs_and_root_attrs() {
     let path = dir.path().join("test.pbz");
 
     let genome = Genome::new(vec![
-        Contig { name: "chr1".into(), length: 1_000_000 },
-        Contig { name: "chr2".into(), length: 500_000 },
+        Contig {
+            name: "chr1".into(),
+            length: 1_000_000,
+        },
+        Contig {
+            name: "chr2".into(),
+            length: 500_000,
+        },
     ])
     .unwrap();
 
@@ -26,9 +32,16 @@ fn open_reads_back_genome_and_coordinate_space() {
     let path = dir.path().join("test.pbz");
 
     let genome = Genome::new(vec![
-        Contig { name: "chr1".into(), length: 1_000_000 },
-        Contig { name: "chrX".into(), length: 155_270_560 },
-    ]).unwrap();
+        Contig {
+            name: "chr1".into(),
+            length: 1_000_000,
+        },
+        Contig {
+            name: "chrX".into(),
+            length: 155_270_560,
+        },
+    ])
+    .unwrap();
 
     {
         let _ = PbzStore::create(&path, genome, Some("GRCh38".into())).unwrap();

@@ -1,8 +1,8 @@
 use ndarray::ArrayViewMut2;
-use pbzarr::ingest::{run_pipeline, ImportConfig};
+use pbzarr::ingest::{ImportConfig, run_pipeline};
+use pbzarr::io::Dtype;
 use pbzarr::io::ValueReader;
 use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
-use pbzarr::io::Dtype;
 use tempfile::TempDir;
 
 /// A reader that fills every position with a constant value.
@@ -22,11 +22,7 @@ impl ValueReader for ConstReader {
         1
     }
 
-    fn read_into(
-        &self,
-        _r: &Region,
-        mut dst: ArrayViewMut2<'_, u32>,
-    ) -> pbzarr::io::Result<()> {
+    fn read_into(&self, _r: &Region, mut dst: ArrayViewMut2<'_, u32>) -> pbzarr::io::Result<()> {
         dst.fill(self.val);
         Ok(())
     }
@@ -43,9 +39,10 @@ impl ValueReader for ConstReader {
 fn pipeline_writes_constants_into_cohort_track() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("t.pbz");
-    let genome = Genome::new(vec![
-        Contig { name: "chr1".into(), length: 5_000 },
-    ])
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 5_000,
+    }])
     .unwrap();
 
     let mut store = PbzStore::create(&path, genome.clone(), None).unwrap();
@@ -57,8 +54,14 @@ fn pipeline_writes_constants_into_cohort_track() {
         .unwrap();
 
     let readers = vec![
-        ConstReader { genome: genome.clone(), val: 7 },
-        ConstReader { genome: genome.clone(), val: 13 },
+        ConstReader {
+            genome: genome.clone(),
+            val: 7,
+        },
+        ConstReader {
+            genome: genome.clone(),
+            val: 13,
+        },
     ];
 
     let track = store.track("depth").unwrap();
@@ -87,9 +90,10 @@ fn pipeline_writes_constants_into_cohort_track() {
 fn pipeline_writes_constants_into_scalar_track() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");
-    let genome = Genome::new(vec![
-        Contig { name: "chr1".into(), length: 3_000 },
-    ])
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 3_000,
+    }])
     .unwrap();
 
     let mut store = PbzStore::create(&path, genome.clone(), None).unwrap();
@@ -97,7 +101,10 @@ fn pipeline_writes_constants_into_scalar_track() {
         .create_track("mask", TrackConfig::scalar(Dtype::U32))
         .unwrap();
 
-    let readers = vec![ConstReader { genome: genome.clone(), val: 42 }];
+    let readers = vec![ConstReader {
+        genome: genome.clone(),
+        val: 42,
+    }];
 
     let track = store.track("mask").unwrap();
     let report = run_pipeline::<u32, _>(track, readers, &ImportConfig::default()).unwrap();
@@ -122,8 +129,14 @@ fn pipeline_spans_multiple_contigs() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("m.pbz");
     let genome = Genome::new(vec![
-        Contig { name: "chr1".into(), length: 2_000 },
-        Contig { name: "chr2".into(), length: 1_500 },
+        Contig {
+            name: "chr1".into(),
+            length: 2_000,
+        },
+        Contig {
+            name: "chr2".into(),
+            length: 1_500,
+        },
     ])
     .unwrap();
 
@@ -132,7 +145,10 @@ fn pipeline_spans_multiple_contigs() {
         .create_track("depth", TrackConfig::cohort(Dtype::U32, vec!["S".into()]))
         .unwrap();
 
-    let readers = vec![ConstReader { genome: genome.clone(), val: 99 }];
+    let readers = vec![ConstReader {
+        genome: genome.clone(),
+        val: 99,
+    }];
     let track = store.track("depth").unwrap();
     let report = run_pipeline::<u32, _>(track, readers, &ImportConfig::default()).unwrap();
     assert_eq!(report.contigs_written, 2);
@@ -143,7 +159,11 @@ fn pipeline_spans_multiple_contigs() {
             start: 0,
             end: len as u64,
         };
-        let got = store.track("depth").unwrap().read_region::<u32>(&region).unwrap();
+        let got = store
+            .track("depth")
+            .unwrap()
+            .read_region::<u32>(&region)
+            .unwrap();
         let got2 = got.into_dimensionality::<ndarray::Ix2>().unwrap();
         for i in 0..len {
             assert_eq!(got2[[i, 0]], 99, "{name} i={i}");

@@ -4,8 +4,8 @@
 //! Format-specific submodules (d4, future bigWig/BED) wire their reader
 //! into the generic pipeline.
 
-mod pipeline;
 mod d4_import;
+mod pipeline;
 
-pub use pipeline::{ImportConfig, ImportReport, ProgressSink, run_pipeline};
 pub use d4_import::{D4Source, import_d4};
+pub use pipeline::{ImportConfig, ImportReport, ProgressSink, run_pipeline};

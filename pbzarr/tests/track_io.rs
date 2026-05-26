@@ -9,13 +9,21 @@ fn create_scalar_track_writes_per_contig_arrays_and_updates_root_metadata() {
     let path = dir.path().join("test.pbz");
 
     let genome = Genome::new(vec![
-        Contig { name: "chr1".into(), length: 1_000 },
-        Contig { name: "chr2".into(), length: 500 },
+        Contig {
+            name: "chr1".into(),
+            length: 1_000,
+        },
+        Contig {
+            name: "chr2".into(),
+            length: 500,
+        },
     ])
     .unwrap();
 
     let mut store = PbzStore::create(&path, genome, None).unwrap();
-    store.create_track("mask", TrackConfig::scalar(Dtype::Bool)).unwrap();
+    store
+        .create_track("mask", TrackConfig::scalar(Dtype::Bool))
+        .unwrap();
 
     drop(store);
 
@@ -33,9 +41,11 @@ fn create_cohort_track_writes_per_contig_data_and_sample_coord_arrays() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("test.pbz");
 
-    let genome = Genome::new(vec![
-        Contig { name: "chr1".into(), length: 1_000 },
-    ]).unwrap();
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 1_000,
+    }])
+    .unwrap();
 
     let mut store = PbzStore::create(&path, genome, None).unwrap();
     let cfg = TrackConfig::cohort(Dtype::U16, vec!["A".into(), "B".into(), "C".into()]);
@@ -56,9 +66,15 @@ fn create_cohort_track_writes_per_contig_data_and_sample_coord_arrays() {
 fn write_then_read_scalar_track_round_trip() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("test.pbz");
-    let genome = Genome::new(vec![Contig { name: "chr1".into(), length: 4_000 }]).unwrap();
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 4_000,
+    }])
+    .unwrap();
     let mut store = PbzStore::create(&path, genome, None).unwrap();
-    store.create_track("mask", TrackConfig::scalar(Dtype::Bool)).unwrap();
+    store
+        .create_track("mask", TrackConfig::scalar(Dtype::Bool))
+        .unwrap();
 
     let region = Region {
         contig: store.genome().id("chr1").unwrap(),
@@ -72,9 +88,17 @@ fn write_then_read_scalar_track_round_trip() {
         }
     }
     let dyn_view = data.view().into_dyn();
-    store.track("mask").unwrap().write_region(&region, dyn_view).unwrap();
+    store
+        .track("mask")
+        .unwrap()
+        .write_region(&region, dyn_view)
+        .unwrap();
 
-    let got = store.track("mask").unwrap().read_region::<bool>(&region).unwrap();
+    let got = store
+        .track("mask")
+        .unwrap()
+        .read_region::<bool>(&region)
+        .unwrap();
     assert_eq!(got.shape(), &[500]);
     let got_flat: Array1<bool> = got.into_dimensionality::<ndarray::Ix1>().unwrap();
     assert_eq!(got_flat, data);
@@ -84,7 +108,11 @@ fn write_then_read_scalar_track_round_trip() {
 fn write_then_read_cohort_track_round_trip() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("test.pbz");
-    let genome = Genome::new(vec![Contig { name: "chr1".into(), length: 4_000 }]).unwrap();
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 4_000,
+    }])
+    .unwrap();
     let mut store = PbzStore::create(&path, genome, None).unwrap();
     store
         .create_track(
@@ -123,7 +151,11 @@ fn write_then_read_cohort_track_round_trip() {
 fn partial_chunk_write_then_read() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("test.pbz");
-    let genome = Genome::new(vec![Contig { name: "chr1".into(), length: 10_000 }]).unwrap();
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 10_000,
+    }])
+    .unwrap();
     let mut store = PbzStore::create(&path, genome, None).unwrap();
     // chunk_size 1_000; write a 500-bp region crossing chunk boundary at 1000
     let mut cfg = TrackConfig::scalar(Dtype::U32);
@@ -142,7 +174,11 @@ fn partial_chunk_write_then_read() {
         .write_region(&region, data.view().into_dyn())
         .unwrap();
 
-    let got = store.track("x").unwrap().read_region::<u32>(&region).unwrap();
+    let got = store
+        .track("x")
+        .unwrap()
+        .read_region::<u32>(&region)
+        .unwrap();
     let got1: Array1<u32> = got.into_dimensionality::<ndarray::Ix1>().unwrap();
     assert_eq!(got1, data);
 }

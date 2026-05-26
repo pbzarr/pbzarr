@@ -48,12 +48,30 @@ pub trait Numeric:
     const DTYPE: Dtype;
 }
 
-impl Numeric for u8   { const DTYPE: Dtype = Dtype::U8;   }
-impl Numeric for u16  { const DTYPE: Dtype = Dtype::U16;  }
-impl Numeric for u32  { const DTYPE: Dtype = Dtype::U32;  }
-impl Numeric for i8   { const DTYPE: Dtype = Dtype::I8;   }
-impl Numeric for i16  { const DTYPE: Dtype = Dtype::I16;  }
-impl Numeric for i32  { const DTYPE: Dtype = Dtype::I32;  }
-impl Numeric for f32  { const DTYPE: Dtype = Dtype::F32;  }
-impl Numeric for f64  { const DTYPE: Dtype = Dtype::F64;  }
-impl Numeric for bool { const DTYPE: Dtype = Dtype::Bool; }
+impl Numeric for u8 {
+    const DTYPE: Dtype = Dtype::U8;
+}
+impl Numeric for u16 {
+    const DTYPE: Dtype = Dtype::U16;
+}
+impl Numeric for u32 {
+    const DTYPE: Dtype = Dtype::U32;
+}
+impl Numeric for i8 {
+    const DTYPE: Dtype = Dtype::I8;
+}
+impl Numeric for i16 {
+    const DTYPE: Dtype = Dtype::I16;
+}
+impl Numeric for i32 {
+    const DTYPE: Dtype = Dtype::I32;
+}
+impl Numeric for f32 {
+    const DTYPE: Dtype = Dtype::F32;
+}
+impl Numeric for f64 {
+    const DTYPE: Dtype = Dtype::F64;
+}
+impl Numeric for bool {
+    const DTYPE: Dtype = Dtype::Bool;
+}

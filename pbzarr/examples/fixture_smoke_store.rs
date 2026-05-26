@@ -12,8 +12,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("usage: fixture_smoke_store <out.pbz>")?;
 
     let genome = Genome::new(vec![
-        Contig { name: "chr1".into(), length: 2_000 },
-        Contig { name: "chr2".into(), length: 1_000 },
+        Contig {
+            name: "chr1".into(),
+            length: 2_000,
+        },
+        Contig {
+            name: "chr2".into(),
+            length: 1_000,
+        },
     ])?;
     let mut store = PbzStore::create(&path, genome, Some("GRCh38".into()))?;
 
@@ -22,14 +28,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chr1 = store.genome().id("chr1").unwrap();
     let chr2 = store.genome().id("chr2").unwrap();
 
-    let region = Region { contig: chr1, start: 0, end: 2_000 };
+    let region = Region {
+        contig: chr1,
+        start: 0,
+        end: 2_000,
+    };
     let mut m = Array1::<bool>::from_elem(2_000, false);
     for i in 0..2_000 {
         if i % 7 == 0 {
             m[i] = true;
         }
     }
-    store.track("mask").unwrap().write_region(&region, m.view().into_dyn())?;
+    store
+        .track("mask")
+        .unwrap()
+        .write_region(&region, m.view().into_dyn())?;
 
     // cohort track
     store.create_track(
@@ -43,8 +56,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             d[[i, 1]] = (i * 2) as u16;
             d[[i, 2]] = (i * 3) as u16;
         }
-        let region = Region { contig: cid, start: 0, end: len };
-        store.track("depth").unwrap().write_region(&region, d.view().into_dyn())?;
+        let region = Region {
+            contig: cid,
+            start: 0,
+            end: len,
+        };
+        store
+            .track("depth")
+            .unwrap()
+            .write_region(&region, d.view().into_dyn())?;
     }
 
     println!("wrote {}", path);

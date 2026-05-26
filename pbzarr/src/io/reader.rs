@@ -1,7 +1,7 @@
-use ndarray::ArrayViewMut2;
 use crate::genome::{Genome, Region};
 use crate::io::dtype::Numeric;
 use crate::io::error::Result;
+use ndarray::ArrayViewMut2;
 pub trait ValueReader: Send + Sync {
     /// The numeric type this reader produces.
     type Item: Numeric;
@@ -18,14 +18,12 @@ pub trait ValueReader: Send + Sync {
     /// `dst` has shape `(region.len(), self.n_fields())`. The caller
     /// pre-fills `dst` with the desired fill value; the reader only
     /// overwrites positions where the source file has data.
-    fn read_into(
-        &self,
-        region: &Region,
-        dst: ArrayViewMut2<'_, Self::Item>,
-    ) -> Result<()>;
+    fn read_into(&self, region: &Region, dst: ArrayViewMut2<'_, Self::Item>) -> Result<()>;
 
     /// Produce a worker-local handle for use on a single thread.
     /// Shared state (index, header) is reused via `Arc`; per-thread
     /// state (file handle, decode buffers) is freshly allocated.
-    fn fork(&self) -> Result<Self> where Self: Sized;
+    fn fork(&self) -> Result<Self>
+    where
+        Self: Sized;
 }

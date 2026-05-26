@@ -86,13 +86,21 @@ fn read_into_fills_constant_buffer() {
 
     let reader = D4Reader::open(&d4).unwrap();
     let chr1 = reader.contigs().id("chr1").unwrap();
-    let region = Region { contig: chr1, start: 10, end: 30 };
+    let region = Region {
+        contig: chr1,
+        start: 10,
+        end: 30,
+    };
 
     let mut buf: Array2<u32> = Array2::zeros((region.len(), reader.n_fields()));
     reader.read_into(&region, buf.view_mut()).unwrap();
 
     assert_eq!(buf.shape(), &[20, 1]);
-    assert!(buf.iter().all(|&v| v == 7), "expected all 7s, got {:?}", buf);
+    assert!(
+        buf.iter().all(|&v| v == 7),
+        "expected all 7s, got {:?}",
+        buf
+    );
 }
 
 #[test]
@@ -106,7 +114,11 @@ fn empty_region_is_noop() {
 
     let reader = D4Reader::open(&d4).unwrap();
     let chr1 = reader.contigs().id("chr1").unwrap();
-    let region = Region { contig: chr1, start: 50, end: 50 };
+    let region = Region {
+        contig: chr1,
+        start: 50,
+        end: 50,
+    };
 
     // 0-row view: contract is just "don't crash".
     let mut buf: Array2<u32> = Array2::zeros((0, 1));
@@ -126,7 +138,11 @@ fn fork_produces_independent_reader() {
     let b = a.fork().unwrap();
 
     let chr1 = a.contigs().id("chr1").unwrap();
-    let region = Region { contig: chr1, start: 0, end: 8 };
+    let region = Region {
+        contig: chr1,
+        start: 0,
+        end: 8,
+    };
 
     let mut buf_a: Array2<u32> = Array2::zeros((8, 1));
     let mut buf_b: Array2<u32> = Array2::zeros((8, 1));

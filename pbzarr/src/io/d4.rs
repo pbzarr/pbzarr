@@ -11,7 +11,6 @@ use crate::genome::{Contig, Genome, Region};
 use crate::io::error::{ReaderError, Result};
 use crate::io::reader::ValueReader;
 
-
 struct Shared {
     path: PathBuf,
     genome: Genome,

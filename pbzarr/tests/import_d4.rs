@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use pbzarr::ingest::{import_d4, D4Source, ImportConfig};
+use pbzarr::ingest::{D4Source, ImportConfig, import_d4};
 use pbzarr::io::Dtype;
 use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
 use tempfile::TempDir;
@@ -58,14 +58,23 @@ fn import_one_d4_into_scalar_track() {
     let d4 = write_synthetic_d4(dir.path(), "chr1", 1_000);
 
     let store_path = dir.path().join("out.pbz");
-    let genome = Genome::new(vec![Contig { name: "chr1".into(), length: 1_000 }]).unwrap();
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 1_000,
+    }])
+    .unwrap();
     let mut store = PbzStore::create(&store_path, genome, None).unwrap();
-    store.create_track("depth", TrackConfig::scalar(Dtype::U32)).unwrap();
+    store
+        .create_track("depth", TrackConfig::scalar(Dtype::U32))
+        .unwrap();
 
     import_d4(
         &mut store,
         "depth",
-        &[D4Source { path: d4, sample_label: None }],
+        &[D4Source {
+            path: d4,
+            sample_label: None,
+        }],
         ImportConfig::default(),
     )
     .unwrap();
@@ -75,7 +84,11 @@ fn import_one_d4_into_scalar_track() {
         start: 0,
         end: 1_000,
     };
-    let got = store.track("depth").unwrap().read_region::<u32>(&region).unwrap();
+    let got = store
+        .track("depth")
+        .unwrap()
+        .read_region::<u32>(&region)
+        .unwrap();
     let arr = got.into_dimensionality::<ndarray::Ix1>().unwrap();
 
     for i in 0..100u32 {

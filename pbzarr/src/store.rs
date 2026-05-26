@@ -44,9 +44,7 @@ impl PbzStore {
         let path = path.as_ref();
 
         // Open filesystem store at the given path.
-        let fs = Arc::new(
-            FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?,
-        );
+        let fs = Arc::new(FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?);
         let storage: ReadableWritableListableStorage = fs.clone();
 
         // Build root group with perbase_zarr attribute.
@@ -95,24 +93,16 @@ impl PbzStore {
         }
 
         // Write the `contig_lengths` 1-D int64 array.
-        let lengths_array = zarrs::array::ArrayBuilder::new(
-            vec![n],
-            vec![n.max(1)],
-            data_type::int64(),
-            0i64,
-        )
-        .dimension_names(["contigs"].into())
-        .build(storage.clone(), "/contig_lengths")
-        .map_err(|e| PbzError::Store(e.to_string()))?;
+        let lengths_array =
+            zarrs::array::ArrayBuilder::new(vec![n], vec![n.max(1)], data_type::int64(), 0i64)
+                .dimension_names(["contigs"].into())
+                .build(storage.clone(), "/contig_lengths")
+                .map_err(|e| PbzError::Store(e.to_string()))?;
         lengths_array
             .store_metadata()
             .map_err(|e| PbzError::Store(e.to_string()))?;
         if n > 0 {
-            let lengths: Vec<i64> = genome
-                .contigs()
-                .iter()
-                .map(|c| c.length as i64)
-                .collect();
+            let lengths: Vec<i64> = genome.contigs().iter().map(|c| c.length as i64).collect();
             let lengths_array_nd = Array1::from(lengths).into_dyn();
             lengths_array
                 .store_chunk(&[0], lengths_array_nd)
@@ -138,9 +128,7 @@ impl PbzStore {
 
         // Keep the concrete FilesystemStore so Array::open gets a concrete storage
         // type that satisfies ReadableStorageTraits + 'static without trait-object upcasting.
-        let fs = Arc::new(
-            FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?,
-        );
+        let fs = Arc::new(FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?);
         let storage: ReadableWritableListableStorage = fs.clone();
 
         // Open root group and extract perbase_zarr attribute.
@@ -166,8 +154,8 @@ impl PbzStore {
             .unwrap_or_default();
 
         // Read the `contigs` 1-D string array.
-        let contigs_arr = Array::open(fs.clone(), "/contigs")
-            .map_err(|e| PbzError::Store(e.to_string()))?;
+        let contigs_arr =
+            Array::open(fs.clone(), "/contigs").map_err(|e| PbzError::Store(e.to_string()))?;
         let n = contigs_arr.shape()[0] as usize;
         let names: Vec<String> = if n == 0 {
             Vec::new()
@@ -201,7 +189,10 @@ impl PbzStore {
         let contigs: Vec<Contig> = names
             .into_iter()
             .zip(lengths)
-            .map(|(name, length)| Contig { name, length: length as u64 })
+            .map(|(name, length)| Contig {
+                name,
+                length: length as u64,
+            })
             .collect();
 
         let genome = Arc::new(Genome::new(contigs)?);
@@ -261,9 +252,7 @@ impl PbzStore {
     /// Returns an error if the track name already exists.
     pub fn create_track(&mut self, name: &str, config: TrackConfig) -> Result<&Track> {
         if self.tracks.contains_key(name) {
-            return Err(PbzError::Metadata(format!(
-                "track '{name}' already exists"
-            )));
+            return Err(PbzError::Metadata(format!("track '{name}' already exists")));
         }
 
         // Determine the column dimension name for cohort tracks.

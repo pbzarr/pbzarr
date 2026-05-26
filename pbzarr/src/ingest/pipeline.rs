@@ -21,11 +21,11 @@ use std::thread;
 use crossbeam_channel::bounded;
 use ndarray::{Array2, Axis, s};
 
+use crate::Result;
 use crate::error::PbzError;
 use crate::genome::Region;
 use crate::io::{Numeric, ValueReader};
 use crate::track::Track;
-use crate::Result;
 
 /// Hook for callers to observe pipeline progress.
 pub trait ProgressSink: Send + Sync {
@@ -128,9 +128,7 @@ where
             let _ = arr_path;
         }
         other => {
-            return Err(PbzError::Metadata(format!(
-                "unexpected track rank {other}"
-            )));
+            return Err(PbzError::Metadata(format!("unexpected track rank {other}")));
         }
     }
 
@@ -151,7 +149,11 @@ where
             let start = chunk_idx * chunk_size;
             let end = (start + chunk_size).min(len);
             tasks.push(ChunkTask {
-                region: Region { contig: contig_id, start, end },
+                region: Region {
+                    contig: contig_id,
+                    start,
+                    end,
+                },
             });
         }
     }
@@ -193,11 +195,16 @@ where
         let readers = Arc::clone(&readers);
         worker_handles.push(thread::spawn(move || {
             // Fork all readers for this thread.
-            let mut forked: Vec<R> = match readers.iter().map(|r| r.fork()).collect::<crate::io::error::Result<Vec<_>>>() {
+            let mut forked: Vec<R> = match readers
+                .iter()
+                .map(|r| r.fork())
+                .collect::<crate::io::error::Result<Vec<_>>>()
+            {
                 Ok(v) => v,
                 Err(e) => {
                     // Report error and exit.
-                    let _ = res_tx.send(Err(PbzError::Metadata(format!("reader fork failed: {e}"))));
+                    let _ =
+                        res_tx.send(Err(PbzError::Metadata(format!("reader fork failed: {e}"))));
                     return;
                 }
             };
@@ -273,8 +280,7 @@ where
                 };
                 match write_result {
                     Ok(()) => {
-                        let chunk_bytes =
-                            (region.len() * n_readers * mem::size_of::<T>()) as u64;
+                        let chunk_bytes = (region.len() * n_readers * mem::size_of::<T>()) as u64;
                         bytes_written += chunk_bytes;
                         if let Some(ref p) = progress {
                             p.tick(chunk_bytes);

@@ -5,11 +5,11 @@
 //! - `Genome` owns an ordered list of contigs plus an O(1) name → id index.
 //! - `Region` is a half-open `[start, end)` range over a `ContigId`.
 //!
-use hashbrown::HashMap;
 use crate::error::{PbzError, Result};
 use crate::region_query::RegionQuery;
+use hashbrown::HashMap;
 
-/// Index of a contig in a [`Genome`]. 
+/// Index of a contig in a [`Genome`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContigId(u32);
 
@@ -114,10 +114,12 @@ impl Genome {
     ///   1000-bp contig becomes `[0, 1000)`).
     /// - An empty range (after clamping) returns [`PbzError::InvalidRegion`].
     pub fn resolve(&self, query: &RegionQuery) -> Result<Region> {
-        let id = self.id(&query.contig).ok_or_else(|| PbzError::ContigNotFound {
-            contig: query.contig.clone(),
-            available: self.contigs.iter().map(|c| c.name.clone()).collect(),
-        })?;
+        let id = self
+            .id(&query.contig)
+            .ok_or_else(|| PbzError::ContigNotFound {
+                contig: query.contig.clone(),
+                available: self.contigs.iter().map(|c| c.name.clone()).collect(),
+            })?;
         let length = self.contigs[id.as_usize()].length;
         let start = query.start.unwrap_or(0);
         let end = query.end.unwrap_or(length).min(length);
@@ -129,7 +131,11 @@ impl Genome {
                 ),
             });
         }
-        Ok(Region { contig: id, start, end })
+        Ok(Region {
+            contig: id,
+            start,
+            end,
+        })
     }
 }
 
@@ -160,4 +166,3 @@ impl std::fmt::Display for Region {
         write!(f, "{}:{}-{}", self.contig, self.start, self.end)
     }
 }
-
