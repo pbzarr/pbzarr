@@ -12,7 +12,7 @@ def write_d4(tmp_path: Path):
         pytest.skip("d4tools not on PATH")
 
     def _make(chrom: str, length: int, sample: str = "A") -> Path:
-        bg = tmp_path / f"{sample}.bg"
+        bg = tmp_path / f"{sample}.bedgraph"
         sizes = tmp_path / f"{sample}.sizes"
         lines = []
         for i in range(length // 10):
