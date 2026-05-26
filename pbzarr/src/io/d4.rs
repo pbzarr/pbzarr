@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use d4::ssio::D4TrackReader;
 use ndarray::ArrayViewMut2;
 
-use crate::genome::{Contig, Genome, Region};
+use crate::genome::{Contig, Genome};
 use crate::io::error::{ReaderError, Result};
 use crate::io::reader::ValueReader;
 
@@ -71,77 +71,79 @@ impl ValueReader for D4Reader {
         1
     }
 
-    fn read_into(&self, region: &Region, mut dst: ArrayViewMut2<'_, Self::Item>) -> Result<()> {
-        if region.is_empty() {
+    fn read_into(
+        &self,
+        contig_name: &str,
+        start: u64,
+        end: u64,
+        mut dst: ArrayViewMut2<'_, Self::Item>,
+    ) -> Result<()> {
+        if end <= start {
             return Ok(());
         }
 
-        let contig =
-            self.shared
-                .genome
-                .get(region.contig)
-                .ok_or_else(|| ReaderError::ContigNotFound {
-                    path: self.shared.path.clone(),
-                    contig: format!("{}", region.contig),
-                })?;
-        let start = u32::try_from(region.start).map_err(|_| {
+        // Resolve the name in the d4 file's own genome; the caller's
+        // ContigId (if it had one) belongs to a different namespace.
+        if self.shared.genome.id(contig_name).is_none() {
+            return Err(ReaderError::ContigNotFound {
+                path: self.shared.path.clone(),
+                contig: contig_name.to_owned(),
+            });
+        }
+        let start_u32 = u32::try_from(start).map_err(|_| {
             ReaderError::Other(anyhow::anyhow!(
                 "d4 read requires start <= u32::MAX, got {} in {}",
-                region.start,
+                start,
                 self.shared.path.display(),
             ))
         })?;
-        let end = u32::try_from(region.end).map_err(|_| {
+        let end_u32 = u32::try_from(end).map_err(|_| {
             ReaderError::Other(anyhow::anyhow!(
                 "d4 read requires end <= u32::MAX, got {} in {}",
-                region.end,
+                end,
                 self.shared.path.display(),
             ))
         })?;
 
         let mut inner = self.inner.lock().expect("d4 reader mutex poisoned");
-        let mut view = inner.get_view(&contig.name, start, end).map_err(|e| {
-            ReaderError::Other(anyhow::anyhow!(
-                "d4 view failed for {}:{}:{}-{}: {e}",
-                self.shared.path.display(),
-                contig.name,
-                start,
-                end,
-            ))
-        })?;
+        let mut view = inner
+            .get_view(contig_name, start_u32, end_u32)
+            .map_err(|e| {
+                ReaderError::Other(anyhow::anyhow!(
+                    "d4 view failed for {}:{contig_name}:{start_u32}-{end_u32}: {e}",
+                    self.shared.path.display(),
+                ))
+            })?;
 
-        for i in 0..region.len() {
-            let pos = start + i as u32;
+        let len = (end - start) as usize;
+        for i in 0..len {
+            let pos = start_u32 + i as u32;
             let (reported_pos, value) = view
                 .next()
                 .ok_or_else(|| {
                     ReaderError::Other(anyhow::anyhow!(
-                        "unexpected end of d4 view at {}:{} position {pos}",
+                        "unexpected end of d4 view at {}:{contig_name} position {pos}",
                         self.shared.path.display(),
-                        contig.name,
                     ))
                 })?
                 .map_err(|e| {
                     ReaderError::Other(anyhow::anyhow!(
-                        "failed to read d4 value at {}:{}:{pos}: {e}",
+                        "failed to read d4 value at {}:{contig_name}:{pos}: {e}",
                         self.shared.path.display(),
-                        contig.name,
                     ))
                 })?;
 
             if reported_pos != pos {
                 return Err(ReaderError::Other(anyhow::anyhow!(
-                    "d4 position mismatch at {}:{}:{pos}: got {reported_pos}",
+                    "d4 position mismatch at {}:{contig_name}:{pos}: got {reported_pos}",
                     self.shared.path.display(),
-                    contig.name,
                 )));
             }
 
             let depth = u32::try_from(value).map_err(|_| {
                 ReaderError::Other(anyhow::anyhow!(
-                    "d4 depth at {}:{}:{pos} cannot be represented as u32 (got {value})",
+                    "d4 depth at {}:{contig_name}:{pos} cannot be represented as u32 (got {value})",
                     self.shared.path.display(),
-                    contig.name,
                 ))
             })?;
 

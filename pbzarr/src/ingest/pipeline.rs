@@ -133,7 +133,8 @@ where
     }
 
     let chunk_size = config.chunk_size.unwrap_or_else(|| track.chunk_size()) as u64;
-    let genome = track.genome().clone();
+    // Shared with workers so each can resolve ContigId → name.
+    let genome = Arc::clone(track.genome());
 
     // Generate all tasks: one per (contig, chunk) pair.
     let mut tasks: Vec<ChunkTask> = Vec::new();
@@ -193,6 +194,7 @@ where
         let task_rx = task_rx.clone();
         let res_tx = res_tx.clone();
         let readers = Arc::clone(&readers);
+        let genome = Arc::clone(&genome);
         worker_handles.push(thread::spawn(move || {
             // Fork all readers for this thread.
             let mut forked: Vec<R> = match readers
@@ -212,6 +214,18 @@ where
             while let Ok(task) = task_rx.recv() {
                 let region = task.region;
                 let chunk_len = region.len();
+                // Resolve ContigId → name in the track's genome; the reader
+                // does its own name lookup in its source file's genome.
+                let contig_name = match genome.get(region.contig) {
+                    Some(c) => c.name.clone(),
+                    None => {
+                        let _ = res_tx.send(Err(PbzError::Metadata(format!(
+                            "pipeline: unknown contig id {:?} in task",
+                            region.contig
+                        ))));
+                        break;
+                    }
+                };
 
                 // Allocate scratch buffer: shape (chunk_len, n_readers).
                 // Fill with 0 bits; readers overwrite every position.
@@ -235,7 +249,7 @@ where
                     let dst = buf.slice_mut(s![.., col_idx..col_idx + 1]);
                     // Convert to ArrayViewMut2 via into_shape — the slice gives us a
                     // (chunk_len, 1) view already.
-                    if let Err(e) = reader.read_into(&region, dst) {
+                    if let Err(e) = reader.read_into(&contig_name, region.start, region.end, dst) {
                         let _ = res_tx.send(Err(PbzError::Metadata(format!(
                             "reader {col_idx} failed on {region}: {e}"
                         ))));

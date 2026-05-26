@@ -22,7 +22,13 @@ impl ValueReader for ConstReader {
         1
     }
 
-    fn read_into(&self, _r: &Region, mut dst: ArrayViewMut2<'_, u32>) -> pbzarr::io::Result<()> {
+    fn read_into(
+        &self,
+        _contig_name: &str,
+        _start: u64,
+        _end: u64,
+        mut dst: ArrayViewMut2<'_, u32>,
+    ) -> pbzarr::io::Result<()> {
         dst.fill(self.val);
         Ok(())
     }
