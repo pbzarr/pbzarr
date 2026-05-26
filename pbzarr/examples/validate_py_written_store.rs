@@ -26,7 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tracks: Vec<String> = store.track_names().map(|s| s.to_owned()).collect();
     tracks.sort();
     assert!(tracks.contains(&"mask".to_string()), "expected mask track");
-    assert!(tracks.contains(&"depth".to_string()), "expected depth track");
+    assert!(
+        tracks.contains(&"depth".to_string()),
+        "expected depth track"
+    );
 
     // read depth's chr1; Python wrote (i, i*2, i*3) for i in 0..100
     let depth = store.track("depth").unwrap();

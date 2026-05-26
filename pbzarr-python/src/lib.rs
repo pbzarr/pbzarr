@@ -27,8 +27,7 @@ fn import_d4(
     column_chunk_size: Option<usize>,
 ) -> PyResult<()> {
     py.allow_threads(|| {
-        let store = PbzStore::open(&store_path)
-            .map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let store = PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
         let sources: Vec<D4Source> = sources
             .into_iter()
             .map(|(path, sample_label)| D4Source {
