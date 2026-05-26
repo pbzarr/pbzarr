@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pbzarr"
+version = "0.1.0"
+description = "PBZ (Per-Base Zarr) — a Zarr v3 convention for per-base genomic data"
+readme = "../README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Cade Mirchandani", email = "cademirch@gmail.com" }]
+dependencies = [
+    "zarr>=3.0,<4",
+    "xarray>=2024.10",
+    "numpy>=2.0,<3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "pbzarr._native"
+features = ["pyo3/extension-module"]
+manifest-path = "Cargo.toml"

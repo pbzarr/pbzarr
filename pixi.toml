@@ -35,6 +35,17 @@ numpy = ">=2.0,<3"
 [feature.validate.tasks]
 validate-roundtrip = "python scripts/validate_xarray_read.py"
 
+# --- wheel feature: build + install + test the Python wheel ---
+[feature.wheel.dependencies]
+maturin = ">=1.4,<2"
+pip = ">=24"
+pytest = ">=8"
+
+[feature.wheel.tasks]
+build-wheel = "maturin build --release -m pbzarr-python/Cargo.toml"
+install-wheel = "maturin develop --release -m pbzarr-python/Cargo.toml"
+test-py = "pytest pbzarr-python/tests -v"
+
 # --- environments ---
 [environments]
-default = { features = ["dev", "validate"], solve-group = "default" }
+default = { features = ["dev", "validate", "wheel"], solve-group = "default" }

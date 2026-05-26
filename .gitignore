@@ -3,3 +3,8 @@
 CLAUDE.md
 docs/superpowers
 .claude
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.pyd

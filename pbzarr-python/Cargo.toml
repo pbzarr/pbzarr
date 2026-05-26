@@ -1,0 +1,16 @@
+[package]
+name = "pbzarr-python"
+version = "0.1.0"
+edition = "2024"
+authors = ["Cade Mirchandani <cmirchan@ucsc.edu>"]
+description = "Python bindings for the pbzarr library"
+license = "MIT"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pbzarr = { path = "../pbzarr" }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py311"] }
