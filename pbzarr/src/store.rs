@@ -255,8 +255,8 @@ impl PbzStore {
             return Err(PbzError::Metadata(format!("track '{name}' already exists")));
         }
 
-        // Determine the column dimension name for cohort tracks.
-        let col_dim: Option<String> = if config.is_cohort() {
+        // Determine the column dimension name for 2D tracks.
+        let col_dim: Option<String> = if config.columns.is_some() {
             Some(
                 config
                     .column_dim

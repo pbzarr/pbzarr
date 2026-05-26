@@ -30,8 +30,9 @@ pub struct TrackConfig {
 }
 
 impl TrackConfig {
-    /// 1D scalar track with sensible defaults (chunk_size = 1M).
-    pub fn scalar(dtype: Dtype) -> Self {
+    /// Create a 1D track configuration with default chunk size (1M positions).
+    /// Call `.columns(...)` to make it 2D.
+    pub fn new(dtype: Dtype) -> Self {
         Self {
             dtype,
             chunk_size: 1_000_000,
@@ -47,27 +48,60 @@ impl TrackConfig {
         }
     }
 
-    /// 2D cohort track with sensible defaults (chunk_size = 1M, column_chunk_size = 16,
-    /// column_dim = "sample").
-    pub fn cohort(dtype: Dtype, columns: Vec<String>) -> Self {
-        Self {
-            dtype,
-            chunk_size: 1_000_000,
-            column_dim: Some("sample".into()),
-            columns: Some(columns),
-            column_chunk_size: Some(16),
-            shard_size: None,
-            shard_column_size: None,
-            fill_value: None,
-            description: None,
-            source: None,
-            extra: Map::new(),
+    /// Add a column axis to this track. The track becomes 2D with shape
+    /// `(position, column)`. `column_dim` defaults to `"column"`; override
+    /// with `.column_dim(...)`. `column_chunk_size` defaults to 16.
+    pub fn columns(mut self, columns: Vec<String>) -> Self {
+        self.columns = Some(columns);
+        if self.column_dim.is_none() {
+            self.column_dim = Some("column".into());
         }
+        if self.column_chunk_size.is_none() {
+            self.column_chunk_size = Some(16);
+        }
+        self
     }
 
-    /// True if `columns` is set (i.e., 2D cohort track).
-    pub fn is_cohort(&self) -> bool {
-        self.columns.is_some()
+    /// Override the column-axis dimension name (e.g., `"sample"`).
+    /// No effect for 1D tracks.
+    pub fn column_dim(mut self, name: impl Into<String>) -> Self {
+        self.column_dim = Some(name.into());
+        self
+    }
+
+    pub fn chunk_size(mut self, n: usize) -> Self {
+        self.chunk_size = n;
+        self
+    }
+
+    pub fn column_chunk_size(mut self, n: usize) -> Self {
+        self.column_chunk_size = Some(n);
+        self
+    }
+
+    pub fn shard_size(mut self, n: usize) -> Self {
+        self.shard_size = Some(n);
+        self
+    }
+
+    pub fn shard_column_size(mut self, n: usize) -> Self {
+        self.shard_column_size = Some(n);
+        self
+    }
+
+    pub fn fill_value(mut self, v: serde_json::Value) -> Self {
+        self.fill_value = Some(v);
+        self
+    }
+
+    pub fn description(mut self, s: impl Into<String>) -> Self {
+        self.description = Some(s.into());
+        self
+    }
+
+    pub fn source(mut self, s: impl Into<String>) -> Self {
+        self.source = Some(s.into());
+        self
     }
 }
 

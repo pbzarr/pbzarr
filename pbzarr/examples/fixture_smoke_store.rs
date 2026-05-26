@@ -23,8 +23,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ])?;
     let mut store = PbzStore::create(&path, genome, Some("GRCh38".into()))?;
 
-    // scalar track
-    store.create_track("mask", TrackConfig::scalar(Dtype::Bool))?;
+    // 1D track
+    store.create_track("mask", TrackConfig::new(Dtype::Bool))?;
     let chr1 = store.genome().id("chr1").unwrap();
     let chr2 = store.genome().id("chr2").unwrap();
 
@@ -44,10 +44,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .write_region(&region, m.view().into_dyn())?;
 
-    // cohort track
+    // 2D track with named sample axis
     store.create_track(
         "depth",
-        TrackConfig::cohort(Dtype::U16, vec!["A".into(), "B".into(), "C".into()]),
+        TrackConfig::new(Dtype::U16)
+            .columns(vec!["A".into(), "B".into(), "C".into()])
+            .column_dim("sample"),
     )?;
     for (cid, len) in [(chr1, 2_000u64), (chr2, 1_000u64)] {
         let mut d = Array2::<u16>::zeros((len as usize, 3));

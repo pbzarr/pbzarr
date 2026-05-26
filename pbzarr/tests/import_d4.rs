@@ -65,7 +65,7 @@ fn import_one_d4_into_scalar_track() {
     .unwrap();
     let mut store = PbzStore::create(&store_path, genome, None).unwrap();
     store
-        .create_track("depth", TrackConfig::scalar(Dtype::U32))
+        .create_track("depth", TrackConfig::new(Dtype::U32))
         .unwrap();
 
     import_d4(

@@ -22,7 +22,7 @@ fn create_scalar_track_writes_per_contig_arrays_and_updates_root_metadata() {
 
     let mut store = PbzStore::create(&path, genome, None).unwrap();
     store
-        .create_track("mask", TrackConfig::scalar(Dtype::Bool))
+        .create_track("mask", TrackConfig::new(Dtype::Bool))
         .unwrap();
 
     drop(store);
@@ -48,7 +48,9 @@ fn create_cohort_track_writes_per_contig_data_and_sample_coord_arrays() {
     .unwrap();
 
     let mut store = PbzStore::create(&path, genome, None).unwrap();
-    let cfg = TrackConfig::cohort(Dtype::U16, vec!["A".into(), "B".into(), "C".into()]);
+    let cfg = TrackConfig::new(Dtype::U16)
+        .columns(vec!["A".into(), "B".into(), "C".into()])
+        .column_dim("sample");
     store.create_track("depth", cfg).unwrap();
 
     drop(store);
@@ -73,7 +75,7 @@ fn write_then_read_scalar_track_round_trip() {
     .unwrap();
     let mut store = PbzStore::create(&path, genome, None).unwrap();
     store
-        .create_track("mask", TrackConfig::scalar(Dtype::Bool))
+        .create_track("mask", TrackConfig::new(Dtype::Bool))
         .unwrap();
 
     let region = Region {
@@ -117,7 +119,9 @@ fn write_then_read_cohort_track_round_trip() {
     store
         .create_track(
             "depth",
-            TrackConfig::cohort(Dtype::U16, vec!["A".into(), "B".into(), "C".into()]),
+            TrackConfig::new(Dtype::U16)
+                .columns(vec!["A".into(), "B".into(), "C".into()])
+                .column_dim("sample"),
         )
         .unwrap();
 
@@ -158,8 +162,7 @@ fn partial_chunk_write_then_read() {
     .unwrap();
     let mut store = PbzStore::create(&path, genome, None).unwrap();
     // chunk_size 1_000; write a 500-bp region crossing chunk boundary at 1000
-    let mut cfg = TrackConfig::scalar(Dtype::U32);
-    cfg.chunk_size = 1_000;
+    let cfg = TrackConfig::new(Dtype::U32).chunk_size(1_000);
     store.create_track("x", cfg).unwrap();
 
     let region = Region {

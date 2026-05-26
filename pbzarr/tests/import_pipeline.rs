@@ -49,7 +49,9 @@ fn pipeline_writes_constants_into_cohort_track() {
     store
         .create_track(
             "depth",
-            TrackConfig::cohort(Dtype::U32, vec!["A".into(), "B".into()]),
+            TrackConfig::new(Dtype::U32)
+                .columns(vec!["A".into(), "B".into()])
+                .column_dim("sample"),
         )
         .unwrap();
 
@@ -98,7 +100,7 @@ fn pipeline_writes_constants_into_scalar_track() {
 
     let mut store = PbzStore::create(&path, genome.clone(), None).unwrap();
     store
-        .create_track("mask", TrackConfig::scalar(Dtype::U32))
+        .create_track("mask", TrackConfig::new(Dtype::U32))
         .unwrap();
 
     let readers = vec![ConstReader {
@@ -142,7 +144,12 @@ fn pipeline_spans_multiple_contigs() {
 
     let mut store = PbzStore::create(&path, genome.clone(), None).unwrap();
     store
-        .create_track("depth", TrackConfig::cohort(Dtype::U32, vec!["S".into()]))
+        .create_track(
+            "depth",
+            TrackConfig::new(Dtype::U32)
+                .columns(vec!["S".into()])
+                .column_dim("sample"),
+        )
         .unwrap();
 
     let readers = vec![ConstReader {
