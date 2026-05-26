@@ -70,8 +70,11 @@ def create_track(
             dims = ["position", dim_name]
             if shard_size is not None:
                 col_shard = shard_column_size or n_cols
+                # Shard must be an exact multiple of inner chunk size; do not
+                # clamp to contig length (zarr handles partial edge shards).
+                pos_shard = max(inner_pos, (shard_size // inner_pos) * inner_pos)
                 data_shards = (
-                    max(1, min(shard_size, length)),
+                    pos_shard,
                     max(1, min(col_shard, n_cols)),
                 )
             else:
@@ -82,7 +85,9 @@ def create_track(
             data_chunks = (inner_pos,)
             dims = ["position"]
             if shard_size is not None:
-                data_shards = (max(1, min(shard_size, length)),)
+                # Shard must be an exact multiple of inner chunk size.
+                pos_shard = max(inner_pos, (shard_size // inner_pos) * inner_pos)
+                data_shards = (pos_shard,)
             else:
                 data_shards = None
 
