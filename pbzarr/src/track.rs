@@ -133,6 +133,8 @@ pub struct TrackMetadata {
 pub struct Track {
     pub(crate) name: String,
     pub(crate) metadata: TrackMetadata,
+    /// Parsed dtype tag. Validated at construction so `dtype()` is panic-free.
+    pub(crate) dtype: Dtype,
     /// Concrete filesystem store; shared via Arc with the owning PbzStore.
     pub(crate) fs: Arc<FilesystemStore>,
     /// Genome shared with the owning PbzStore; needed to map ContigId → name.
@@ -153,23 +155,9 @@ impl Track {
         &self.metadata
     }
 
-    /// Runtime dtype tag parsed from the on-disk metadata string.
-    ///
-    /// Panics only if the on-disk dtype string was corrupted past what `open()`
-    /// validation would catch — treated as a programming invariant violation.
+    /// Runtime dtype tag. Validated at `PbzStore::open` / `create_track` time.
     pub fn dtype(&self) -> Dtype {
-        match self.metadata.dtype.as_str() {
-            "uint8" => Dtype::U8,
-            "uint16" => Dtype::U16,
-            "uint32" => Dtype::U32,
-            "int8" => Dtype::I8,
-            "int16" => Dtype::I16,
-            "int32" => Dtype::I32,
-            "float32" => Dtype::F32,
-            "float64" => Dtype::F64,
-            "bool" => Dtype::Bool,
-            other => panic!("track {:?}: unknown dtype {other}", self.name),
-        }
+        self.dtype
     }
 
     /// Rank of this track: 1 for scalar, 2 for cohort (has `column_dim`).

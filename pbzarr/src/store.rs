@@ -203,11 +203,13 @@ impl PbzStore {
             let metadata: TrackMetadata = serde_json::from_value(val.clone()).map_err(|e| {
                 PbzError::Metadata(format!("invalid track metadata for '{name}': {e}"))
             })?;
+            let dtype = Dtype::from_str(&metadata.dtype)?;
             track_handles.insert(
                 name.clone(),
                 Track {
                     name: name.clone(),
                     metadata,
+                    dtype,
                     fs: Arc::clone(&fs),
                     genome: Arc::clone(&genome),
                 },
@@ -362,11 +364,13 @@ impl PbzStore {
             .map_err(|e| PbzError::Store(e.to_string()))?;
 
         // Cache the new track handle.
+        let dtype = config.dtype;
         self.track_handles.insert(
             name.to_owned(),
             Track {
                 name: name.to_owned(),
                 metadata,
+                dtype,
                 fs: Arc::clone(&self.fs),
                 genome: Arc::clone(&self.genome),
             },

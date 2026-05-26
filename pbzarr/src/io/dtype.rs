@@ -27,6 +27,27 @@ impl Dtype {
             Dtype::Bool => "bool",
         }
     }
+
+    /// Parse a Zarr v3 dtype string into a `Dtype`.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Result<Self, crate::error::PbzError> {
+        Ok(match s {
+            "uint8" => Dtype::U8,
+            "uint16" => Dtype::U16,
+            "uint32" => Dtype::U32,
+            "int8" => Dtype::I8,
+            "int16" => Dtype::I16,
+            "int32" => Dtype::I32,
+            "float32" => Dtype::F32,
+            "float64" => Dtype::F64,
+            "bool" => Dtype::Bool,
+            other => {
+                return Err(crate::error::PbzError::InvalidDtype {
+                    dtype: other.to_owned(),
+                });
+            }
+        })
+    }
 }
 
 impl std::fmt::Display for Dtype {
