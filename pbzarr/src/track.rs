@@ -182,20 +182,22 @@ impl Track {
     /// Number of columns: 1 for scalar (rank-1) tracks; for cohort (rank-2)
     /// tracks, reads shape[1] from the zarr array on the first contig.
     ///
-    /// Returns 0 only if the store was created with no contigs (degenerate case).
-    pub fn columns_count(&self) -> usize {
+    /// Returns `Err` if the store has no contigs (degenerate case) or the
+    /// underlying zarrs `Array::open` fails.
+    pub fn columns_count(&self) -> Result<usize> {
         if self.rank() == 1 {
-            return 1;
+            return Ok(1);
         }
-        let first = match self.genome.contigs().first() {
-            Some(c) => c,
-            None => return 0,
-        };
+        let first = self.genome.contigs().first().ok_or_else(|| {
+            PbzError::Metadata(format!(
+                "track {:?}: cannot determine column count, store has no contigs",
+                self.name
+            ))
+        })?;
         let path = format!("/{}/{}", first.name, self.name);
-        match zarrs::array::Array::open(std::sync::Arc::clone(&self.fs), &path) {
-            Ok(arr) => arr.shape()[1] as usize,
-            Err(_) => 0,
-        }
+        let arr = zarrs::array::Array::open(std::sync::Arc::clone(&self.fs), &path)
+            .map_err(|e| PbzError::Store(format!("open {path}: {e}")))?;
+        Ok(arr.shape()[1] as usize)
     }
 
     /// Read an arbitrary region. Returns an `ArrayD<T>` whose rank matches the

@@ -60,6 +60,8 @@ impl Default for ImportConfig {
 pub struct ImportReport {
     pub contigs_written: usize,
     pub bytes_written: u64,
+    /// Number of chunk tasks that completed successfully.
+    pub tasks_completed: usize,
 }
 
 // Internal task: one position chunk to process.
@@ -99,37 +101,20 @@ where
 
     let n_readers = readers.len();
 
-    // Validate reader arity against track rank.
-    match track.rank() {
-        1 => {
-            if n_readers != 1 {
-                return Err(PbzError::Metadata(format!(
-                    "scalar track {:?} requires exactly 1 reader, got {n_readers}",
-                    track.name()
-                )));
-            }
-        }
-        2 => {
-            // n_cols is the full column width declared in the store.
-            let arr_path = format!(
-                "/{}/{}",
-                track
-                    .genome()
-                    .contigs()
-                    .first()
-                    .map(|c| c.name.as_str())
-                    .unwrap_or(""),
+    // Validate reader arity against track shape.
+    if track.rank() == 2 {
+        let expected = track.columns_count()?;
+        if n_readers != expected {
+            return Err(PbzError::Metadata(format!(
+                "cohort track {:?} expects {expected} readers; got {n_readers}",
                 track.name()
-            );
-            // We don't have a cheap way to read n_cols here without opening the
-            // zarr array, so skip the check and let the writer catch shape
-            // mismatches from zarrs. The caller is responsible for passing the
-            // right number of readers.
-            let _ = arr_path;
+            )));
         }
-        other => {
-            return Err(PbzError::Metadata(format!("unexpected track rank {other}")));
-        }
+    } else if n_readers != 1 {
+        return Err(PbzError::Metadata(format!(
+            "scalar track {:?} expects 1 reader; got {n_readers}",
+            track.name()
+        )));
     }
 
     let chunk_size = config.chunk_size.unwrap_or_else(|| track.chunk_size()) as u64;
@@ -160,7 +145,6 @@ where
     }
 
     let n_contigs = contigs_with_data.len();
-    let total_tasks = tasks.len();
     let workers = config.workers.max(1);
 
     // Channel bounds: 2× workers keeps both sides busy without unbounded memory.
@@ -228,21 +212,10 @@ where
                 };
 
                 // Allocate scratch buffer: shape (chunk_len, n_readers).
-                // Fill with 0 bits; readers overwrite every position.
-                // For float types this means 0.0, not NaN — acceptable since
-                // well-behaved readers fill the entire dst slice.
-                let mut buf = Array2::<T>::from_elem(
-                    (chunk_len, n_readers),
-                    // T doesn't impl Default, but we need an initial value.
-                    // Use the bit pattern for 0, recovered via a unit-value read
-                    // from a zero-filled i64: actually, we use from_elem with the
-                    // fill we get from the first reader position (not safe in general).
-                    // The simplest correct approach: rely on readers to fill dst
-                    // completely, so the initial value doesn't matter.
-                    // ndarray's from_elem requires a value; we obtain a zeroed one
-                    // via MaybeUninit + write_bytes in `zeroed_elem` below.
-                    zeroed_elem::<T>(),
-                );
+                // Filled with `T::ZERO` (0 / 0.0 / false). Well-behaved readers
+                // overwrite every position, so the initial value doesn't matter
+                // for correctness; this is just a defined starting state.
+                let mut buf = Array2::<T>::from_elem((chunk_len, n_readers), T::ZERO);
 
                 let mut ok = true;
                 for (col_idx, reader) in forked.iter_mut().enumerate() {
@@ -269,6 +242,7 @@ where
     // Writer: drain result channel, reshape, write.
     let progress = config.progress.clone();
     let mut bytes_written: u64 = 0;
+    let mut tasks_completed: usize = 0;
     let mut first_err: Option<crate::error::PbzError> = None;
 
     for result in res_rx {
@@ -296,6 +270,7 @@ where
                     Ok(()) => {
                         let chunk_bytes = (region.len() * n_readers * mem::size_of::<T>()) as u64;
                         bytes_written += chunk_bytes;
+                        tasks_completed += 1;
                         if let Some(ref p) = progress {
                             p.tick(chunk_bytes);
                         }
@@ -330,25 +305,9 @@ where
         return Err(e);
     }
 
-    let _ = total_tasks; // silence unused warning if any
-
     Ok(ImportReport {
         contigs_written: n_contigs,
         bytes_written,
+        tasks_completed,
     })
-}
-
-/// Return a zero-bit-pattern value of type `T`.
-///
-/// This is sound for all `Numeric` types (u8, u16, u32, i8/16/32, f32, f64, bool)
-/// because zero is a valid bit pattern for each. We use this only as a
-/// placeholder fill that readers will immediately overwrite.
-fn zeroed_elem<T: Copy>() -> T {
-    // SAFETY: `T` is `Numeric` — one of the integer, float, or bool primitives.
-    // All of those types have a valid zero bit-pattern, so transmuting a
-    // zeroed `MaybeUninit` is defined behaviour.
-    unsafe {
-        let mu = std::mem::MaybeUninit::<T>::zeroed();
-        mu.assume_init()
-    }
 }

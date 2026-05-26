@@ -45,7 +45,7 @@ pub fn import_d4(
     let expected_n = if track.rank() == 1 {
         1
     } else {
-        track.columns_count()
+        track.columns_count()?
     };
     if sources.len() != expected_n {
         return Err(PbzError::Metadata(format!(
