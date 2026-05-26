@@ -45,6 +45,7 @@ pytest = ">=8"
 build-wheel = "maturin build --release -m pbzarr-python/Cargo.toml"
 install-wheel = "maturin develop --release -m pbzarr-python/Cargo.toml"
 test-py = "pytest pbzarr-python/tests -v"
+validate-py-to-rust = "pytest pbzarr-python/tests/test_python_to_rust_roundtrip.py -v"
 
 # --- environments ---
 [environments]
