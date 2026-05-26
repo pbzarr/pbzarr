@@ -304,16 +304,32 @@ impl PbzStore {
                     .min(n_cols)
                     .max(1);
 
-                let arr = zarrs::array::ArrayBuilder::new(
+                // With sharding: shard shape = [shard_size, shard_col_size], inner chunk = [chunk_pos, col_chunk_size].
+                // Without sharding: chunk shape = [chunk_pos, col_chunk_size].
+                let (outer_pos, outer_col) = match (config.shard_size, config.shard_column_size) {
+                    (Some(ss), scs) => {
+                        let sp = (ss as u64).min(contig_len).max(1);
+                        let sc = scs.map(|s| (s as u64).min(n_cols).max(1)).unwrap_or(n_cols);
+                        (sp, sc)
+                    }
+                    (None, _) => (chunk_pos, col_chunk_size),
+                };
+
+                let mut builder = zarrs::array::ArrayBuilder::new(
                     vec![contig_len, n_cols],
-                    vec![chunk_pos, col_chunk_size],
+                    vec![outer_pos, outer_col],
                     zarrs_dt.clone(),
                     default_fill.clone(),
-                )
-                .dimension_names(["position", col_dim_name].into())
-                .bytes_to_bytes_codecs(data_codecs.clone())
-                .build(self.fs.clone(), &data_path)
-                .map_err(|e| PbzError::Store(e.to_string()))?;
+                );
+                builder
+                    .dimension_names(["position", col_dim_name].into())
+                    .bytes_to_bytes_codecs(data_codecs.clone());
+                if config.shard_size.is_some() {
+                    builder.subchunk_shape(vec![chunk_pos, col_chunk_size]);
+                }
+                let arr = builder
+                    .build(self.fs.clone(), &data_path)
+                    .map_err(|e| PbzError::Store(e.to_string()))?;
                 arr.store_metadata()
                     .map_err(|e| PbzError::Store(e.to_string()))?;
 
@@ -339,16 +355,28 @@ impl PbzStore {
                 }
             } else {
                 // 1D scalar array: shape [contig_len].
-                let arr = zarrs::array::ArrayBuilder::new(
+                // With sharding: chunk shape passed to builder is shard shape; subchunk_shape is inner chunk.
+                let outer_pos = if let Some(ss) = config.shard_size {
+                    (ss as u64).min(contig_len).max(1)
+                } else {
+                    chunk_pos
+                };
+
+                let mut builder = zarrs::array::ArrayBuilder::new(
                     vec![contig_len],
-                    vec![chunk_pos],
+                    vec![outer_pos],
                     zarrs_dt.clone(),
                     default_fill.clone(),
-                )
-                .dimension_names(["position"].into())
-                .bytes_to_bytes_codecs(data_codecs.clone())
-                .build(self.fs.clone(), &data_path)
-                .map_err(|e| PbzError::Store(e.to_string()))?;
+                );
+                builder
+                    .dimension_names(["position"].into())
+                    .bytes_to_bytes_codecs(data_codecs.clone());
+                if config.shard_size.is_some() {
+                    builder.subchunk_shape(vec![chunk_pos]);
+                }
+                let arr = builder
+                    .build(self.fs.clone(), &data_path)
+                    .map_err(|e| PbzError::Store(e.to_string()))?;
                 arr.store_metadata()
                     .map_err(|e| PbzError::Store(e.to_string()))?;
             }

@@ -63,21 +63,34 @@ def create_track(
 
         if is_cohort:
             n_cols = len(columns)
+            inner_pos = max(1, min(chunk, length))
+            inner_col = max(1, min(col_chunk, n_cols))
             data_shape = (length, n_cols)
-            data_chunks = (
-                max(1, min(chunk, length)),
-                max(1, min(col_chunk, n_cols)),
-            )
+            data_chunks = (inner_pos, inner_col)
             dims = ["position", dim_name]
+            if shard_size is not None:
+                col_shard = shard_column_size or n_cols
+                data_shards = (
+                    max(1, min(shard_size, length)),
+                    max(1, min(col_shard, n_cols)),
+                )
+            else:
+                data_shards = None
         else:
+            inner_pos = max(1, min(chunk, length))
             data_shape = (length,)
-            data_chunks = (max(1, min(chunk, length)),)
+            data_chunks = (inner_pos,)
             dims = ["position"]
+            if shard_size is not None:
+                data_shards = (max(1, min(shard_size, length)),)
+            else:
+                data_shards = None
 
         contig_g.create_array(
             track,
             shape=data_shape,
             chunks=data_chunks,
+            shards=data_shards,
             dtype=np_dtype,
             dimension_names=dims,
             compressors=codecs,

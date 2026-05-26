@@ -185,3 +185,41 @@ fn partial_chunk_write_then_read() {
     let got1: Array1<u32> = got.into_dimensionality::<ndarray::Ix1>().unwrap();
     assert_eq!(got1, data);
 }
+
+#[test]
+fn sharded_scalar_track_round_trips() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("t.pbz");
+    let genome = Genome::new(vec![Contig { name: "chr1".into(), length: 10_000 }]).unwrap();
+    let mut store = PbzStore::create(&path, genome, None).unwrap();
+
+    // chunk_size 1000, shard_size 4000 (= 4 chunks per shard)
+    store
+        .create_track(
+            "depth",
+            TrackConfig::new(Dtype::U32)
+                .chunk_size(1_000)
+                .shard_size(4_000),
+        )
+        .unwrap();
+
+    let region = pbzarr::Region {
+        contig: store.genome().id("chr1").unwrap(),
+        start: 0,
+        end: 10_000,
+    };
+    let data = ndarray::Array1::<u32>::from_iter(0..10_000u32);
+    store
+        .track("depth")
+        .unwrap()
+        .write_region(&region, data.view().into_dyn())
+        .unwrap();
+
+    let got = store
+        .track("depth")
+        .unwrap()
+        .read_region::<u32>(&region)
+        .unwrap();
+    let arr = got.into_dimensionality::<ndarray::Ix1>().unwrap();
+    assert_eq!(arr, data);
+}

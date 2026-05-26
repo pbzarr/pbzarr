@@ -55,3 +55,22 @@ def test_create_cohort_track(tmp_path: Path):
 
     sample = g["chr1/sample"]
     assert list(sample[:]) == ["A", "B", "C"]
+
+
+def test_sharded_track_round_trips(tmp_path: Path):
+    out = tmp_path / "t.pbz"
+    create_store(str(out), contigs=["chr1"], contig_lengths=[10_000])
+    create_track(
+        str(out),
+        track="depth",
+        dtype="uint32",
+        chunk_size=1_000,
+        shard_size=4_000,
+    )
+
+    g = zarr.open_group(str(out), mode="r+")
+    arr = g["chr1/depth"]
+    arr[:] = np.arange(10_000, dtype=np.uint32)
+
+    g2 = zarr.open_group(str(out), mode="r")
+    assert (g2["chr1/depth"][:] == np.arange(10_000)).all()
