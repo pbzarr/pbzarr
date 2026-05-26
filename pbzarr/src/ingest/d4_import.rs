@@ -2,13 +2,24 @@
 
 use std::path::PathBuf;
 
-#[allow(dead_code)]
+use crate::store::PbzStore;
+use crate::Result;
+use crate::ingest::{ImportConfig, ImportReport};
+
 #[derive(Debug, Clone)]
 pub struct D4Source {
     pub path: PathBuf,
     pub sample_label: Option<String>,
 }
 
-// `import_d4` is intentionally absent at this task — the function depends on
-// `PbzStore` which doesn't exist yet. Task 4 re-enables the `import_d4`
-// re-export (still a stub at that point); Task 11 implements the body.
+/// Bulk-import one or more d4 files into an existing track.
+///
+/// Body filled in by Task 11.
+pub fn import_d4(
+    _store: &mut PbzStore,
+    _track_name: &str,
+    _sources: &[D4Source],
+    _config: ImportConfig,
+) -> Result<ImportReport> {
+    unimplemented!("import_d4 body — Task 11")
+}
