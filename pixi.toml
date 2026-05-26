@@ -28,6 +28,16 @@ d4tools = ">=0.3.10,<0.4"
 [feature.dev.tasks]
 test-import = "cargo test -p pbz --test import -- --nocapture"
 
+# --- validate feature: cross-language xarray round-trip ---
+[feature.validate.dependencies]
+python = ">=3.11,<3.13"
+xarray = ">=2024.10,<2026"
+zarr = ">=3.0,<4"
+numpy = ">=2.0,<3"
+
+[feature.validate.tasks]
+validate-roundtrip = "python scripts/validate_xarray_read.py"
+
 # --- environments ---
 [environments]
-default = { features = ["dev"], solve-group = "default" }
+default = { features = ["dev", "validate"], solve-group = "default" }
