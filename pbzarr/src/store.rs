@@ -112,6 +112,17 @@ impl PbzStore {
                 .map_err(|e| PbzError::Store(e.to_string()))?;
         }
 
+        // Create per-contig groups upfront so `create_track` only has to add
+        // arrays. Avoids rewriting empty group metadata on every track add.
+        for contig in genome.contigs() {
+            let group_path = format!("/{}", contig.name);
+            zarrs::group::GroupBuilder::new()
+                .build(fs.clone(), &group_path)
+                .map_err(|e| PbzError::Store(e.to_string()))?
+                .store_metadata()
+                .map_err(|e| PbzError::Store(e.to_string()))?;
+        }
+
         Ok(Self {
             storage,
             fs,
@@ -278,18 +289,10 @@ impl PbzStore {
         let default_fill = default_fill_value(config.dtype);
         let data_codecs = default_data_codecs(config.dtype)?;
 
+        // Contig groups are created in `PbzStore::create`; we only add arrays here.
         for contig in self.genome.contigs() {
             let contig_len = contig.length;
             let chunk_pos = (config.chunk_size as u64).min(contig_len).max(1);
-
-            // Ensure the contig group exists.
-            let contig_group_path = format!("/{}", contig.name);
-            zarrs::group::GroupBuilder::new()
-                .build(self.fs.clone(), &contig_group_path)
-                .map_err(|e| PbzError::Store(e.to_string()))?
-                .store_metadata()
-                .map_err(|e| PbzError::Store(e.to_string()))?;
-
             let data_path = format!("/{}/{}", contig.name, name);
 
             if let (Some(col_dim_name), Some(cols)) = (col_dim.as_deref(), columns) {

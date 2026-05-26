@@ -21,7 +21,7 @@ pub struct D4Source {
 /// MUST equal the track's column count for cohort tracks, or be exactly 1 for
 /// scalar tracks.
 pub fn import_d4(
-    store: &mut PbzStore,
+    store: &PbzStore,
     track_name: &str,
     sources: &[D4Source],
     config: ImportConfig,

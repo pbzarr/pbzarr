@@ -69,7 +69,7 @@ fn import_one_d4_into_scalar_track() {
         .unwrap();
 
     import_d4(
-        &mut store,
+        &store,
         "depth",
         &[D4Source {
             path: d4,
@@ -147,7 +147,7 @@ fn import_d4_multi_contig_out_of_order_writes_correct_contigs() {
         .unwrap();
 
     import_d4(
-        &mut store,
+        &store,
         "depth",
         &[D4Source {
             path: d4_path,
