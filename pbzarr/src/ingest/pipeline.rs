@@ -1,25 +1,15 @@
-//! Generic channel-based ingest pipeline. Drives `ValueReader` sources into a
-//! `Track` via a bounded crossbeam channel worker pool.
-//!
-//! # Design
-//!
-//! - One producer thread generates `(contig_id, start, end)` tasks, one per
-//!   position chunk.
-//! - N worker threads each fork every `ValueReader` once (via `ValueReader::fork`),
-//!   then loop on tasks: for each task, fill an `Array2<T>` with all reader columns
-//!   and ship a typed result to the writer channel.
-//! - One writer thread drains results in arrival order, reshapes if scalar (rank-1),
-//!   and calls `Track::write_region`.
-//!
-//! Error propagation: every result channel carries `crate::Result<(Region, Array2<T>)>`;
-//! the first error seen on the writer thread is returned from `run_pipeline`.
+//! Generic ingest pipeline. Drives `ValueReader` sources into a `Track` via a
+//! scoped worker pool; each worker forks its readers, then reads + writes
+//! chunk-aligned tasks directly. Zarrs is safe for concurrent writes to
+//! non-overlapping chunks, which the per-chunk task partition guarantees.
 
 use std::mem;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crossbeam_channel::bounded;
-use ndarray::{Array2, Axis, s};
+use ndarray::{Array2, Axis};
 
 use crate::Result;
 use crate::error::PbzError;
@@ -27,7 +17,8 @@ use crate::genome::Region;
 use crate::io::{Numeric, ValueReader};
 use crate::track::Track;
 
-/// Hook for callers to observe pipeline progress.
+/// Hook for callers to observe pipeline progress. Implementations must be
+/// `Send + Sync` because workers call `tick` concurrently.
 pub trait ProgressSink: Send + Sync {
     fn tick(&self, _bytes: u64) {}
     fn done(&self) {}
@@ -35,11 +26,11 @@ pub trait ProgressSink: Send + Sync {
 
 /// Configuration for `run_pipeline`.
 pub struct ImportConfig {
-    /// Number of reader worker threads.
+    /// Number of reader/writer worker threads.
     pub workers: usize,
     /// Override position chunk size. Defaults to `track.chunk_size()`.
     pub chunk_size: Option<usize>,
-    /// Unused for now; reserved for future per-column chunking options.
+    /// Reserved for per-column chunking; unused today.
     pub column_chunk_size: Option<usize>,
     /// Optional progress observer.
     pub progress: Option<Arc<dyn ProgressSink>>,
@@ -64,10 +55,31 @@ pub struct ImportReport {
     pub tasks_completed: usize,
 }
 
-// Internal task: one position chunk to process.
 #[derive(Clone, Debug)]
 struct ChunkTask {
     region: Region,
+}
+
+struct State {
+    bytes_written: AtomicU64,
+    tasks_completed: AtomicUsize,
+    first_err: Mutex<Option<PbzError>>,
+}
+
+impl State {
+    fn record_err(&self, err: PbzError) {
+        let mut slot = self.first_err.lock().expect("error slot poisoned");
+        if slot.is_none() {
+            *slot = Some(err);
+        }
+    }
+
+    fn has_err(&self) -> bool {
+        self.first_err
+            .lock()
+            .expect("error slot poisoned")
+            .is_some()
+    }
 }
 
 /// Drive a set of `ValueReader` instances into a `Track`, chunk by chunk.
@@ -85,9 +97,8 @@ pub fn run_pipeline<T, R>(
 ) -> Result<ImportReport>
 where
     T: Numeric,
-    R: ValueReader<Item = T> + 'static,
+    R: ValueReader<Item = T>,
 {
-    // Validate T matches the track's dtype.
     if T::DTYPE != track.dtype() {
         return Err(PbzError::InvalidDtype {
             dtype: format!(
@@ -101,7 +112,6 @@ where
 
     let n_readers = readers.len();
 
-    // Validate reader arity against track shape.
     if track.rank() == 2 {
         let expected = track.columns_count()?;
         if n_readers != expected {
@@ -118,19 +128,17 @@ where
     }
 
     let chunk_size = config.chunk_size.unwrap_or_else(|| track.chunk_size()) as u64;
-    // Shared with workers so each can resolve ContigId → name.
     let genome = Arc::clone(track.genome());
 
-    // Generate all tasks: one per (contig, chunk) pair.
     let mut tasks: Vec<ChunkTask> = Vec::new();
-    let mut contigs_with_data: Vec<()> = Vec::new();
+    let mut n_contigs = 0usize;
     for (contig_id, contig) in genome.iter() {
         let len = contig.length;
         if len == 0 {
             continue;
         }
+        n_contigs += 1;
         let n_chunks = len.div_ceil(chunk_size);
-        contigs_with_data.push(());
         for chunk_idx in 0..n_chunks {
             let start = chunk_idx * chunk_size;
             let end = (start + chunk_size).min(len);
@@ -144,170 +152,139 @@ where
         }
     }
 
-    let n_contigs = contigs_with_data.len();
     let workers = config.workers.max(1);
-
-    // Channel bounds: 2× workers keeps both sides busy without unbounded memory.
     let task_cap = (workers * 2).max(1);
-    let result_cap = (workers * 2).max(1);
-
-    // Task channel: producer → workers.
     let (task_tx, task_rx) = bounded::<ChunkTask>(task_cap);
-    // Result channel: workers → writer.
-    let (res_tx, res_rx) = bounded::<Result<(Region, Array2<T>)>>(result_cap);
 
-    // Producer thread: pushes all tasks onto the task channel.
-    let producer = {
-        let task_tx = task_tx.clone();
-        thread::spawn(move || {
-            for task in tasks {
-                // If all workers have exited (receivers dropped), stop.
-                if task_tx.send(task).is_err() {
-                    break;
-                }
-            }
-            // Dropping task_tx closes the channel; workers exit their recv loop.
-        })
-    };
-    drop(task_tx);
-
-    // Worker threads: each forks all readers once, then loops on tasks.
     let readers = Arc::new(readers);
-    let mut worker_handles = Vec::with_capacity(workers);
-    for _ in 0..workers {
-        let task_rx = task_rx.clone();
-        let res_tx = res_tx.clone();
-        let readers = Arc::clone(&readers);
-        let genome = Arc::clone(&genome);
-        worker_handles.push(thread::spawn(move || {
-            // Fork all readers for this thread.
-            let mut forked: Vec<R> = match readers
-                .iter()
-                .map(|r| r.fork())
-                .collect::<crate::io::error::Result<Vec<_>>>()
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    // Report error and exit.
-                    let _ =
-                        res_tx.send(Err(PbzError::Metadata(format!("reader fork failed: {e}"))));
-                    return;
-                }
-            };
+    let state = Arc::new(State {
+        bytes_written: AtomicU64::new(0),
+        tasks_completed: AtomicUsize::new(0),
+        first_err: Mutex::new(None),
+    });
 
-            while let Ok(task) = task_rx.recv() {
-                let region = task.region;
-                let chunk_len = region.len();
-                // Resolve ContigId → name in the track's genome; the reader
-                // does its own name lookup in its source file's genome.
-                let contig_name = match genome.get(region.contig) {
-                    Some(c) => c.name.clone(),
-                    None => {
-                        let _ = res_tx.send(Err(PbzError::Metadata(format!(
-                            "pipeline: unknown contig id {:?} in task",
-                            region.contig
-                        ))));
-                        break;
-                    }
-                };
-
-                // Allocate scratch buffer: shape (chunk_len, n_readers).
-                // Filled with `T::ZERO` (0 / 0.0 / false). Well-behaved readers
-                // overwrite every position, so the initial value doesn't matter
-                // for correctness; this is just a defined starting state.
-                let mut buf = Array2::<T>::from_elem((chunk_len, n_readers), T::ZERO);
-
-                let mut ok = true;
-                for (col_idx, reader) in forked.iter_mut().enumerate() {
-                    let dst = buf.slice_mut(s![.., col_idx..col_idx + 1]);
-                    // Convert to ArrayViewMut2 via into_shape — the slice gives us a
-                    // (chunk_len, 1) view already.
-                    if let Err(e) = reader.read_into(&contig_name, region.start, region.end, dst) {
-                        let _ = res_tx.send(Err(PbzError::Metadata(format!(
-                            "reader {col_idx} failed on {region}: {e}"
-                        ))));
-                        ok = false;
-                        break;
-                    }
-                }
-                if ok && res_tx.send(Ok((region, buf))).is_err() {
-                    break;
-                }
-            }
-        }));
-    }
-    drop(task_rx);
-    drop(res_tx);
-
-    // Writer: drain result channel, reshape, write.
-    let progress = config.progress.clone();
-    let mut bytes_written: u64 = 0;
-    let mut tasks_completed: usize = 0;
-    let mut first_err: Option<crate::error::PbzError> = None;
-
-    for result in res_rx {
-        match result {
-            Err(e) => {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-                // Continue draining so workers can exit cleanly.
-            }
-            Ok((region, buf)) => {
-                if first_err.is_some() {
-                    // Already failed; skip writes but keep draining.
-                    continue;
-                }
-                // For rank-1 tracks collapse the trailing column axis.
-                let write_result = if track.rank() == 1 {
-                    // Shape is (chunk_len, 1). Remove the column axis to get (chunk_len,).
-                    let rank1 = buf.remove_axis(Axis(1)).into_dyn();
-                    track.write_region::<T>(&region, rank1)
-                } else {
-                    track.write_region::<T>(&region, buf.into_dyn())
-                };
-                match write_result {
-                    Ok(()) => {
-                        let chunk_bytes = (region.len() * n_readers * mem::size_of::<T>()) as u64;
-                        bytes_written += chunk_bytes;
-                        tasks_completed += 1;
-                        if let Some(ref p) = progress {
-                            p.tick(chunk_bytes);
-                        }
-                    }
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            let task_rx = task_rx.clone();
+            let readers = Arc::clone(&readers);
+            let genome = Arc::clone(&genome);
+            let state = Arc::clone(&state);
+            let progress = config.progress.clone();
+            scope.spawn(move || {
+                // Per-thread fork of every reader. The mutex-wrapped readers
+                // in the source are otherwise serialized across calls; fork
+                // gives each worker its own decoder state.
+                let mut forked: Vec<R> = match readers
+                    .iter()
+                    .map(|r| r.fork())
+                    .collect::<crate::io::error::Result<Vec<_>>>()
+                {
+                    Ok(v) => v,
                     Err(e) => {
-                        if first_err.is_none() {
-                            first_err = Some(e);
-                        }
+                        state.record_err(PbzError::Metadata(format!("reader fork failed: {e}")));
+                        return;
+                    }
+                };
+
+                while let Ok(task) = task_rx.recv() {
+                    if state.has_err() {
+                        // Drain remaining tasks to let the channel close cleanly.
+                        continue;
+                    }
+                    if let Err(e) = process_task::<T, R>(
+                        track,
+                        &mut forked,
+                        n_readers,
+                        &genome,
+                        &task,
+                        progress.as_deref(),
+                        &state,
+                    ) {
+                        state.record_err(e);
                     }
                 }
+            });
+        }
+
+        // Push tasks from the main thread; drop the sender to signal workers.
+        for task in tasks {
+            if state.has_err() {
+                break;
+            }
+            if task_tx.send(task).is_err() {
+                break;
             }
         }
-    }
+        drop(task_tx);
+    });
 
-    // Join producer (it's just a sender; can't fail).
-    let _ = producer.join();
-
-    // Join workers; collect any panic-level errors.
-    for handle in worker_handles {
-        if let Err(_panic) = handle.join()
-            && first_err.is_none()
-        {
-            first_err = Some(PbzError::Metadata("worker thread panicked".into()));
-        }
-    }
-
-    if let Some(ref p) = progress {
+    if let Some(ref p) = config.progress {
         p.done();
     }
 
-    if let Some(e) = first_err {
+    if let Some(e) = state.first_err.lock().expect("error slot poisoned").take() {
         return Err(e);
     }
 
     Ok(ImportReport {
         contigs_written: n_contigs,
-        bytes_written,
-        tasks_completed,
+        bytes_written: state.bytes_written.load(Ordering::Relaxed),
+        tasks_completed: state.tasks_completed.load(Ordering::Relaxed),
     })
+}
+
+fn process_task<T, R>(
+    track: &Track,
+    forked: &mut [R],
+    n_readers: usize,
+    genome: &crate::genome::Genome,
+    task: &ChunkTask,
+    progress: Option<&dyn ProgressSink>,
+    state: &State,
+) -> Result<()>
+where
+    T: Numeric,
+    R: ValueReader<Item = T>,
+{
+    let region = task.region;
+    let chunk_len = region.len();
+    let contig_name = genome
+        .get(region.contig)
+        .ok_or_else(|| {
+            PbzError::Metadata(format!(
+                "pipeline: unknown contig id {:?} in task",
+                region.contig
+            ))
+        })?
+        .name
+        .clone();
+
+    // Scratch buffer: (chunk_len, n_readers). Pre-fill with `T::ZERO`; readers
+    // are expected to overwrite every position they cover.
+    let mut buf = Array2::<T>::from_elem((chunk_len, n_readers), T::ZERO);
+
+    for (col_idx, reader) in forked.iter_mut().enumerate() {
+        let dst = buf.slice_mut(ndarray::s![.., col_idx..col_idx + 1]);
+        reader
+            .read_into(&contig_name, region.start, region.end, dst)
+            .map_err(|e| PbzError::Metadata(format!("reader {col_idx} failed on {region}: {e}")))?;
+    }
+
+    // Collapse the column axis for scalar tracks; cohort tracks keep both.
+    if track.rank() == 1 {
+        let rank1 = buf.remove_axis(Axis(1)).into_dyn();
+        track.write_region::<T>(&region, rank1)?;
+    } else {
+        track.write_region::<T>(&region, buf.into_dyn())?;
+    }
+
+    let chunk_bytes = (chunk_len * n_readers * mem::size_of::<T>()) as u64;
+    state
+        .bytes_written
+        .fetch_add(chunk_bytes, Ordering::Relaxed);
+    state.tasks_completed.fetch_add(1, Ordering::Relaxed);
+    if let Some(p) = progress {
+        p.tick(chunk_bytes);
+    }
+    Ok(())
 }
