@@ -66,7 +66,7 @@ Root `perbase_zarr` attribute:
 
 - **`PbzStore::create(path, genome, coordinate_space) -> Self`**, **`open(path) -> Self`**, accessors `genome()` / `coordinate_space()` / `track_names()` / `track(name)`, plus `create_track(name, config) -> &Track`.
 - **`TrackConfig::new(dtype)` builder.** Chain `.columns(vec)` for 2D, `.column_dim("sample")` to override the default `"column"`, `.chunk_size(n)`, `.column_chunk_size(n)`, `.shard_size(n)`, `.fill_value(v)`, `.description(s)`, `.source(s)`. No public `scalar`/`cohort` constructors.
-- **`Track::read_region<T>(region) -> ArrayD<T>`** and **`write_region<T>(region, ArrayViewD<T>)`** with runtime dtype check. Rank matches the track (1 or 2); callers downcast via `.into_dimensionality::<Ix1>()?` / `Ix2`.
+- **`Track::read_region<T>(region) -> ArrayD<T>`** and **`write_region<T>(region, ArrayD<T>)`** with runtime dtype check. `write_region` takes ownership of the buffer so zarrs can consume it without a clone. Rank matches the track (1 or 2); callers downcast via `.into_dimensionality::<Ix1>()?` / `Ix2`.
 - **`pbzarr::ingest`:** `D4Source`, `ImportConfig`, `ImportReport`, `run_pipeline<T, R: ValueReader<Item=T>>`, `import_d4(&store, track, sources, config)`.
 - **`ValueReader::read_into(contig_name, start, end, dst: ArrayViewMut2)`** — name-based, no `ContigId` crossing.
 - **`Numeric` trait** has `const DTYPE: Dtype` and `const ZERO: Self`; supertrait bounds include `zarrs::array::Element + ElementOwned`.
@@ -79,8 +79,8 @@ Ingest lives in `pbzarr::ingest` (not in a CLI; PyO3 will bind `import_d4` direc
 
 - **`ValueReader` trait** at `pbzarr::io::reader` (`Send + Sync`). Workers fork their reader per-thread via `ValueReader::fork`.
 - **`D4Reader`** at `pbzarr::io::d4` — the only ingest format at v0.
-- **Channel-based pipeline** in `pbzarr::ingest::pipeline`. `crossbeam-channel`, sync, bounded for backpressure. Within-file parallelism via worker forks; tasks are chunk-aligned.
-- **`run_pipeline<T, R>` takes `&Track`.** No `&mut`; opens its own zarr arrays via the `Arc<FilesystemStore>` on `Track`.
+- **Parallel-writer pipeline** in `pbzarr::ingest::pipeline`. `thread::scope` + a single bounded `crossbeam-channel` of tasks. Each worker forks readers, then does read+write itself — no writer thread. Shared `Arc<State>` with `AtomicU64` counters and a `Mutex<Option<PbzError>>` for first error. Zarrs is safe for concurrent writes to non-overlapping chunks; tasks are partitioned one-per-chunk so this holds.
+- **`run_pipeline<T, R>` takes `&Track`.** No `&mut`. `Track` caches an `Arc<Array<FilesystemStore>>` per contig (`RwLock<HashMap<...>>`) so per-chunk reads/writes don't re-open `zarr.json`.
 
 ## Operational notes
 
@@ -89,9 +89,11 @@ Ingest lives in `pbzarr::ingest` (not in a CLI; PyO3 will bind `import_d4` direc
 - **zarrs 0.23 quirks:**
   - `ArrayBuilder::new(shape, chunk_shape, data_type, fill_value)` — chunk_shape comes before data_type.
   - `Array::open` wants the concrete `Arc<FilesystemStore>`, not the trait-object alias.
-  - `retrieve_array_subset_ndarray` / `store_array_subset_ndarray` are deprecated — use `retrieve_array_subset::<ArrayD<T>>` / `store_array_subset(&subset, data.to_owned())`.
+  - `retrieve_array_subset_ndarray` / `store_array_subset_ndarray` are deprecated — use `retrieve_array_subset::<ArrayD<T>>` / `store_array_subset(&subset, data)` (owned).
   - `BytesToBytesCodecTraits` is at `zarrs::array::codec::api::` (not `zarrs::array::codec::`).
   - Zarr v3 variable-length strings (`vlen-utf8`) round-trip cleanly across zarrs / zarr-python / xarray.
+- **ndarray quirks:**
+  - `ndarray::concatenate` is slow — backed by an iterator + `to_vec_mapped` allocator, not a flat memcpy. Cost can dominate when assembling per-reader column buffers. If you need fast assembly, write a manual loop using `Array2::uninit` + `ptr::copy_nonoverlapping` per column.
 
 ## Commands
 
@@ -103,6 +105,14 @@ pixi run validate-roundtrip
 ```
 
 CI runs the first three on push/PR to `main` (`.github/workflows/ci.yml`).
+
+## Profiling
+
+- Build with `cargo build --profile profiling --example <name>` — release optimizations + DWARF in a packed `.dSYM` so samply / atos can symbolicate. Profile defined at workspace root.
+- Install samply via `pixi global install samply`, then `samply setup` once on macOS to codesign.
+- `samply record --save-only -o prof.json -- ./target/profiling/examples/<name> ...` captures; `samply load prof.json` opens Firefox profiler.
+- Saved JSON keeps raw addresses. To symbolicate in CLI, use `atos -o <binary>.dSYM/Contents/Resources/DWARF/<...> -arch arm64 -l 0x100000000 <addr + 0x100000000>` (samply addresses are __TEXT-relative; add the base).
+- `pbzarr/examples/profile_ingest.rs` is the throughput harness (synth or `--d4 <path>`). `pbzarr/examples/bench_d4_readers.rs` is a read-only mmap-vs-ssio microbench.
 
 ## Project structure
 
@@ -116,7 +126,9 @@ pbzarr-rs/                    # workspace root (single crate)
 └── pbzarr/
     ├── Cargo.toml
     ├── examples/
-    │   └── fixture_smoke_store.rs
+    │   ├── fixture_smoke_store.rs
+    │   ├── profile_ingest.rs        # throughput harness for samply
+    │   └── bench_d4_readers.rs      # mmap vs ssio read-only microbench
     ├── src/
     │   ├── lib.rs
     │   ├── error.rs
@@ -180,6 +192,7 @@ In the library:
 - Don't promote tracks back to groups (multi-resolution is deferred). Tracks are zarr arrays.
 - Don't put per-track metadata in per-group attributes — root `perbase_zarr.tracks` map only.
 - Don't cross `ContigId` namespaces between readers and the store. `ValueReader::read_into` takes a contig name + range for exactly this reason.
+- **Don't bake cohort framing into public API surface.** pbzarr is a per-base format; cohort analysis is one use case, not the only one (stranded signal, methylation contexts, mask categories — all are valid column-axis interpretations). Parameter, type, and dimension names exposed to users must be generic: use `column` / `column_dim` / `column_label`, never `sample` / `samples` / `n_samples`. The dim's *value* may be `"sample"` for a cohort track (set via `column_dim = "sample"`), but the *parameter name* in any function selecting on the column axis stays generic, and selection must resolve against the track's declared `column_dim` from metadata rather than hardcoding `"sample"` in `dims`.
 
 In the format:
 
@@ -191,6 +204,7 @@ In the format:
 - **Coord-array consistency across contigs is NOT validated on open.** Writers ensure consistency; readers trust it. A `pbzarr::validate` helper is deferred.
 - **d4 concurrent reads:** within-file parallelism in `import_d4` depends on the `d4` crate supporting concurrent `read_range`. Not yet verified at scale; works correctly today against a `Mutex` inside `D4Reader`.
 - **d4 ingest is currently restricted to `uint32` tracks** (d4's native dtype). Widening or narrowing during ingest is not supported in v0.
+- **d4 dep is pinned** to `cademirch/d4-format@28aeced` with feature `local_reader`. The production reader still uses `d4::ssio::D4TrackReader` (streaming, no `split` codepath); a `local_reader`-based rewrite hit two upstream bugs — `SparseArrayReader::split` drops records for partitions `[0..K]` fully inside one record, and `decode_block` does unaligned u32 reads that trip debug-mode pointer-alignment checks. The `local_reader` feature stays on so `pbzarr/examples/bench_d4_readers.rs` can compare both readers when upstream fixes land. Bumping the rev requires verifying the `ssio` + `D4TrackReader` APIs haven't shifted.
 
 ## Deferred
 
