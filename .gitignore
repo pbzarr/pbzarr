@@ -1,5 +1,6 @@
 /target
 /.pixi
+/profiles
 CLAUDE.md
 docs/superpowers
 .claude

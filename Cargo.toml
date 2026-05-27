@@ -10,3 +10,12 @@ repository = "https://github.com/pbzarr/pbzarr-rs"
 
 [workspace.lints.clippy]
 # leave defaults — CI enforces -D warnings
+
+# Profile used by `samply` runs. Same optimizations as release, but keeps
+# DWARF debuginfo so flamegraphs show function names instead of raw addresses.
+# Build with `cargo build --profile profiling --example <name>`.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+split-debuginfo = "packed"
