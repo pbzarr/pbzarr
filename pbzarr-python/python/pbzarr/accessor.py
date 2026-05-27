@@ -1,7 +1,10 @@
 """xarray accessor `.pbz` for pbz stores.
 
-Registered on `xr.DataTree`. Provides region queries (string-based
-0-based half-open slicing) and a list of tracks from root metadata.
+Registered on `xr.DataTree`. Provides region queries (string-based,
+0-based half-open) and a list of tracks from root metadata. Column-axis
+selection uses a generic `column` kwarg that resolves against whatever
+the track declared as its `column_dim` — pbzarr is not cohort-specific,
+so the API never hardcodes `"sample"`.
 """
 from __future__ import annotations
 import xarray as xr
@@ -25,14 +28,16 @@ class PbzDataTreeAccessor:
         query: str,
         *,
         track: str | None = None,
-        sample: str | None = None,
+        column: str | None = None,
     ) -> xr.Dataset | xr.DataArray:
         """Slice the store to a region.
 
         - `query`: string like "chr1:100-200" (0-based, half-open).
                    "chr1" returns the whole contig.
         - `track`: optional track name; if given, returns the sliced DataArray.
-        - `sample`: optional cohort label; selects on the column dim.
+        - `column`: optional column-axis label (e.g. a sample id for cohort
+                    tracks, a strand for stranded tracks). Selects on whichever
+                    dim the track declares as its `column_dim`.
         """
         rq = parse_region(query)
         if rq.contig not in self._dt.children:
@@ -50,7 +55,9 @@ class PbzDataTreeAccessor:
 
         if track is not None:
             da = ds[track]
-            if sample is not None and "sample" in da.dims:
-                da = da.sel(sample=sample)
+            if column is not None:
+                col_dim = next((d for d in da.dims if d != "position"), None)
+                if col_dim is not None:
+                    da = da.sel({col_dim: column})
             return da
         return ds

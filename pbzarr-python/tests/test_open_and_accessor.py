@@ -50,11 +50,11 @@ def test_accessor_region_returns_dataset(tmp_path: Path):
     assert ds["depth"].dims == ("position", "sample")
 
 
-def test_accessor_region_with_track_and_sample(tmp_path: Path):
+def test_accessor_region_with_track_and_column(tmp_path: Path):
     out = _make_store(tmp_path)
     dt = pbzarr.open(str(out))
 
-    da = dt.pbz.region("chr1:100-200", track="depth", sample="B")
+    da = dt.pbz.region("chr1:100-200", track="depth", column="B")
     assert isinstance(da, xr.DataArray)
     assert int(da.sizes["position"]) == 100
     assert "sample" not in da.dims
