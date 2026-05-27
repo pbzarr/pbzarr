@@ -14,6 +14,7 @@ dependencies = [
     "zarr>=3.0,<4",
     "xarray>=2024.10",
     "numpy>=2.0,<3",
+    "dask>=2024.8",
 ]
 
 [project.optional-dependencies]

@@ -3,14 +3,19 @@ from __future__ import annotations
 import xarray as xr
 
 
-def open(path: str) -> xr.DataTree:
+def open(path: str, *, chunks: dict | str | None = None) -> xr.DataTree:
     """Open a pbz store as an `xr.DataTree`.
 
-    The root node holds `contigs` / `contig_lengths` arrays and the
-    `perbase_zarr` attribute namespace; each contig is a child node
-    holding the per-contig data arrays + coord arrays.
+    Each contig is a child node holding the per-contig data arrays + coord
+    arrays. Defaults to **eager numpy backing** — for cohort-scale reads
+    the zarr codec pipeline (especially via `zarrs-python`) parallelizes
+    chunk decode internally and is faster than layering dask on top
+    (see https://github.com/zarrs/zarr_benchmarks).
 
-    Use `dt.pbz.region(...)` for region queries; the accessor is
-    registered when `pbzarr` is imported.
+    Pass `chunks="auto"` or an explicit dict for dask-backed lazy reads
+    if you specifically need out-of-core streaming.
+
+    Use `dt.pbz.region(...)` for region queries; the accessor is registered
+    when `pbzarr` is imported.
     """
-    return xr.open_datatree(path, engine="zarr")
+    return xr.open_datatree(path, engine="zarr", chunks=chunks)

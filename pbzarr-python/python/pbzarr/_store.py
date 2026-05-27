@@ -61,3 +61,7 @@ def create_store(
         dimension_names=["contigs"],
     )
     arr[:] = lengths
+
+    # Consolidate so readers can open the store in one fs round-trip instead
+    # of walking the group tree per array. Kept in sync by create_track.
+    zarr.consolidate_metadata(g.store)

@@ -112,7 +112,6 @@ def create_track(
             )
             coord[:] = labels
 
-    # root tracks map update
     meta: dict = {"dtype": dtype, "chunk_size": chunk}
     if is_cohort:
         meta["column_dim"] = dim_name
@@ -132,3 +131,6 @@ def create_track(
     tracks[track] = meta
     pbz_ns["tracks"] = tracks
     g.attrs["perbase_zarr"] = pbz_ns
+
+    # Refresh consolidated metadata so readers benefit from the fast path.
+    zarr.consolidate_metadata(g.store)
