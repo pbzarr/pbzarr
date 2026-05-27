@@ -262,9 +262,9 @@ where
                 let write_result = if track.rank() == 1 {
                     // Shape is (chunk_len, 1). Remove the column axis to get (chunk_len,).
                     let rank1 = buf.remove_axis(Axis(1)).into_dyn();
-                    track.write_region::<T>(&region, rank1.view())
+                    track.write_region::<T>(&region, rank1)
                 } else {
-                    track.write_region::<T>(&region, buf.view().into_dyn())
+                    track.write_region::<T>(&region, buf.into_dyn())
                 };
                 match write_result {
                     Ok(()) => {

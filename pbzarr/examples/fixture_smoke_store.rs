@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     store
         .track("mask")
         .unwrap()
-        .write_region(&region, m.view().into_dyn())?;
+        .write_region(&region, m.into_dyn())?;
 
     // 2D track with named sample axis
     store.create_track(
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         store
             .track("depth")
             .unwrap()
-            .write_region(&region, d.view().into_dyn())?;
+            .write_region(&region, d.into_dyn())?;
     }
 
     println!("wrote {}", path);

@@ -1,7 +1,7 @@
 //! `PbzStore`: top-level handle for a PBZ on-disk store.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use hashbrown::HashMap;
 use ndarray::Array1;
@@ -23,9 +23,6 @@ use crate::{PBZ_FORMAT_VERSION, Result};
 
 /// A handle to an open PBZ store.
 pub struct PbzStore {
-    // Kept for future write operations (Task 8+).
-    #[allow(dead_code)]
-    pub(crate) storage: ReadableWritableListableStorage,
     /// Concrete filesystem store for `Array::open` (needs the concrete type).
     pub(crate) fs: Arc<FilesystemStore>,
     pub(crate) genome: Arc<Genome>,
@@ -46,11 +43,9 @@ impl PbzStore {
     ) -> Result<Self> {
         let path = path.as_ref();
 
-        // Open filesystem store at the given path.
         let fs = Arc::new(FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?);
         let storage: ReadableWritableListableStorage = fs.clone();
 
-        // Build root group with perbase_zarr attribute.
         let mut root = zarrs::group::GroupBuilder::new()
             .build(storage.clone(), "/")
             .map_err(|e| PbzError::Store(e.to_string()))?;
@@ -74,7 +69,6 @@ impl PbzStore {
 
         let n = genome.len() as u64;
 
-        // Write the `contigs` 1-D string array.
         let contigs_array = zarrs::array::ArrayBuilder::new(
             vec![n],
             vec![n.max(1)], // chunk = whole array; avoid zero-length chunk
@@ -95,7 +89,6 @@ impl PbzStore {
                 .map_err(|e| PbzError::Store(e.to_string()))?;
         }
 
-        // Write the `contig_lengths` 1-D int64 array.
         let lengths_array =
             zarrs::array::ArrayBuilder::new(vec![n], vec![n.max(1)], data_type::int64(), 0i64)
                 .dimension_names(["contigs"].into())
@@ -124,7 +117,6 @@ impl PbzStore {
         }
 
         Ok(Self {
-            storage,
             fs,
             genome: Arc::new(genome),
             coordinate_space,
@@ -143,9 +135,7 @@ impl PbzStore {
         // Keep the concrete FilesystemStore so Array::open gets a concrete storage
         // type that satisfies ReadableStorageTraits + 'static without trait-object upcasting.
         let fs = Arc::new(FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?);
-        let storage: ReadableWritableListableStorage = fs.clone();
 
-        // Open root group and extract perbase_zarr attribute.
         let root = zarrs::group::Group::open(fs.clone(), "/")
             .map_err(|e| PbzError::Store(e.to_string()))?;
         let attrs = root.attributes();
@@ -167,7 +157,6 @@ impl PbzStore {
             .cloned()
             .unwrap_or_default();
 
-        // Read the `contigs` 1-D string array.
         let contigs_arr =
             Array::open(fs.clone(), "/contigs").map_err(|e| PbzError::Store(e.to_string()))?;
         let n = contigs_arr.shape()[0] as usize;
@@ -180,7 +169,6 @@ impl PbzStore {
             nd.into_raw_vec_and_offset().0
         };
 
-        // Read the `contig_lengths` 1-D int64 array.
         let lengths_arr = Array::open(fs.clone(), "/contig_lengths")
             .map_err(|e| PbzError::Store(e.to_string()))?;
         let lengths: Vec<i64> = if n == 0 {
@@ -211,7 +199,6 @@ impl PbzStore {
 
         let genome = Arc::new(Genome::new(contigs)?);
 
-        // Hydrate track handles from the tracks map.
         let mut track_handles: HashMap<String, Track> = HashMap::new();
         for (name, val) in &tracks {
             let metadata: TrackMetadata = serde_json::from_value(val.clone()).map_err(|e| {
@@ -226,12 +213,12 @@ impl PbzStore {
                     dtype,
                     fs: Arc::clone(&fs),
                     genome: Arc::clone(&genome),
+                    arrays: RwLock::new(HashMap::new()),
                 },
             );
         }
 
         Ok(Self {
-            storage,
             fs,
             genome,
             coordinate_space,
@@ -271,7 +258,6 @@ impl PbzStore {
             return Err(PbzError::Metadata(format!("track '{name}' already exists")));
         }
 
-        // Determine the column dimension name for 2D tracks.
         let col_dim: Option<String> = if config.columns.is_some() {
             Some(
                 config
@@ -296,7 +282,6 @@ impl PbzStore {
             let data_path = format!("/{}/{}", contig.name, name);
 
             if let (Some(col_dim_name), Some(cols)) = (col_dim.as_deref(), columns) {
-                // 2D cohort array: shape [contig_len, n_cols].
                 let col_chunk_size = config
                     .column_chunk_size
                     .map(|s| s as u64)
@@ -333,7 +318,6 @@ impl PbzStore {
                 arr.store_metadata()
                     .map_err(|e| PbzError::Store(e.to_string()))?;
 
-                // Write the coord array: /<contig>/<col_dim> as 1D string array.
                 let coord_path = format!("/{}/{}", contig.name, col_dim_name);
                 let coord_arr = zarrs::array::ArrayBuilder::new(
                     vec![n_cols],
@@ -354,7 +338,6 @@ impl PbzStore {
                         .map_err(|e| PbzError::Store(e.to_string()))?;
                 }
             } else {
-                // 1D scalar array: shape [contig_len].
                 // With sharding: chunk shape passed to builder is shard shape; subchunk_shape is inner chunk.
                 let outer_pos = if let Some(ss) = config.shard_size {
                     (ss as u64).min(contig_len).max(1)
@@ -382,13 +365,11 @@ impl PbzStore {
             }
         }
 
-        // Build the TrackMetadata and update root attributes.
         let metadata = track_metadata_from_config(&config);
         let meta_val =
             serde_json::to_value(&metadata).map_err(|e| PbzError::Metadata(e.to_string()))?;
         self.tracks.insert(name.to_owned(), meta_val);
 
-        // Rewrite the root zarr.json with updated tracks map.
         let mut root = zarrs::group::Group::open(self.fs.clone(), "/")
             .map_err(|e| PbzError::Store(e.to_string()))?;
         let attrs = root.attributes_mut();
@@ -400,7 +381,6 @@ impl PbzStore {
         root.store_metadata()
             .map_err(|e| PbzError::Store(e.to_string()))?;
 
-        // Cache the new track handle.
         let dtype = config.dtype;
         self.track_handles.insert(
             name.to_owned(),
@@ -410,6 +390,7 @@ impl PbzStore {
                 dtype,
                 fs: Arc::clone(&self.fs),
                 genome: Arc::clone(&self.genome),
+                arrays: RwLock::new(HashMap::new()),
             },
         );
 

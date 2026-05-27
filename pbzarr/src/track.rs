@@ -1,11 +1,12 @@
 //! Track metadata + I/O. See `docs/superpowers/specs/2026-05-25-pbz-v0-ship-design.md`.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use ndarray::{ArrayD, ArrayViewD};
+use hashbrown::HashMap;
+use ndarray::ArrayD;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use zarrs::array::ArraySubset;
+use zarrs::array::{Array, ArraySubset};
 use zarrs::filesystem::FilesystemStore;
 
 use crate::Result;
@@ -139,6 +140,10 @@ pub struct Track {
     pub(crate) fs: Arc<FilesystemStore>,
     /// Genome shared with the owning PbzStore; needed to map ContigId → name.
     pub(crate) genome: Arc<Genome>,
+    /// Per-contig `zarrs::Array` cache. `Array::open` re-reads `zarr.json`
+    /// from disk, so without this every read/write would do that — turning a
+    /// 250-chunk-per-contig ingest into 250 metadata reloads per track.
+    pub(crate) arrays: RwLock<HashMap<String, Arc<Array<FilesystemStore>>>>,
 }
 
 impl Track {
@@ -194,10 +199,35 @@ impl Track {
                 self.name
             ))
         })?;
-        let path = format!("/{}/{}", first.name, self.name);
-        let arr = zarrs::array::Array::open(std::sync::Arc::clone(&self.fs), &path)
-            .map_err(|e| PbzError::Store(format!("open {path}: {e}")))?;
+        let arr = self.array_for(&first.name)?;
         Ok(arr.shape()[1] as usize)
+    }
+
+    /// Return the cached `Array` handle for `contig_name`, opening it lazily
+    /// on first use. Concurrent reads share the cache without serializing.
+    fn array_for(&self, contig_name: &str) -> Result<Arc<Array<FilesystemStore>>> {
+        if let Some(arr) = self
+            .arrays
+            .read()
+            .expect("track array cache lock poisoned")
+            .get(contig_name)
+        {
+            return Ok(Arc::clone(arr));
+        }
+        let mut w = self
+            .arrays
+            .write()
+            .expect("track array cache lock poisoned");
+        // Re-check under the write lock in case another thread won the race.
+        if let Some(arr) = w.get(contig_name) {
+            return Ok(Arc::clone(arr));
+        }
+        let path = format!("/{}/{}", contig_name, self.name);
+        let arr = Array::open(Arc::clone(&self.fs), &path)
+            .map_err(|e| PbzError::Store(format!("open {path}: {e}")))?;
+        let arr = Arc::new(arr);
+        w.insert(contig_name.to_owned(), Arc::clone(&arr));
+        Ok(arr)
     }
 
     /// Read an arbitrary region. Returns an `ArrayD<T>` whose rank matches the
@@ -221,9 +251,7 @@ impl Track {
             .ok_or_else(|| PbzError::InvalidRegion {
                 message: format!("unknown contig id {:?}", region.contig),
             })?;
-        let path = format!("/{}/{}", contig.name, self.name);
-        let arr = zarrs::array::Array::open(Arc::clone(&self.fs), &path)
-            .map_err(|e| PbzError::Store(format!("open {path}: {e}")))?;
+        let arr = self.array_for(&contig.name)?;
 
         #[allow(clippy::single_range_in_vec_init)]
         let subset = if self.rank() == 1 {
@@ -242,10 +270,14 @@ impl Track {
 
     /// Write data into an arbitrary region.
     ///
-    /// Partial-chunk writes trigger a read-modify-write internally inside zarrs.
+    /// Takes ownership of `data` because zarrs' `store_array_subset` consumes
+    /// the buffer; passing by value lets the pipeline writer avoid a per-chunk
+    /// clone. Partial-chunk writes trigger a read-modify-write internally
+    /// inside zarrs.
+    ///
     /// Returns `Err` if `T::DTYPE` doesn't match the track dtype, or if the
     /// data rank doesn't match the track rank.
-    pub fn write_region<T: Numeric>(&self, region: &Region, data: ArrayViewD<'_, T>) -> Result<()> {
+    pub fn write_region<T: Numeric>(&self, region: &Region, data: ArrayD<T>) -> Result<()> {
         if T::DTYPE != self.dtype() {
             return Err(PbzError::InvalidDtype {
                 dtype: format!(
@@ -271,9 +303,7 @@ impl Track {
             .ok_or_else(|| PbzError::InvalidRegion {
                 message: format!("unknown contig id {:?}", region.contig),
             })?;
-        let path = format!("/{}/{}", contig.name, self.name);
-        let arr = zarrs::array::Array::open(Arc::clone(&self.fs), &path)
-            .map_err(|e| PbzError::Store(format!("open {path}: {e}")))?;
+        let arr = self.array_for(&contig.name)?;
 
         #[allow(clippy::single_range_in_vec_init)]
         let subset = if expected_rank == 1 {
@@ -283,8 +313,7 @@ impl Track {
         } else {
             ArraySubset::new_with_ranges(&[region.start..region.end, 0..(data.shape()[1] as u64)])
         };
-        // store_array_subset requires owned ndarray; to_owned converts the view.
-        arr.store_array_subset(&subset, data.to_owned())
+        arr.store_array_subset(&subset, data)
             .map_err(|e| PbzError::Store(format!("write {}: {e}", self.name)))?;
         Ok(())
     }

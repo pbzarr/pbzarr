@@ -89,7 +89,7 @@ fn write_then_read_scalar_track_round_trip() {
             data[i] = true;
         }
     }
-    let dyn_view = data.view().into_dyn();
+    let dyn_view = data.clone().into_dyn();
     store
         .track("mask")
         .unwrap()
@@ -139,7 +139,7 @@ fn write_then_read_cohort_track_round_trip() {
     store
         .track("depth")
         .unwrap()
-        .write_region(&region, data.view().into_dyn())
+        .write_region(&region, data.clone().into_dyn())
         .unwrap();
 
     let got = store
@@ -174,7 +174,7 @@ fn partial_chunk_write_then_read() {
     store
         .track("x")
         .unwrap()
-        .write_region(&region, data.view().into_dyn())
+        .write_region(&region, data.clone().into_dyn())
         .unwrap();
 
     let got = store
@@ -190,7 +190,11 @@ fn partial_chunk_write_then_read() {
 fn sharded_scalar_track_round_trips() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("t.pbz");
-    let genome = Genome::new(vec![Contig { name: "chr1".into(), length: 10_000 }]).unwrap();
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 10_000,
+    }])
+    .unwrap();
     let mut store = PbzStore::create(&path, genome, None).unwrap();
 
     // chunk_size 1000, shard_size 4000 (= 4 chunks per shard)
@@ -212,7 +216,7 @@ fn sharded_scalar_track_round_trips() {
     store
         .track("depth")
         .unwrap()
-        .write_region(&region, data.view().into_dyn())
+        .write_region(&region, data.clone().into_dyn())
         .unwrap();
 
     let got = store
