@@ -203,8 +203,8 @@ In the format:
 
 - **Coord-array consistency across contigs is NOT validated on open.** Writers ensure consistency; readers trust it. A `pbzarr::validate` helper is deferred.
 - **d4 concurrent reads:** within-file parallelism in `import_d4` depends on the `d4` crate supporting concurrent `read_range`. Not yet verified at scale; works correctly today against a `Mutex` inside `D4Reader`.
-- **d4 ingest is currently restricted to `uint32` tracks** (d4's native dtype). Widening or narrowing during ingest is not supported in v0.
-- **d4 dep is pinned** to `cademirch/d4-format@28aeced` with feature `local_reader`. The production reader still uses `d4::ssio::D4TrackReader` (streaming, no `split` codepath); a `local_reader`-based rewrite hit two upstream bugs — `SparseArrayReader::split` drops records for partitions `[0..K]` fully inside one record, and `decode_block` does unaligned u32 reads that trip debug-mode pointer-alignment checks. The `local_reader` feature stays on so `pbzarr/examples/bench_d4_readers.rs` can compare both readers when upstream fixes land. Bumping the rev requires verifying the `ssio` + `D4TrackReader` APIs haven't shifted.
+- **d4 ingest is restricted to `int32` tracks** (d4's actual native dtype; earlier code forced u32 and paid a per-position `try_from`). Widening or narrowing during ingest is not supported in v0.
+- **d4 dep is pinned** to `cademirch/d4-format@f836299` with feature `local_reader` (mmap-backed; pulls in `mapped_io`, no htslib). `D4Reader` uses `D4TrackReader::split` + `to_codec().decode_block(...)`. This rev fixes two earlier bugs: `SparseArrayReader::split` now clips records for partitions `[0..K]` fully inside one record, and `bit_array.rs` `decode_block` now uses `read_unaligned` so debug-mode pointer-alignment checks don't trip. `pbzarr/examples/bench_d4_readers.rs` keeps the mmap-vs-ssio microbench around for perf regression checks. Bumping the rev requires verifying the `split` + `decode_block` APIs haven't shifted.
 
 ## Deferred
 

@@ -65,7 +65,7 @@ fn import_one_d4_into_scalar_track() {
     .unwrap();
     let mut store = PbzStore::create(&store_path, genome, None).unwrap();
     store
-        .create_track("depth", TrackConfig::new(Dtype::U32))
+        .create_track("depth", TrackConfig::new(Dtype::I32))
         .unwrap();
 
     import_d4(
@@ -87,12 +87,12 @@ fn import_one_d4_into_scalar_track() {
     let got = store
         .track("depth")
         .unwrap()
-        .read_region::<u32>(&region)
+        .read_region::<i32>(&region)
         .unwrap();
     let arr = got.into_dimensionality::<ndarray::Ix1>().unwrap();
 
     for i in 0..100u32 {
-        let v = (i % 50) + 1;
+        let v: i32 = ((i % 50) + 1) as i32;
         for p in (i * 10)..((i + 1) * 10) {
             assert_eq!(arr[p as usize], v, "pos {p}: expected {v}");
         }
@@ -143,7 +143,7 @@ fn import_d4_multi_contig_out_of_order_writes_correct_contigs() {
     .unwrap();
     let mut store = PbzStore::create(&store_path, genome, None).unwrap();
     store
-        .create_track("depth", TrackConfig::new(Dtype::U32))
+        .create_track("depth", TrackConfig::new(Dtype::I32))
         .unwrap();
 
     import_d4(
@@ -162,7 +162,7 @@ fn import_d4_multi_contig_out_of_order_writes_correct_contigs() {
     let chr1 = store
         .track("depth")
         .unwrap()
-        .read_region::<u32>(&Region {
+        .read_region::<i32>(&Region {
             contig: chr1_id,
             start: 0,
             end: 300,
@@ -173,7 +173,7 @@ fn import_d4_multi_contig_out_of_order_writes_correct_contigs() {
     let chr2 = store
         .track("depth")
         .unwrap()
-        .read_region::<u32>(&Region {
+        .read_region::<i32>(&Region {
             contig: chr2_id,
             start: 0,
             end: 500,

@@ -17,9 +17,9 @@ pub struct D4Source {
 /// Bulk-import one or more d4 files into an existing track.
 ///
 /// The track MUST already exist (created via `PbzStore::create_track`). Its
-/// dtype MUST be `uint32` — d4 ingest only supports that at v0. `sources.len()`
-/// MUST equal the track's column count for cohort tracks, or be exactly 1 for
-/// scalar tracks.
+/// dtype MUST be `int32` — d4 stores depths as i32 natively, so ingest is
+/// zero-conversion at the per-position level. `sources.len()` MUST equal the
+/// track's column count for cohort tracks, or be exactly 1 for scalar tracks.
 pub fn import_d4(
     store: &PbzStore,
     track_name: &str,
@@ -33,10 +33,10 @@ pub fn import_d4(
             available: store.track_names().map(|s| s.to_owned()).collect(),
         })?;
 
-    if track.dtype() != Dtype::U32 {
+    if track.dtype() != Dtype::I32 {
         return Err(PbzError::InvalidDtype {
             dtype: format!(
-                "d4 import requires uint32 track; track {track_name:?} is {}",
+                "d4 import requires int32 track; track {track_name:?} is {}",
                 track.dtype()
             ),
         });
@@ -63,5 +63,5 @@ pub fn import_d4(
         .collect();
     let readers = readers?;
 
-    run_pipeline::<u32, _>(track, readers, &config)
+    run_pipeline::<i32, _>(track, readers, &config)
 }

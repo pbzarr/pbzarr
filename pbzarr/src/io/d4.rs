@@ -1,10 +1,17 @@
 //! D4 single-track reader implementing `ValueReader`.
+//!
+//! Uses the mmap-backed `d4::D4TrackReader` (default generics
+//! `<BitArrayReader, SparseArrayReader<RangeRecord>>`) and reads each region
+//! via `.split(Some(chunk_size))` + `ptab.to_codec().decode_block(...)`. The
+//! reference for this pattern is `pyd4::load_values_to_buffer` in the upstream
+//! d4 repo.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use d4::ssio::D4TrackReader;
+use d4::D4TrackReader;
+use d4::ptab::{DecodeResult, Decoder};
+use d4::stab::SecondaryTablePartReader;
 use ndarray::ArrayViewMut2;
 
 use crate::genome::{Contig, Genome};
@@ -16,29 +23,25 @@ struct Shared {
     genome: Genome,
 }
 
-/// D4 single-sample reader.
+/// D4 single-sample reader. Owns one mmap-backed `D4TrackReader`; multi-thread
+/// callers should use `fork()` to get a per-thread handle on the same file.
 pub struct D4Reader {
     shared: Arc<Shared>,
-    inner: Mutex<D4TrackReader<File>>,
+    inner: Mutex<D4TrackReader>,
 }
 
 impl D4Reader {
     /// Open a d4 file. Reads the header to build the canonical `Genome`.
+    /// Picks the first available data track via `open_first_track`.
     pub fn open<P: AsRef<Path>>(src: P) -> Result<Self> {
         let path = src.as_ref().to_path_buf();
-        let file = File::open(&path).map_err(|source| ReaderError::Io {
+        let inner = D4TrackReader::open_first_track(&path).map_err(|source| ReaderError::Io {
             path: path.clone(),
             source,
         })?;
-        let inner = D4TrackReader::from_reader(file, None).map_err(|e| {
-            ReaderError::Other(anyhow::anyhow!(
-                "failed to open d4 track for {}: {e}",
-                path.display(),
-            ))
-        })?;
 
         let contigs: Vec<Contig> = inner
-            .get_header()
+            .header()
             .chrom_list()
             .iter()
             .map(|c| Contig {
@@ -61,7 +64,8 @@ impl D4Reader {
 }
 
 impl ValueReader for D4Reader {
-    type Item = u32;
+    // d4's native dtype is i32 (signed; some signal tracks emit negatives).
+    type Item = i32;
 
     fn contigs(&self) -> &Genome {
         &self.shared.genome
@@ -104,64 +108,53 @@ impl ValueReader for D4Reader {
                 self.shared.path.display(),
             ))
         })?;
+        let span = (end_u32 - start_u32) as usize;
 
         let mut inner = self.inner.lock().expect("d4 reader mutex poisoned");
-        let mut view = inner
-            .get_view(contig_name, start_u32, end_u32)
-            .map_err(|e| {
-                ReaderError::Other(anyhow::anyhow!(
-                    "d4 view failed for {}:{contig_name}:{start_u32}-{end_u32}: {e}",
-                    self.shared.path.display(),
-                ))
+        // split() requires &mut self; the partitioning is cheap relative to
+        // the actual decode of a 1 Mbp range. Sizing the limit at the request
+        // span gives at most one partition per contig overlapping our range.
+        let partitions = inner
+            .split(Some(span.max(1)))
+            .map_err(|source| ReaderError::Io {
+                path: self.shared.path.clone(),
+                source,
             })?;
 
-        let len = (end - start) as usize;
-        for i in 0..len {
-            let pos = start_u32 + i as u32;
-            let (reported_pos, value) = view
-                .next()
-                .ok_or_else(|| {
-                    ReaderError::Other(anyhow::anyhow!(
-                        "unexpected end of d4 view at {}:{contig_name} position {pos}",
-                        self.shared.path.display(),
-                    ))
-                })?
-                .map_err(|e| {
-                    ReaderError::Other(anyhow::anyhow!(
-                        "failed to read d4 value at {}:{contig_name}:{pos}: {e}",
-                        self.shared.path.display(),
-                    ))
-                })?;
-
-            if reported_pos != pos {
-                return Err(ReaderError::Other(anyhow::anyhow!(
-                    "d4 position mismatch at {}:{contig_name}:{pos}: got {reported_pos}",
-                    self.shared.path.display(),
-                )));
+        for (mut ptab, mut stab) in partitions {
+            let (part_chr, part_begin, part_end) = {
+                let (c, b, e) = ptab.region();
+                (c.to_string(), b, e)
+            };
+            if part_chr != contig_name {
+                continue;
+            }
+            let from = start_u32.max(part_begin);
+            let to = end_u32.min(part_end);
+            if from >= to {
+                continue;
             }
 
-            let depth = u32::try_from(value).map_err(|_| {
-                ReaderError::Other(anyhow::anyhow!(
-                    "d4 depth at {}:{contig_name}:{pos} cannot be represented as u32 (got {value})",
-                    self.shared.path.display(),
-                ))
-            })?;
-
-            dst[[i, 0]] = depth;
+            let mut codec = ptab.to_codec();
+            codec.decode_block(from as usize, (to - from) as usize, |pos, value| {
+                let resolved = match value {
+                    DecodeResult::Definitely(v) => v,
+                    DecodeResult::Maybe(v) => stab.decode(pos as u32).unwrap_or(v),
+                };
+                let idx = pos - start_u32 as usize;
+                dst[[idx, 0]] = resolved;
+            });
         }
 
         Ok(())
     }
+
     fn fork(&self) -> Result<Self> {
-        let file = File::open(&self.shared.path).map_err(|source| ReaderError::Io {
-            path: self.shared.path.clone(),
-            source,
-        })?;
-        let reader = D4TrackReader::from_reader(file, None).map_err(|e| {
-            ReaderError::Other(anyhow::anyhow!(
-                "failed to fork d4 track for {}: {e}",
-                self.shared.path.display(),
-            ))
+        let reader = D4TrackReader::open_first_track(&self.shared.path).map_err(|source| {
+            ReaderError::Io {
+                path: self.shared.path.clone(),
+                source,
+            }
         })?;
         Ok(Self {
             shared: Arc::clone(&self.shared),

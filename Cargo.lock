@@ -241,7 +241,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 [[package]]
 name = "d4"
 version = "0.3.11"
-source = "git+https://github.com/cademirch/d4-format.git?rev=28aeced#28aeced8655698aa137f466fb0747d043cebbd04"
+source = "git+https://github.com/cademirch/d4-format.git?rev=f836299#f836299cc3093c4d6e7f1ac7de71f395f97f7e59"
 dependencies = [
  "d4-framefile",
  "flate2",
@@ -255,7 +255,7 @@ dependencies = [
 [[package]]
 name = "d4-framefile"
 version = "0.3.6"
-source = "git+https://github.com/cademirch/d4-format.git?rev=28aeced#28aeced8655698aa137f466fb0747d043cebbd04"
+source = "git+https://github.com/cademirch/d4-format.git?rev=f836299#f836299cc3093c4d6e7f1ac7de71f395f97f7e59"
 dependencies = [
  "memmap",
 ]

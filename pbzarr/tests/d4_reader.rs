@@ -22,7 +22,7 @@ fn d4tools_available() -> bool {
 
 /// Build a tiny d4 file by piping a bedGraph through `d4tools create`.
 /// All intervals get the same value, so we know what every position should be.
-fn synth_d4(tmpdir: &Path, name: &str, contigs: &[(&str, u64)], value: u32) -> PathBuf {
+fn synth_d4(tmpdir: &Path, name: &str, contigs: &[(&str, u64)], value: i32) -> PathBuf {
     let sizes_path = tmpdir.join(format!("{name}.sizes"));
     let mut sf = std::fs::File::create(&sizes_path).unwrap();
     for (c, l) in contigs {
@@ -88,7 +88,7 @@ fn read_into_fills_constant_buffer() {
     let start = 10u64;
     let end = 30u64;
 
-    let mut buf: Array2<u32> = Array2::zeros(((end - start) as usize, reader.n_fields()));
+    let mut buf: Array2<i32> = Array2::zeros(((end - start) as usize, reader.n_fields()));
     reader
         .read_into("chr1", start, end, buf.view_mut())
         .unwrap();
@@ -113,7 +113,7 @@ fn empty_region_is_noop() {
     let reader = D4Reader::open(&d4).unwrap();
 
     // 0-row view: contract is just "don't crash".
-    let mut buf: Array2<u32> = Array2::zeros((0, 1));
+    let mut buf: Array2<i32> = Array2::zeros((0, 1));
     reader.read_into("chr1", 50, 50, buf.view_mut()).unwrap();
 }
 
@@ -129,8 +129,8 @@ fn fork_produces_independent_reader() {
     let a = D4Reader::open(&d4).unwrap();
     let b = a.fork().unwrap();
 
-    let mut buf_a: Array2<u32> = Array2::zeros((8, 1));
-    let mut buf_b: Array2<u32> = Array2::zeros((8, 1));
+    let mut buf_a: Array2<i32> = Array2::zeros((8, 1));
+    let mut buf_b: Array2<i32> = Array2::zeros((8, 1));
     a.read_into("chr1", 0, 8, buf_a.view_mut()).unwrap();
     b.read_into("chr1", 0, 8, buf_b.view_mut()).unwrap();
 
