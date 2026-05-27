@@ -72,12 +72,12 @@ dt = pbzarr.open("out.pbz")                 # xr.DataTree
 dt.pbz.tracks                                # ['depth', 'mask']
 dt.pbz.region("chr1:1000-2000")              # xr.Dataset (one contig, sliced)
 dt.pbz.region("chr1:1000-2000", track="depth")             # xr.DataArray
-dt.pbz.region("chr1:1000-2000", track="depth", sample="A") # 1D DataArray
+dt.pbz.region("chr1:1000-2000", track="depth", column="A") # 1D DataArray
 ```
 
 The `.pbz` accessor on `xr.DataTree` is registered when you `import pbzarr`. Regions use 0-based, half-open coordinates (`chr1:1000-2000` is `[1000, 2000)`).
 
-> **Note:** `pbzarr.open(...)` emits a `RuntimeWarning` about non-consolidated metadata on every call. It's benign for v0; consolidating large stores via `zarr.consolidate_metadata(path)` after writes speeds up subsequent opens.
+> **Note:** Python `create_store` / `create_track` consolidate metadata after each call. Stores written by the Rust crate don't consolidate yet, so `pbzarr.open(...)` will emit a benign `RuntimeWarning` for those; run `zarr.consolidate_metadata(path)` once to silence.
 
 ## Quickstart — Rust
 
