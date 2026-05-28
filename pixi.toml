@@ -42,10 +42,10 @@ pip = ">=24"
 pytest = ">=8"
 
 [feature.wheel.tasks]
-build-wheel = "maturin build --release -m pbzarr-python/Cargo.toml"
-install-wheel = "maturin develop --release -m pbzarr-python/Cargo.toml"
-test-py = "pytest pbzarr-python/tests -v"
-validate-py-to-rust = "pytest pbzarr-python/tests/test_python_to_rust_roundtrip.py -v"
+build-wheel = "maturin build --release -m python/Cargo.toml"
+install-wheel = "maturin develop --release -m python/Cargo.toml"
+test-py = "pytest python/tests -v"
+validate-py-to-rust = "pytest python/tests/test_python_to_rust_roundtrip.py -v"
 
 # --- environments ---
 [environments]

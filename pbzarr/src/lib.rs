@@ -1,6 +1,6 @@
 pub mod error;
 pub mod genome;
-pub mod ingest;
+pub mod import;
 pub mod io;
 pub mod region_query;
 pub mod store;

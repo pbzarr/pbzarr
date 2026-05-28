@@ -142,7 +142,7 @@ pub struct Track {
     pub(crate) genome: Arc<Genome>,
     /// Per-contig `zarrs::Array` cache. `Array::open` re-reads `zarr.json`
     /// from disk, so without this every read/write would do that — turning a
-    /// 250-chunk-per-contig ingest into 250 metadata reloads per track.
+    /// 250-chunk-per-contig import into 250 metadata reloads per track.
     pub(crate) arrays: RwLock<HashMap<String, Arc<Array<FilesystemStore>>>>,
 }
 

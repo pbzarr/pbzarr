@@ -1,11 +1,11 @@
-//! D4-specific ingest glue. Wires `D4Reader` into the generic pipeline.
+//! D4-specific import glue. Wires `D4Reader` into the generic pipeline.
 
 use std::path::PathBuf;
 
 use crate::PbzStore;
 use crate::Result;
 use crate::error::PbzError;
-use crate::ingest::pipeline::{ImportConfig, ImportReport, run_pipeline};
+use crate::import::pipeline::{Config, Report, run_pipeline};
 use crate::io::{D4Reader, Dtype};
 
 #[derive(Debug, Clone)]
@@ -17,15 +17,15 @@ pub struct D4Source {
 /// Bulk-import one or more d4 files into an existing track.
 ///
 /// The track MUST already exist (created via `PbzStore::create_track`). Its
-/// dtype MUST be `int32` — d4 stores depths as i32 natively, so ingest is
+/// dtype MUST be `int32` — d4 stores depths as i32 natively, so import is
 /// zero-conversion at the per-position level. `sources.len()` MUST equal the
 /// track's column count for cohort tracks, or be exactly 1 for scalar tracks.
-pub fn import_d4(
+pub fn from_d4(
     store: &PbzStore,
     track_name: &str,
     sources: &[D4Source],
-    config: ImportConfig,
-) -> Result<ImportReport> {
+    config: Config,
+) -> Result<Report> {
     let track = store
         .track(track_name)
         .ok_or_else(|| PbzError::TrackNotFound {

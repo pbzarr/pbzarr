@@ -7,14 +7,14 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use pbzarr::PbzStore;
-use pbzarr::ingest::{D4Source, ImportConfig, import_d4 as rs_import_d4};
+use pbzarr::import::{Config, D4Source, from_d4 as rs_from_d4};
 
 create_exception!(_native, PbzError, PyRuntimeError);
 
 /// Bulk-import one or more d4 files into an existing track.
 ///
 /// The track MUST already exist (created via `create_track`). dtype is
-/// read from the track metadata and currently MUST be `uint32`.
+/// read from the track metadata and currently MUST be `int32`.
 #[pyfunction]
 #[pyo3(signature = (store_path, track, sources, workers=None, chunk_size=None, column_chunk_size=None))]
 fn import_d4(
@@ -35,7 +35,7 @@ fn import_d4(
                 sample_label,
             })
             .collect();
-        let mut config = ImportConfig::default();
+        let mut config = Config::default();
         if let Some(w) = workers {
             config.workers = w;
         }
@@ -45,7 +45,7 @@ fn import_d4(
         if let Some(c) = column_chunk_size {
             config.column_chunk_size = Some(c);
         }
-        rs_import_d4(&store, &track, &sources, config)
+        rs_from_d4(&store, &track, &sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))?;
         Ok(())
     })

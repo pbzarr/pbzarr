@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["pbzarr", "pbzarr-python"]
+members = ["pbzarr", "python"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 authors = ["Cade Mirchandani <cmirchan@ucsc.edu>"]
-repository = "https://github.com/pbzarr/pbzarr-rs"
+repository = "https://github.com/pbzarr/pbzarr"
 
 [workspace.lints.clippy]
 # leave defaults — CI enforces -D warnings

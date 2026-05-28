@@ -1,4 +1,4 @@
-//! Generic ingest pipeline. Drives `ValueReader` sources into a `Track` via a
+//! Generic import pipeline. Drives `ValueReader` sources into a `Track` via a
 //! scoped worker pool; each worker forks its readers, then reads + writes
 //! chunk-aligned tasks directly. Zarrs is safe for concurrent writes to
 //! non-overlapping chunks, which the per-chunk task partition guarantees.
@@ -25,7 +25,7 @@ pub trait ProgressSink: Send + Sync {
 }
 
 /// Configuration for `run_pipeline`.
-pub struct ImportConfig {
+pub struct Config {
     /// Number of reader/writer worker threads.
     pub workers: usize,
     /// Override position chunk size. Defaults to `track.chunk_size()`.
@@ -36,7 +36,7 @@ pub struct ImportConfig {
     pub progress: Option<Arc<dyn ProgressSink>>,
 }
 
-impl Default for ImportConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
             workers: 4,
@@ -48,7 +48,7 @@ impl Default for ImportConfig {
 }
 
 /// Summary returned by `run_pipeline` on success.
-pub struct ImportReport {
+pub struct Report {
     pub contigs_written: usize,
     pub bytes_written: u64,
     /// Number of chunk tasks that completed successfully.
@@ -90,11 +90,7 @@ impl State {
 ///
 /// Workers fork each reader once via `ValueReader::fork`; the original
 /// `readers` vec is consumed by the function.
-pub fn run_pipeline<T, R>(
-    track: &Track,
-    readers: Vec<R>,
-    config: &ImportConfig,
-) -> Result<ImportReport>
+pub fn run_pipeline<T, R>(track: &Track, readers: Vec<R>, config: &Config) -> Result<Report>
 where
     T: Numeric,
     R: ValueReader<Item = T>,
@@ -226,7 +222,7 @@ where
         return Err(e);
     }
 
-    Ok(ImportReport {
+    Ok(Report {
         contigs_written: n_contigs,
         bytes_written: state.bytes_written.load(Ordering::Relaxed),
         tasks_completed: state.tasks_completed.load(Ordering::Relaxed),

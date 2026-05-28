@@ -1,11 +1,11 @@
 //! End-to-end: synthesize a small d4 file via the system `d4tools` (skipped
-//! if unavailable), import via `import_d4`, read back via `Track::read_region`.
+//! if unavailable), import via `import::from_d4`, read back via `Track::read_region`.
 
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use pbzarr::ingest::{D4Source, ImportConfig, import_d4};
+use pbzarr::import::{Config, D4Source, from_d4};
 use pbzarr::io::Dtype;
 use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
 use tempfile::TempDir;
@@ -68,14 +68,14 @@ fn import_one_d4_into_scalar_track() {
         .create_track("depth", TrackConfig::new(Dtype::I32))
         .unwrap();
 
-    import_d4(
+    from_d4(
         &store,
         "depth",
         &[D4Source {
             path: d4,
             sample_label: None,
         }],
-        ImportConfig::default(),
+        Config::default(),
     )
     .unwrap();
 
@@ -146,14 +146,14 @@ fn import_d4_multi_contig_out_of_order_writes_correct_contigs() {
         .create_track("depth", TrackConfig::new(Dtype::I32))
         .unwrap();
 
-    import_d4(
+    from_d4(
         &store,
         "depth",
         &[D4Source {
             path: d4_path,
             sample_label: None,
         }],
-        ImportConfig::default(),
+        Config::default(),
     )
     .unwrap();
 

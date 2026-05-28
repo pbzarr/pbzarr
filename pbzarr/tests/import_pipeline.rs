@@ -1,5 +1,5 @@
 use ndarray::ArrayViewMut2;
-use pbzarr::ingest::{ImportConfig, run_pipeline};
+use pbzarr::import::{Config, run_pipeline};
 use pbzarr::io::Dtype;
 use pbzarr::io::ValueReader;
 use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
@@ -73,7 +73,7 @@ fn pipeline_writes_constants_into_cohort_track() {
     ];
 
     let track = store.track("depth").unwrap();
-    let report = run_pipeline::<u32, _>(track, readers, &ImportConfig::default()).unwrap();
+    let report = run_pipeline::<u32, _>(track, readers, &Config::default()).unwrap();
     assert!(report.bytes_written > 0);
     assert_eq!(report.contigs_written, 1);
 
@@ -115,7 +115,7 @@ fn pipeline_writes_constants_into_scalar_track() {
     }];
 
     let track = store.track("mask").unwrap();
-    let report = run_pipeline::<u32, _>(track, readers, &ImportConfig::default()).unwrap();
+    let report = run_pipeline::<u32, _>(track, readers, &Config::default()).unwrap();
     assert!(report.bytes_written > 0);
 
     let region = Region {
@@ -163,7 +163,7 @@ fn pipeline_spans_multiple_contigs() {
         val: 99,
     }];
     let track = store.track("depth").unwrap();
-    let report = run_pipeline::<u32, _>(track, readers, &ImportConfig::default()).unwrap();
+    let report = run_pipeline::<u32, _>(track, readers, &Config::default()).unwrap();
     assert_eq!(report.contigs_written, 2);
 
     for (name, len) in [("chr1", 2_000usize), ("chr2", 1_500)] {

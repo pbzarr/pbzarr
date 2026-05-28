@@ -25,7 +25,7 @@ def create_store(
     """Create a new empty PBZ store at `path`.
 
     The store has no tracks. Add tracks with `pbzarr.create_track(...)`.
-    Bulk-ingest from d4 files via `pbzarr.import_d4(...)`. Read with
+    Bulk-import from d4 files via `pbzarr.import_d4(...)`. Read with
     `pbzarr.open(...)` (or `xr.open_datatree(..., engine="zarr")`).
     """
     if len(contigs) != len(contig_lengths):

@@ -4,7 +4,7 @@ use crate::io::dtype::Dtype;
 
 /// Errors returned by `ValueReader` impls.
 ///
-/// Every variant carries the source path so cohort-scale ingest can attribute
+/// Every variant carries the source path so cohort-scale import can attribute
 /// failures to a specific input. Orchestrators decorate further (which sample,
 /// which region) at their layer.
 #[derive(Debug, thiserror::Error)]

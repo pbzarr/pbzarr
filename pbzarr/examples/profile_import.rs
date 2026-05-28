@@ -1,22 +1,22 @@
-//! Throughput harness for the ingest pipeline. Uses an in-memory `ValueReader`
+//! Throughput harness for the import pipeline. Uses an in-memory `ValueReader`
 //! so the d4 read path is excluded; what's measured is everything from the
 //! pipeline's task dispatch through blosc/zstd encoding and zarr chunk writes.
 //!
 //! Usage:
-//!   cargo build --release --example profile_ingest
-//!   ./target/release/examples/profile_ingest \
+//!   cargo build --release --example profile_import
+//!   ./target/release/examples/profile_import \
 //!       --contigs 4 --length 50000000 --cols 8 \
 //!       --chunk-size 1000000 --workers 4
 //!
 //! Profile with samply:
 //!   pixi global install samply  (or: cargo install samply)
-//!   samply record -- ./target/release/examples/profile_ingest --contigs 2 --length 100000000
+//!   samply record -- ./target/release/examples/profile_import --contigs 2 --length 100000000
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use ndarray::ArrayViewMut2;
-use pbzarr::ingest::{D4Source, ImportConfig, import_d4, run_pipeline};
+use pbzarr::import::{Config, D4Source, from_d4, run_pipeline};
 use pbzarr::io::{Dtype, ValueReader};
 use pbzarr::{Contig, Genome, PbzStore, TrackConfig};
 use tempfile::TempDir;
@@ -32,7 +32,7 @@ struct Args {
     workers: usize,
     keep: bool,
     out: Option<PathBuf>,
-    /// If set, ingest using `D4Reader` against this file (replicated `cols` times).
+    /// If set, import using `D4Reader` against this file (replicated `cols` times).
     /// Genome and `length` come from the d4 header.
     d4: Option<PathBuf>,
 }
@@ -66,7 +66,7 @@ impl Args {
                 "--d4" => a.d4 = Some(PathBuf::from(it.next().unwrap())),
                 "-h" | "--help" => {
                     eprintln!(
-                        "usage: profile_ingest [--contigs N] [--length L] [--cols C] \
+                        "usage: profile_import [--contigs N] [--length L] [--cols C] \
                          [--chunk-size N] [--column-chunk-size N] [--shard-size N] \
                          [--workers W] [--keep] [--out PATH]"
                     );
@@ -163,7 +163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut store = PbzStore::create(&path, genome.clone(), None)?;
 
     let column_names: Vec<String> = (0..args.cols).map(|i| format!("s{i}")).collect();
-    // d4 ingest requires int32; the synth path uses u32. Match the path.
+    // d4 import requires int32; the synth path uses u32. Match the path.
     let track_dtype = if args.d4.is_some() {
         Dtype::I32
     } else {
@@ -179,7 +179,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     store.create_track("depth", cfg)?;
 
-    let import_cfg = ImportConfig {
+    let import_cfg = Config {
         workers: args.workers,
         chunk_size: Some(args.chunk_size),
         column_chunk_size: None,
@@ -194,7 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sample_label: None,
             })
             .collect();
-        import_d4(&store, "depth", &sources, import_cfg)?
+        from_d4(&store, "depth", &sources, import_cfg)?
     } else {
         let readers: Vec<SynthReader> = (0..args.cols)
             .map(|i| SynthReader {
@@ -211,7 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let per_contig_total: u64 = genome.contigs().iter().map(|c| c.length).sum();
     let logical_bytes = (per_contig_total as usize) * args.cols * std::mem::size_of::<u32>();
     println!(
-        "ingested {} contigs, {} tasks, {} logical bytes, wall {:.2}s",
+        "imported {} contigs, {} tasks, {} logical bytes, wall {:.2}s",
         report.contigs_written, report.tasks_completed, logical_bytes, secs,
     );
     println!(

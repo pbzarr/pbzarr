@@ -60,7 +60,7 @@ impl std::fmt::Display for Dtype {
 ///
 /// `const DTYPE` lets generic code recover the runtime tag — needed at the
 /// dtype-erased Zarr-writer boundary. `ZERO` is the type's additive identity
-/// (or `false` for bool); used as scratch-buffer fill in the ingest pipeline.
+/// (or `false` for bool); used as scratch-buffer fill in the import pipeline.
 ///
 /// The `zarrs::array::Element + ElementOwned` supertrait bounds are required by
 /// the zarrs I/O methods in `Track::read_region` / `write_region`.

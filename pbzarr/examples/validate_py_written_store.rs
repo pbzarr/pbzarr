@@ -1,7 +1,7 @@
 //! Open a pbz store at the path passed on argv and validate the layout
 //! matches what the Python `create_store` + `create_track` wrote.
 //!
-//! Used by `pbzarr-python/tests/test_python_to_rust_roundtrip.py` to confirm
+//! Used by `python/tests/test_python_to_rust_roundtrip.py` to confirm
 //! the Python writer produces a layout the Rust library can read.
 
 use ndarray::Ix2;
