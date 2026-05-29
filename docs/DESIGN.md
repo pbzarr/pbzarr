@@ -110,7 +110,7 @@ Scalar tracks have no coord array. Their only dimension is `position`, which is 
 
 ### 3.4. Compression
 
-Every data array is compressed with **Blosc** in zstd mode (level 5) with byte shuffle. The codec choice is fixed at v0.1; configurability is deferred until benchmarks justify the parameter surface.
+Every data array is compressed with **Blosc** in zstd mode (level 5) with byte shuffle by default. The codec pipeline is recorded per array in standard Zarr v3 metadata (`zarr.json`), not in `perbase_zarr`, and is fixed when the array is created. A writer that fills an existing array, for example a cross-language importer populating tracks another tool created, encodes through the pipeline already recorded on the array rather than selecting its own. A consequence for interop: any codec used must be one that every implementation reading or writing the store can both encode and decode. The default Blosc(zstd-5, byte-shuffle) satisfies this on both `zarrs` and `zarr-python`.
 
 ### 3.5. Sharding
 
@@ -289,7 +289,7 @@ The on-disk layout, metadata schema, dtype tags, dimension names, coord arrays, 
 
 * **Variable-length UTF-8 string arrays** (Zarr v3 `vlen-utf8` codec) round-trip cleanly between `zarrs` (Rust) and `zarr-python` (Python). The `contigs` array and per-contig column-label arrays use this encoding.
 * **Zarr v3 `dimension_names`** are written into array metadata directly, not as a separate `_ARRAY_DIMENSIONS` attribute. The xarray-zarr backend reads these without additional configuration.
-* **Codec parameters** (Blosc, zstd level 5, byte shuffle) are identical across writers.
+* **Codec pipelines** live in each data array's own `zarr.json`, not in `perbase_zarr`, and are fixed when the array is created. A later writer that fills an existing array, including a cross-language importer populating tracks another tool created, encodes through the pipeline already recorded on the array rather than choosing its own. The interop constraint that follows: a store meant to be read or written across languages must use only codecs every implementation can both encode and decode. The default Blosc(zstd-5, byte-shuffle) satisfies this on both `zarrs` and `zarr-python`.
 * **The `perbase_zarr` root attribute** is preserved verbatim by both implementations; unknown keys survive a read-write cycle.
 
 Cross-language round-trip is enforced by a CI integration test that writes a fixture store from one language and reads it from the other.

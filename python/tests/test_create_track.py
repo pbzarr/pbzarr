@@ -74,3 +74,57 @@ def test_sharded_track_round_trips(tmp_path: Path):
 
     g2 = zarr.open_group(str(out), mode="r")
     assert (g2["chr1/depth"][:] == np.arange(10_000)).all()
+
+
+import json
+
+
+def _array_codecs(store: str, contig: str, track: str) -> list[dict]:
+    """Read the codec list from a track array's Zarr v3 metadata."""
+    meta = json.loads((Path(store) / contig / track / "zarr.json").read_text())
+    return meta["codecs"]
+
+
+def _blosc_config(codecs: list[dict]) -> dict | None:
+    for c in codecs:
+        if c["name"] == "blosc":
+            return c["configuration"]
+    return None
+
+
+def test_default_codecs_are_blosc_zstd5(tmp_path: Path):
+    out = tmp_path / "t.pbz"
+    create_store(str(out), contigs=["chr1"], contig_lengths=[1000])
+    create_track(str(out), track="depth", dtype="uint16")
+
+    cfg = _blosc_config(_array_codecs(str(out), "chr1", "depth"))
+    assert cfg is not None, "default should apply a Blosc codec"
+    assert cfg["cname"] == "zstd"
+    assert cfg["clevel"] == 5
+
+
+def test_compressors_override_is_applied(tmp_path: Path):
+    out = tmp_path / "t.pbz"
+    create_store(str(out), contigs=["chr1"], contig_lengths=[1000])
+
+    from zarr.codecs import BloscCodec, BloscShuffle
+    create_track(
+        str(out),
+        track="depth",
+        dtype="uint16",
+        compressors=[BloscCodec(cname="zstd", clevel=1, shuffle=BloscShuffle.shuffle)],
+    )
+
+    cfg = _blosc_config(_array_codecs(str(out), "chr1", "depth"))
+    assert cfg is not None
+    assert cfg["clevel"] == 1, "override clevel should win over the default 5"
+
+
+def test_empty_compressors_means_uncompressed(tmp_path: Path):
+    out = tmp_path / "t.pbz"
+    create_store(str(out), contigs=["chr1"], contig_lengths=[1000])
+    create_track(str(out), track="depth", dtype="uint16", compressors=[])
+
+    codecs = _array_codecs(str(out), "chr1", "depth")
+    assert _blosc_config(codecs) is None, "empty list must disable compression"
+    assert [c["name"] for c in codecs] == ["bytes"]

@@ -27,6 +27,7 @@ def create_track(
     column_chunk_size: int | None = None,
     shard_size: int | None = None,
     shard_column_size: int | None = None,
+    compressors: Sequence | None = None,
     fill_value=None,
     description: str | None = None,
     source: str | None = None,
@@ -35,6 +36,12 @@ def create_track(
 
     Pass `columns=[...]` for a 2D cohort track; omit for a 1D scalar track.
     `column_dim` defaults to `"column"` when `columns` is given.
+    `compressors` overrides the data-array codecs; `None` uses the library
+    default (Blosc zstd-5, byte shuffle) and `[]` writes uncompressed.
+    The chosen codec is recorded on the array and reused by any later
+    writer that fills it. If the track will be populated through
+    `import_d4` (the Rust/zarrs path), pick a codec `zarrs` can also
+    encode, since the importer encodes through the pipeline recorded here.
     """
     g = zarr.open_group(path, mode="r+")
 
@@ -56,7 +63,7 @@ def create_track(
     )
 
     np_dtype = np.dtype(dtype)
-    codecs = default_data_codecs()
+    codecs = list(compressors) if compressors is not None else default_data_codecs()
 
     for name, length in zip(contigs, contig_lengths):
         contig_g = g.require_group(name)
