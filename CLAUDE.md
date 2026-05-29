@@ -24,7 +24,7 @@ Three open issues motivate pbzarr:
 - [d4-format#64](https://github.com/38/d4-format/issues/64) — d4 multi-track files don't compress across samples.
 - [clam#25](https://github.com/cademirch/clam/issues/25) — per-position cross-sample sum/mean across samples.
 
-Per-base cohort math is the use case. pbzarr is the cohort-shaped format. Read these issues before designing changes that touch import or the public API.
+Per-base cohort math is the highest-value use case, but pbz is not cohort-only. It spans a spectrum keyed on a track's column-chunk width: a single-sample store is a first-class artifact competitive with D4/bigWig, many single-sample stores combine into a wide-column cohort array where cross-sample compression and vectorized math pay off, and (v0.2) samples append cheaply onto an existing cohort. The cohort is the high-value end, not the whole point. Read these issues before designing changes that touch import or the public API.
 
 ## On-disk layout
 
@@ -216,7 +216,7 @@ In the format:
 - Additional input formats: bigWig, bedGraph, BED, BAM/CRAM, VCF.
 - Sharding defaults (currently off; benchmark sweep will inform the default).
 - Multi-resolution tracks (would require track-as-group, breaking change).
-- Append samples / append contigs to an existing store.
+- Append samples / append contigs to an existing store. The v0.2 approach stages new columns as a size-1 tail on a rectilinear column grid, compacted into wide chunks later, so appends never rewrite existing chunks (RMW-free, remote-native). Prototyped on the **`recti-append-poc`** branch (isolated `recti` pixi env with tasks `recti-roundtrip` and `recti-lifecycle`), which proves the append/compact algorithm and its on-disk invariants against zarr-python plus the xarray fork. Gated on upstream: zarr-python 3.2+ supports rectilinear grids behind `zarr.config.set({'array.rectilinear_chunks': True})` (set on BOTH read and write; `dtype="str"` yields vlen-utf8); zarrs has it only on `main`/0.24-dev (0.23.x ships the older `rectangular` grid, NOT rectilinear); released xarray can't read it, needs PR #11279 (`maxrjones/xarray@poc/unified-zarr-chunk-grid`).
 - Remote stores (S3 / GCS).
 - A formal spec document. `pbzarr-spec/SPEC.md` is set aside as draft; `docs/superpowers/specs/2026-05-25-pbz-v0-ship-design.md` is de-facto authority.
 
