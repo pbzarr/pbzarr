@@ -1,4 +1,4 @@
-# PBZ — Per-Base Zarr
+# PBZ: Per-Base Zarr
 
 **Version 0.1**
 
@@ -8,15 +8,17 @@
 
 ## Abstract
 
-PBZ (Per-Base Zarr) is a convention for storing per-base resolution genomic signal data: read depths, methylation rates, accessibility masks, and similar continuous- or boolean-valued tracks indexed by genomic position. It is layered on top of Zarr v3 and inherits Zarr's chunking, compression, and concurrent-write semantics. PBZ exists because the per-sample-file model used by D4 and bigWig does not compress well across cohorts and forces cross-sample computation through Python loops. PBZ stores all samples of a track in a single chunked array, indexed by (position, sample), and exposes the result as a regular xarray Dataset. This document specifies the on-disk layout, the metadata schema, and the I/O conventions that any conforming implementation must satisfy. Two implementations are described, a Rust library built on the `zarrs` crate and a Python wheel built on `zarr-python`, and the format is shown to round-trip identical stores across the two.
+PBZ (Per-Base Zarr) is a convention for storing per-base resolution genomic signal data: read depths, methylation rates, accessibility masks, and similar continuous- or boolean-valued tracks indexed by genomic position. It is layered on top of Zarr v3 and inherits Zarr's chunking, compression, and concurrent-write semantics. PBZ exists because the per-sample-file model used by D4 and bigWig does not compress well across cohorts and forces cross-sample computation through Python loops. PBZ spans a spectrum rather than serving cohorts alone: a single-sample store is a first-class artifact competitive with D4, and many single-sample stores combine into one chunked array indexed by (position, sample) where cross-sample compression and vectorized math pay off. The result is exposed as a regular xarray Dataset. This document specifies the on-disk layout, the metadata schema, and the I/O conventions that any conforming implementation must satisfy. Two implementations are described, a Rust library built on the `zarrs` crate and a Python wheel built on `zarr-python`, and the format is shown to round-trip identical stores across the two.
 
 ---
 
 ## 1. Introduction
 
-Per-base genomic signal data — read depths, methylation rates, accessibility masks, mappability scores — is large, structured, and increasingly central to downstream bioinformatics workflows. The existing storage landscape was built when "one signal per file" was a reasonable default. bigWig and D4 both encode a single sample's signal as an indexed binary file optimized for region queries on that one sample. Both formats predate the chunked-array tooling (Zarr, Xarray, Dask) that the broader scientific-computing ecosystem has converged on, and both treat multi-sample and multi-track workloads as a concern outside the file format.
+Per-base genomic signal data (read depths, methylation rates, accessibility masks, mappability scores) is large, structured, and increasingly central to downstream bioinformatics workflows. The existing storage landscape was built when "one signal per file" was a reasonable default. bigWig and D4 both encode a single sample's signal as an indexed binary file optimized for region queries on that one sample. Both formats predate the chunked-array tooling (Zarr, Xarray, Dask) that the broader scientific-computing ecosystem has converged on, and both treat multi-sample and multi-track workloads as a concern outside the file format.
 
 PBZ takes a different starting point. Per-base signals are naturally chunked along the position axis, often carry an additional axis (sample, strand, methylation context, mask category), and benefit from compression that operates across array dimensions rather than file-at-a-time. These are properties Zarr v3 already provides. PBZ is the smallest convention layer needed to put per-base genomic data into Zarr v3 in a way that is interoperable across languages and ergonomic to read with xarray.
+
+A similar approach exists in a different genomics domain. [cooler](https://github.com/open2c/cooler) defines a layout for sparse Hi-C contact matrices on HDF5: a fixed schema for bins, pixels, and indexes, with all I/O and compression delegated to the host library. PBZ does the same thing for per-base signal data, building on Zarr v3 rather than HDF5. The shape is dense (position by column) rather than sparse (bin by bin), but the convention-over-implementation stance is the same.
 
 Three classes of workload motivate the format and inform its defaults:
 
@@ -24,7 +26,7 @@ Three classes of workload motivate the format and inform its defaults:
 * **Cohort-shaped computation.** Operations like "mark sites where ≥K samples have depth ≥D" or per-position cross-sample summaries are awkward against per-sample files (d4-format#82, clam#25), and per-sample compression does not exploit the high redundancy across a cohort (d4-format#64). Stored as a (position, sample) chunked array, these operations become vectorized slab reads with compression operating on two-dimensional blocks. This is the workload where PBZ pays off most clearly.
 * **xarray-native downstream code.** Once data is in a Zarr store with sensible dimension names, the read path is `xr.open_datatree(...)`. There is no bespoke client, no per-format SDK, and no Python loop separating the user from `numpy` / `dask` / `xarray` operators.
 
-PBZ does not claim to be the right storage strategy for every per-base workload. A single signal that will be written once and read region-by-region from a single tool is well-served by D4 or bigWig today. The format pays off when there is more than one of something — more than one sample, more than one track, more than one analysis touching the same region — and when the downstream code is happy to live in the xarray world.
+PBZ is best understood as a spectrum keyed on one axis: the column-chunk width of a track. A single-sample store has no column axis at all and is a complete, first-class artifact, competitive with D4 and bigWig on size and region-query latency while already living in the Zarr/xarray world. Combining many single-sample stores produces a wide-column-chunked cohort array, the regime where cross-sample compression and per-position cross-sample computation pay off. The cohort is the high-value end of this spectrum, not the whole point: the format earns its place for a single sample, then compounds as samples accumulate, and the downstream code stays in the xarray world throughout. Incremental growth of a cohort by appending samples is a near-term goal rather than a v0.1 capability; see §9.
 
 ### 1.1. Design Goals
 
@@ -57,7 +59,7 @@ Two track shapes are defined:
 * **1D tracks.** A single value per position. The position axis carries no explicit coordinate; a 0-based integer index into the contig is implied. Examples: a boolean accessibility mask, a per-position mappability score, a single sample's read depth.
 * **2D (cohort) tracks.** A vector of values per position, with the vector index drawn from a writer-declared column axis. The writer names the dimension (`column_dim`) and supplies the column labels in metadata. "Cohort" is shorthand for the column-axis pattern in general: the prototypical case is samples, but strands, methylation contexts, and mask categories fit the same shape and are first-class.
 
-The choice of 1D vs 2D is per track, not per store. A single store typically mixes both — a 2D depth track over samples next to a 1D accessibility mask, a 1D mappability score, and so on, all addressable against the same genome.
+The choice of 1D vs 2D is per track, not per store. A single store typically mixes both: a 2D depth track over samples next to a 1D accessibility mask, a 1D mappability score, and so on, all addressable against the same genome.
 
 ### 2.3. Dtypes
 
@@ -153,18 +155,18 @@ PBZ metadata lives in the root group's `attributes` object under a single namesp
 
 | Key                 | Required             | Default            | Notes                                                            |
 |---------------------|----------------------|--------------------|------------------------------------------------------------------|
-| `dtype`             | yes                  | —                  | One of the allowed dtypes (§2.3).                                |
+| `dtype`             | yes                  | n/a                | One of the allowed dtypes (§2.3).                                |
 | `chunk_size`        | yes                  | 1,000,000          | Chunk extent along the position axis.                            |
 | `column_dim`        | iff cohort           | absent ⇒ 1D scalar | Dimension name (e.g., `"sample"`, `"strand"`).                   |
 | `column_chunk_size` | iff cohort           | 16                 | Chunk extent along the column axis.                              |
 | `shard_size`        | optional             | absent (off)       | Position-axis shard size, in chunks.                             |
-| `shard_column_size` | iff sharded & cohort | —                  | Column-axis shard size, in chunks.                               |
+| `shard_column_size` | iff sharded & cohort | n/a                | Column-axis shard size, in chunks.                               |
 | `fill_value`        | optional             | dtype-natural      | `0` for ints, `NaN` for floats, `false` for bool.                |
-| `description`       | optional             | —                  | Human-readable description.                                      |
-| `source`            | optional             | —                  | Tool plus version that wrote the track.                          |
-| (other keys)        | preserved            | —                  | Round-tripped verbatim. Tool-specific keys SHOULD be namespaced. |
+| `description`       | optional             | none               | Human-readable description.                                      |
+| `source`            | optional             | none               | Tool plus version that wrote the track.                          |
+| (other keys)        | preserved            | n/a                | Round-tripped verbatim. Tool-specific keys SHOULD be namespaced. |
 
-Implementations MUST preserve unknown keys across read–modify–write cycles. Unknown top-level keys under `perbase_zarr` are similarly preserved.
+Implementations MUST preserve unknown keys across read-modify-write cycles. Unknown top-level keys under `perbase_zarr` are similarly preserved.
 
 ---
 
@@ -229,7 +231,7 @@ let data: ArrayD<u32> = store.track("depth").unwrap().read_region(&region)?;
 
 **Import pipeline.** `pbzarr::import::run_pipeline<T, R: ValueReader>` parallelizes import at the chunk level. It forks one reader per worker, partitions write tasks one-per-chunk across a bounded `crossbeam-channel`, and collects the first error into a shared `Mutex<Option<PbzError>>`. `zarrs` is safe for concurrent writes to non-overlapping chunks; the chunk-level partitioning preserves that invariant. Caller code sets `Config::workers` to choose parallelism; the library does not spawn its own pool.
 
-**Concurrency model.** Synchronous against `zarrs::FilesystemStore`, with parallelism opt-in through the import pipeline. No `rayon`, no async runtime, no internal thread pools. Library code contains no `unwrap`, `expect`, or `panic!` — all failure modes surface as `PbzError`.
+**Concurrency model.** Synchronous against `zarrs::FilesystemStore`, with parallelism opt-in through the import pipeline. No `rayon`, no async runtime, no internal thread pools. Library code contains no `unwrap`, `expect`, or `panic!`; all failure modes surface as `PbzError`.
 
 **Escape hatches.** `Track::zarr_array(contig)` borrows the underlying `zarrs::Array` handle for direct chunk-level access not exposed by `read_region` / `write_region`. Callers who need codec inspection, sharded subset reads, or custom chunk iteration drop down to `zarrs` without losing the metadata layer above.
 
@@ -288,7 +290,7 @@ The on-disk layout, metadata schema, dtype tags, dimension names, coord arrays, 
 * **Variable-length UTF-8 string arrays** (Zarr v3 `vlen-utf8` codec) round-trip cleanly between `zarrs` (Rust) and `zarr-python` (Python). The `contigs` array and per-contig column-label arrays use this encoding.
 * **Zarr v3 `dimension_names`** are written into array metadata directly, not as a separate `_ARRAY_DIMENSIONS` attribute. The xarray-zarr backend reads these without additional configuration.
 * **Codec parameters** (Blosc, zstd level 5, byte shuffle) are identical across writers.
-* **The `perbase_zarr` root attribute** is preserved verbatim by both implementations; unknown keys survive a read–write cycle.
+* **The `perbase_zarr` root attribute** is preserved verbatim by both implementations; unknown keys survive a read-write cycle.
 
 Cross-language round-trip is enforced by a CI integration test that writes a fixture store from one language and reads it from the other.
 
@@ -303,7 +305,7 @@ The Python wheel implements `create_store` and `create_track` in pure Python rat
 ## 9. Open Questions and Future Work
 
 * **Validation helpers.** Coord-array consistency across contigs is currently a writer guarantee. A `pbzarr::validate` helper that audits a store for spec conformance is on the list; readers currently trust the writer.
-* **Append modes.** Appending contigs or columns to an existing store is not supported. The data model does not preclude it, and is a major focus moving forward.
+* **Append modes.** Appending contigs or columns to an existing store is not supported in v0.1. The data model does not preclude it, and it is the major focus moving forward. The planned approach for v0.2 represents staged columns as a cheap size-1 tail on the column axis (a rectilinear chunk grid), folded into the wide compacted chunks by a later compaction step, so appends never rewrite existing chunks. It is blocked on rectilinear chunk-grid support reaching a released xarray. zarr-python supports it in a released version today; the zarrs writer lands in an unreleased version, so the Rust side waits on that release.
 * **Remote stores.** Synchronous I/O against local files is the v0 target. Remote backends are a big win with Zarr, and will be supported eventually.
 * **Additional import formats.** D4 is the only built-in import format at v0.1. bigWig, bedGraph, BED, and BAM/CRAM are the obvious additions; each requires a `ValueReader` implementation and a corresponding `from_*` entry point in `pbzarr::import`.
 

@@ -24,7 +24,7 @@ Three open issues motivate pbzarr:
 - [d4-format#64](https://github.com/38/d4-format/issues/64) — d4 multi-track files don't compress across samples.
 - [clam#25](https://github.com/cademirch/clam/issues/25) — per-position cross-sample sum/mean across samples.
 
-Per-base cohort math is the use case. pbzarr is the cohort-shaped substrate. Read these issues before designing changes that touch import or the public API.
+Per-base cohort math is the use case. pbzarr is the cohort-shaped format. Read these issues before designing changes that touch import or the public API.
 
 ## On-disk layout
 
