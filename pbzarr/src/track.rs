@@ -184,6 +184,18 @@ impl Track {
         self.metadata.chunk_size
     }
 
+    /// Position shard size, or `None` if the track is unsharded. When set, the
+    /// on-disk write unit is the whole shard (the inner chunk has no standalone
+    /// write API in zarrs), so importers must write a shard at a time.
+    pub fn shard_size(&self) -> Option<usize> {
+        self.metadata.shard_size
+    }
+
+    /// Column shard size for a sharded cohort track, or `None`.
+    pub fn shard_column_size(&self) -> Option<usize> {
+        self.metadata.shard_column_size
+    }
+
     /// Number of columns: 1 for scalar (rank-1) tracks; for cohort (rank-2)
     /// tracks, reads shape[1] from the zarr array on the first contig.
     ///

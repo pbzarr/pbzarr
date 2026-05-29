@@ -2,7 +2,7 @@
 //! if unavailable), import via `import::from_d4`, read back via `Track::read_region`.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pbzarr::import::{Config, D4Source, from_d4};
@@ -46,6 +46,188 @@ fn write_synthetic_d4(tmp: &Path, chrom: &str, len: u32) -> std::path::PathBuf {
         .unwrap();
     assert!(status.success(), "d4tools create failed");
     d4_path
+}
+
+/// Like `write_synthetic_d4` but every value is offset by `base`, so distinct
+/// cohort columns carry distinct data.
+fn write_synthetic_d4_offset(tmp: &Path, tag: &str, chrom: &str, len: u32, base: i32) -> PathBuf {
+    let sizes_path = tmp.join(format!("{tag}.sizes"));
+    std::fs::write(&sizes_path, format!("{chrom}\t{len}\n")).unwrap();
+
+    let bg_path = tmp.join(format!("{tag}.bedgraph"));
+    let mut bf = std::fs::File::create(&bg_path).unwrap();
+    for i in 0..(len / 10) {
+        let s = i * 10;
+        let e = (i + 1) * 10;
+        let v = base + (i % 50) as i32 + 1;
+        writeln!(bf, "{chrom}\t{s}\t{e}\t{v}").unwrap();
+    }
+    drop(bf);
+
+    let d4_path = tmp.join(format!("{tag}.d4"));
+    let status = Command::new("d4tools")
+        .args(["create", "--genome"])
+        .arg(&sizes_path)
+        .arg(&bg_path)
+        .arg(&d4_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "d4tools create failed");
+    d4_path
+}
+
+/// A sharded track must import to the same bytes as an unsharded one. The
+/// length (10_000) is not a multiple of the shard span (4_000), so the run
+/// exercises full interior shards, multiple inner chunks per shard, and a
+/// partial edge shard. Imported with >1 worker to confirm concurrent writes to
+/// distinct shard files stay correct.
+#[test]
+fn sharded_scalar_import_matches_unsharded() {
+    if !have_d4tools() {
+        eprintln!("skip: d4tools not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let d4 = write_synthetic_d4(dir.path(), "chr1", 10_000);
+    let genome = || {
+        Genome::new(vec![Contig {
+            name: "chr1".into(),
+            length: 10_000,
+        }])
+        .unwrap()
+    };
+    let region = |store: &PbzStore| Region {
+        contig: store.genome().id("chr1").unwrap(),
+        start: 0,
+        end: 10_000,
+    };
+    let src = || {
+        vec![D4Source {
+            path: d4.clone(),
+            sample_label: None,
+        }]
+    };
+
+    let plain_path = dir.path().join("plain.pbz");
+    let mut plain = PbzStore::create(&plain_path, genome(), None).unwrap();
+    plain
+        .create_track("depth", TrackConfig::new(Dtype::I32).chunk_size(1_000))
+        .unwrap();
+    from_d4(&plain, "depth", &src(), Config::default()).unwrap();
+
+    let sharded_path = dir.path().join("sharded.pbz");
+    let mut sharded = PbzStore::create(&sharded_path, genome(), None).unwrap();
+    sharded
+        .create_track(
+            "depth",
+            TrackConfig::new(Dtype::I32)
+                .chunk_size(1_000)
+                .shard_size(4_000),
+        )
+        .unwrap();
+    from_d4(
+        &sharded,
+        "depth",
+        &src(),
+        Config {
+            workers: 4,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let plain_data = plain
+        .track("depth")
+        .unwrap()
+        .read_region::<i32>(&region(&plain))
+        .unwrap();
+    let sharded_data = sharded
+        .track("depth")
+        .unwrap()
+        .read_region::<i32>(&region(&sharded))
+        .unwrap();
+    assert_eq!(plain_data, sharded_data);
+}
+
+/// Same equivalence for a 2D cohort track: three distinct-valued sources, a
+/// sharded layout spanning multiple inner chunks plus a partial edge shard,
+/// imported with >1 worker, must match the unsharded import column-for-column.
+#[test]
+fn sharded_cohort_import_matches_unsharded() {
+    if !have_d4tools() {
+        eprintln!("skip: d4tools not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let sources: Vec<D4Source> = [0, 100, 200]
+        .iter()
+        .enumerate()
+        .map(|(i, &base)| D4Source {
+            path: write_synthetic_d4_offset(dir.path(), &format!("s{i}"), "chr1", 10_000, base),
+            sample_label: Some(format!("s{i}")),
+        })
+        .collect();
+    let cols: Vec<String> = (0..3).map(|i| format!("s{i}")).collect();
+    let genome = || {
+        Genome::new(vec![Contig {
+            name: "chr1".into(),
+            length: 10_000,
+        }])
+        .unwrap()
+    };
+    let region = |store: &PbzStore| Region {
+        contig: store.genome().id("chr1").unwrap(),
+        start: 0,
+        end: 10_000,
+    };
+
+    let plain_path = dir.path().join("plain.pbz");
+    let mut plain = PbzStore::create(&plain_path, genome(), None).unwrap();
+    plain
+        .create_track(
+            "depth",
+            TrackConfig::new(Dtype::I32)
+                .columns(cols.clone())
+                .chunk_size(1_000),
+        )
+        .unwrap();
+    from_d4(&plain, "depth", &sources, Config::default()).unwrap();
+
+    let sharded_path = dir.path().join("sharded.pbz");
+    let mut sharded = PbzStore::create(&sharded_path, genome(), None).unwrap();
+    sharded
+        .create_track(
+            "depth",
+            TrackConfig::new(Dtype::I32)
+                .columns(cols.clone())
+                .chunk_size(1_000)
+                .shard_size(4_000),
+        )
+        .unwrap();
+    from_d4(
+        &sharded,
+        "depth",
+        &sources,
+        Config {
+            workers: 4,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let plain_data = plain
+        .track("depth")
+        .unwrap()
+        .read_region::<i32>(&region(&plain))
+        .unwrap();
+    let sharded_data = sharded
+        .track("depth")
+        .unwrap()
+        .read_region::<i32>(&region(&sharded))
+        .unwrap();
+    assert_eq!(plain_data, sharded_data);
+    // Sanity: the three columns really do differ (offsets applied).
+    assert_ne!(sharded_data[[0, 0]], sharded_data[[0, 1]]);
 }
 
 #[test]

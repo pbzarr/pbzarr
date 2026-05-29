@@ -1,7 +1,14 @@
 //! Generic import pipeline. Drives `ValueReader` sources into a `Track` via a
-//! scoped worker pool; each worker forks its readers, then reads + writes
-//! chunk-aligned tasks directly. Zarrs is safe for concurrent writes to
-//! non-overlapping chunks, which the per-chunk task partition guarantees.
+//! scoped worker pool; each worker forks its readers, then reads + writes one
+//! task region directly.
+//!
+//! The task region is sized to the track's on-disk write unit so each region
+//! is encoded exactly once: a sharded track's write unit is the whole shard
+//! (zarrs has no inner-chunk write API; a sub-shard write read-modify-writes
+//! the entire shard), so we partition by `shard_size`; an unsharded track's
+//! write unit is the chunk, so we partition by `chunk_size`. Either way tasks
+//! cover disjoint position ranges, hence disjoint shard/chunk files, so zarrs'
+//! concurrent-write safety holds.
 
 use std::mem;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -123,7 +130,14 @@ where
         )));
     }
 
-    let chunk_size = config.chunk_size.unwrap_or_else(|| track.chunk_size()) as u64;
+    // Partition by the on-disk write unit: a shard for sharded tracks, a chunk
+    // otherwise. A sharded region smaller than its shard would force zarrs to
+    // read-modify-write the whole shard once per inner chunk (∝ chunks/shard);
+    // a full-shard region hits zarrs' single-encode fast path instead.
+    let step = match track.shard_size() {
+        Some(ss) => (ss as u64).max(1),
+        None => (config.chunk_size.unwrap_or_else(|| track.chunk_size()) as u64).max(1),
+    };
     let genome = Arc::clone(track.genome());
 
     let mut tasks: Vec<ChunkTask> = Vec::new();
@@ -134,10 +148,10 @@ where
             continue;
         }
         n_contigs += 1;
-        let n_chunks = len.div_ceil(chunk_size);
-        for chunk_idx in 0..n_chunks {
-            let start = chunk_idx * chunk_size;
-            let end = (start + chunk_size).min(len);
+        let n_steps = len.div_ceil(step);
+        for step_idx in 0..n_steps {
+            let start = step_idx * step;
+            let end = (start + step).min(len);
             tasks.push(ChunkTask {
                 region: Region {
                     contig: contig_id,

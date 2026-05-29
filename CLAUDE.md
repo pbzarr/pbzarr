@@ -79,18 +79,19 @@ Import lives in `pbzarr::import` (not in a CLI; PyO3 binds `from_d4` directly, e
 
 - **`ValueReader` trait** at `pbzarr::io::reader` (`Send + Sync`). Workers fork their reader per-thread via `ValueReader::fork`.
 - **`D4Reader`** at `pbzarr::io::d4` — the only import format at v0.
-- **Parallel-writer pipeline** in `pbzarr::import::pipeline`. `thread::scope` + a single bounded `crossbeam-channel` of tasks. Each worker forks readers, then does read+write itself — no writer thread. Shared `Arc<State>` with `AtomicU64` counters and a `Mutex<Option<PbzError>>` for first error. Zarrs is safe for concurrent writes to non-overlapping chunks; tasks are partitioned one-per-chunk so this holds.
+- **Parallel-writer pipeline** in `pbzarr::import::pipeline`. `thread::scope` + a single bounded `crossbeam-channel` of tasks. Each worker forks readers, then does read+write itself — no writer thread. Shared `Arc<State>` with `AtomicU64` counters and a `Mutex<Option<PbzError>>` for first error. Zarrs is safe for concurrent writes to non-overlapping shard/chunk files. Tasks are partitioned by the on-disk write unit: one shard per task for sharded tracks (step = `shard_size`), one chunk otherwise. A sub-shard write RMWs the whole shard, so sharded tracks MUST be partitioned shard-aligned — see the zarrs sharding quirk below.
 - **`run_pipeline<T, R>` takes `&Track`.** No `&mut`. `Track` caches an `Arc<Array<FilesystemStore>>` per contig (`RwLock<HashMap<...>>`) so per-chunk reads/writes don't re-open `zarr.json`.
 
 ## Operational notes
 
 - **Cross-language gate:** `pixi run validate-roundtrip` writes a fixture pbz via `cargo run --example fixture_smoke_store`, then reads it back with `xr.open_datatree(...)`. Failing this is a release blocker.
-- **`d4tools` available via pixi `dev` feature.** Used to synthesize fixture d4 files in `tests/import_d4.rs`. Tests skip silently if it's missing.
+- **`d4tools` available via pixi `dev` feature.** Used to synthesize fixture d4 files in `tests/import_d4.rs`. Run `pixi run -- cargo test` so it's on PATH; plain `cargo test` self-skips these tests.
 - **zarrs 0.23 quirks:**
   - `ArrayBuilder::new(shape, chunk_shape, data_type, fill_value)` — chunk_shape comes before data_type.
   - `Array::open` wants the concrete `Arc<FilesystemStore>`, not the trait-object alias.
   - `retrieve_array_subset_ndarray` / `store_array_subset_ndarray` are deprecated — use `retrieve_array_subset::<ArrayD<T>>` / `store_array_subset(&subset, data)` (owned).
   - `BytesToBytesCodecTraits` is at `zarrs::array::codec::api::` (not `zarrs::array::codec::`).
+  - **Sharded arrays: the shard IS the chunk at the `Array` level.** There is no inner-chunk write API. `store_array_subset` only hits the single-encode fast path when the subset exactly equals one shard's full extent; any sub-shard write read-modify-writes the entire shard. Write whole shards at a time.
   - Zarr v3 variable-length strings (`vlen-utf8`) round-trip cleanly across zarrs / zarr-python / xarray.
 - **ndarray quirks:**
   - `ndarray::concatenate` is slow — backed by an iterator + `to_vec_mapped` allocator, not a flat memcpy. Cost can dominate when assembling per-reader column buffers. If you need fast assembly, write a manual loop using `Array2::uninit` + `ptr::copy_nonoverlapping` per column.
