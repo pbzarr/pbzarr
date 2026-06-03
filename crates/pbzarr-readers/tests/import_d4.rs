@@ -5,9 +5,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use pbzarr::import::{Config, D4Source, from_d4};
+use pbzarr::import::Config;
 use pbzarr::io::Dtype;
 use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
+use pbzarr_readers::{D4Source, from_d4};
 use tempfile::TempDir;
 
 fn have_d4tools() -> bool {

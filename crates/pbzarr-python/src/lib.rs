@@ -7,7 +7,8 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use pbzarr::PbzStore;
-use pbzarr::import::{Config, D4Source, from_d4 as rs_from_d4};
+use pbzarr::import::Config;
+use pbzarr_readers::{D4Source, from_d4 as rs_from_d4};
 
 create_exception!(_native, PbzError, PyRuntimeError);
 

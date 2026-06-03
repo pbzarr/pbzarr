@@ -1,0 +1,21 @@
+# Holds format-specific git dependencies (currently d4) so the core `pbzarr`
+# crate stays free of git deps and remains publishable to crates.io. Not
+# published itself.
+[package]
+name = "pbzarr-readers"
+version = "0.1.0"
+edition = "2024"
+authors = ["Cade Mirchandani <cmirchan@ucsc.edu>"]
+description = "Input-format readers (d4, bed, bedgraph, bigwig) for the pbzarr library"
+license = "MIT"
+repository = "https://github.com/pbzarr/pbzarr"
+publish = false
+
+[dependencies]
+pbzarr = { path = "../pbzarr" }
+ndarray = "0.17"
+anyhow = "1"
+d4 = { git = "https://github.com/cademirch/d4-format.git", rev = "f836299", default-features = false, features = ["local_reader"] }
+
+[dev-dependencies]
+tempfile = "3"

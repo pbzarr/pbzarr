@@ -13,4 +13,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pbzarr = { path = "../pbzarr" }
+pbzarr-readers = { path = "../pbzarr-readers" }
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py311"] }

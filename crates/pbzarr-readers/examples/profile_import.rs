@@ -16,9 +16,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use ndarray::ArrayViewMut2;
-use pbzarr::import::{Config, D4Source, from_d4, run_pipeline};
+use pbzarr::import::{Config, run_pipeline};
 use pbzarr::io::{Dtype, ValueReader};
 use pbzarr::{Contig, Genome, PbzStore, TrackConfig};
+use pbzarr_readers::{D4Source, from_d4};
 use tempfile::TempDir;
 
 #[derive(Debug)]
@@ -137,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // For --d4 mode, override the synthetic contigs with the d4 file's genome.
     let (genome, total_length): (Genome, u64) = if let Some(ref d4) = args.d4 {
-        let r = pbzarr::io::D4Reader::open(d4)?;
+        let r = pbzarr_readers::D4Reader::open(d4)?;
         let g = r.contigs().clone();
         let total: u64 = g.contigs().iter().map(|c| c.length).sum();
         (g, total)

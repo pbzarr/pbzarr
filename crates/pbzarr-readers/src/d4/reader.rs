@@ -14,9 +14,8 @@ use d4::ptab::{DecodeResult, Decoder};
 use d4::stab::SecondaryTablePartReader;
 use ndarray::ArrayViewMut2;
 
-use crate::genome::{Contig, Genome};
-use crate::io::error::{ReaderError, Result};
-use crate::io::reader::ValueReader;
+use pbzarr::genome::{Contig, Genome};
+use pbzarr::io::{ReaderError, Result, ValueReader};
 
 struct Shared {
     path: PathBuf,

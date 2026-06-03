@@ -2,11 +2,13 @@
 
 use std::path::PathBuf;
 
-use crate::PbzStore;
-use crate::Result;
-use crate::error::PbzError;
-use crate::import::pipeline::{Config, Report, run_pipeline};
-use crate::io::{D4Reader, Dtype};
+use pbzarr::PbzError;
+use pbzarr::PbzStore;
+use pbzarr::Result;
+use pbzarr::import::{Config, Report, run_pipeline};
+use pbzarr::io::Dtype;
+
+use super::reader::D4Reader;
 
 #[derive(Debug, Clone)]
 pub struct D4Source {

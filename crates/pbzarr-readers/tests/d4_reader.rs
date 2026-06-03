@@ -1,4 +1,4 @@
-//! POC smoke tests for `pbzarr::io::d4::D4Reader`.
+//! POC smoke tests for `pbzarr_readers::D4Reader`.
 //!
 //! Synthesizes a tiny d4 file with the system `d4tools` binary (skipped if
 //! unavailable then exercises `D4Reader::open` and the `ValueReader` interface.
@@ -9,7 +9,8 @@ use std::process;
 
 use ndarray::Array2;
 use pbzarr::Genome;
-use pbzarr::io::{D4Reader, ValueReader};
+use pbzarr::io::ValueReader;
+use pbzarr_readers::D4Reader;
 use tempfile::TempDir;
 
 fn d4tools_available() -> bool {

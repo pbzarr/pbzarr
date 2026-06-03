@@ -935,7 +935,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
- "d4",
  "fs-err",
  "hashbrown 0.17.1",
  "log",
@@ -952,7 +951,19 @@ name = "pbzarr-python"
 version = "0.1.0"
 dependencies = [
  "pbzarr",
+ "pbzarr-readers",
  "pyo3",
+]
+
+[[package]]
+name = "pbzarr-readers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "d4",
+ "ndarray",
+ "pbzarr",
+ "tempfile",
 ]
 
 [[package]]

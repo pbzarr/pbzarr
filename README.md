@@ -4,7 +4,8 @@ A Zarr v3 convention for storing per-base resolution genomic data — read depth
 
 This repo provides:
 
-- **`pbzarr` (Rust crate)** — store layout, metadata, region I/O, d4 import. Delegates array storage and compression to [`zarrs`](https://crates.io/crates/zarrs).
+- **`pbzarr` (Rust crate)** — store layout, metadata, region I/O. Delegates array storage and compression to [`zarrs`](https://crates.io/crates/zarrs). This is the only crate published to crates.io.
+- **`pbzarr-readers` (Rust crate, unpublished)** — input-format readers (currently d4). Kept separate so the core crate stays free of git dependencies and remains publishable. d4 import is reachable from the Python wheel or when building from this repo, not from the crates.io `pbzarr` crate.
 - **`pbzarr` (Python wheel)** — PyO3 binding for `import_d4` plus pure-Python `create_store` / `create_track` over [`zarr-python`](https://github.com/zarr-developers/zarr-python). Read API is an xarray accessor.
 
 The on-disk format is the same; both libraries write `.pbz` stores that the other can read.
@@ -84,8 +85,11 @@ The `.pbz` accessor on `xr.DataTree` is registered when you `import pbzarr`. Reg
 ```rust
 use ndarray::Array2;
 use pbzarr::io::Dtype;
-use pbzarr::import::{from_d4, D4Source, Config};
+use pbzarr::import::Config;
 use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
+// d4 import lives in the unpublished pbzarr-readers crate (it carries a git
+// dependency on d4); depend on this repo by path or git to use it.
+use pbzarr_readers::d4::{from_d4, D4Source};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let genome = Genome::new(vec![
@@ -137,12 +141,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For the full design see [`docs/DESIGN.md`](docs/DESIGN.md).
 
-## Status
-
-v0 is **library + d4 import + Python wheel + xarray accessor**. Cross-language round-trip tests in both directions are green. CLI binary (`pbz`), additional import formats (bigWig, bedGraph, BED, BAM/CRAM), validation helpers, benchmarks, and a formal spec doc are deferred.
-
 ## Links
 
 - Rust API docs: [docs.rs/pbzarr](https://docs.rs/pbzarr)
 - Design doc: [`docs/DESIGN.md`](docs/DESIGN.md)
 - Motivating issues: [d4-format#82](https://github.com/38/d4-format/issues/82), [d4-format#64](https://github.com/38/d4-format/issues/64), [clam#25](https://github.com/cademirch/clam/issues/25)
+
+## Development note
+
+The per-base Zarr format that pbzarr standardizes was first prototyped by hand in [clam](https://github.com/cademirch/clam), where the initial concepts (the contig-major layout, cohort-shaped tracks, and the zarr/ndarray I/O path) were fleshed out before AI tooling was introduced. pbzarr lifts those concepts into a dedicated, spec-driven library.
+
+From that point, development of pbzarr was heavily assisted by Claude (Anthropic), accelerating the library implementation, d4 import, tests, and documentation. The architecture, domain knowledge, and direction remain the author's own; Claude was used as an accelerant, not an author.

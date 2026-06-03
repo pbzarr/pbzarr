@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "4de6e412b533eb251858df1e619b63520ff7694b",
+  "include-component-in-tag": false,
+  "changelog-path": "CHANGELOG.md",
+  "packages": {
+    "crates/pbzarr": {
+      "release-type": "rust",
+      "release-as": "0.2.0",
+      "extra-files": [
+        { "type": "toml", "path": "pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "crates/pbzarr-python/Cargo.toml", "jsonpath": "$.package.version" }
+      ]
+    }
+  }
+}

@@ -2,9 +2,9 @@
 
 ## What This Is
 
-`pbzarr-rs` is the Rust implementation of PBZ — a Zarr v3 convention for storing per-base resolution genomic data (depths, signal, masks). The crate is a thin convention/domain layer on top of Zarr v3; array storage and compression are delegated to `zarrs`. A Python wheel (PyO3 + xarray accessor) lands once Plan 2 ships; for now the crate ships alone.
+`pbzarr-rs` is the Rust implementation of PBZ — a Zarr v3 convention for storing per-base resolution genomic data (depths, signal, masks). The crate is a thin convention/domain layer on top of Zarr v3; array storage and compression are delegated to `zarrs`. A maturin-built Python wheel (PyO3 + xarray accessor) ships from this repo too.
 
-This repo is a single-crate workspace: `pbzarr/` (library). The `pbz` CLI was deferred from v0 and removed from the workspace.
+This repo is a Cargo workspace with all Rust crates under `crates/` (Ruff-style layout): `crates/pbzarr/` (core library, the only crate published to crates.io), `crates/pbzarr-readers/` (input-format readers; owns the `d4` git dependency so the core stays publishable), and `crates/pbzarr-python/` (PyO3 bindings, the `_native` cdylib). Python source lives at top-level `python/`, with the root `pyproject.toml` driving maturin. The `pbz` CLI was deferred from v0 and removed from the workspace.
 
 ## Status
 
@@ -67,7 +67,7 @@ Root `perbase_zarr` attribute:
 - **`PbzStore::create(path, genome, coordinate_space) -> Self`**, **`open(path) -> Self`**, accessors `genome()` / `coordinate_space()` / `track_names()` / `track(name)`, plus `create_track(name, config) -> &Track`.
 - **`TrackConfig::new(dtype)` builder.** Chain `.columns(vec)` for 2D, `.column_dim("sample")` to override the default `"column"`, `.chunk_size(n)`, `.column_chunk_size(n)`, `.shard_size(n)`, `.fill_value(v)`, `.description(s)`, `.source(s)`. No public `scalar`/`cohort` constructors.
 - **`Track::read_region<T>(region) -> ArrayD<T>`** and **`write_region<T>(region, ArrayD<T>)`** with runtime dtype check. `write_region` takes ownership of the buffer so zarrs can consume it without a clone. Rank matches the track (1 or 2); callers downcast via `.into_dimensionality::<Ix1>()?` / `Ix2`.
-- **`pbzarr::import`:** `D4Source`, `Config`, `Report`, `run_pipeline<T, R: ValueReader<Item=T>>`, `from_d4(&store, track, sources, config)`. Format-specific entry points use the `from_<format>` naming pattern.
+- **`pbzarr::import`** (core, format-agnostic): `Config`, `Report`, `run_pipeline<T, R: ValueReader<Item=T>>`. Format readers and their entry points live in the `pbzarr-readers` crate: **`pbzarr_readers::d4`** exposes `D4Source`, `D4Reader`, `from_d4(&store, track, sources, config)`. Format-specific entry points use the `from_<format>` naming pattern.
 - **`ValueReader::read_into(contig_name, start, end, dst: ArrayViewMut2)`** — name-based, no `ContigId` crossing.
 - **`Numeric` trait** has `const DTYPE: Dtype` and `const ZERO: Self`; supertrait bounds include `zarrs::array::Element + ElementOwned`.
 
@@ -75,10 +75,10 @@ The library does not own coordinate-system conversion (callers handle 1-based in
 
 ## Reader/writer architecture
 
-Import lives in `pbzarr::import` (not in a CLI; PyO3 binds `from_d4` directly, exposed to Python as `pbzarr.import_d4`).
+The generic pipeline lives in `pbzarr::import`; format readers live in the separate `pbzarr-readers` crate (not in a CLI; PyO3 binds `from_d4` directly, exposed to Python as `pbzarr.import_d4`).
 
 - **`ValueReader` trait** at `pbzarr::io::reader` (`Send + Sync`). Workers fork their reader per-thread via `ValueReader::fork`.
-- **`D4Reader`** at `pbzarr::io::d4` — the only import format at v0.
+- **`D4Reader`** at `pbzarr_readers::d4` — the only import format at v0.
 - **Parallel-writer pipeline** in `pbzarr::import::pipeline`. `thread::scope` + a single bounded `crossbeam-channel` of tasks. Each worker forks readers, then does read+write itself — no writer thread. Shared `Arc<State>` with `AtomicU64` counters and a `Mutex<Option<PbzError>>` for first error. Zarrs is safe for concurrent writes to non-overlapping shard/chunk files. Tasks are partitioned by the on-disk write unit: one shard per task for sharded tracks (step = `shard_size`), one chunk otherwise. A sub-shard write RMWs the whole shard, so sharded tracks MUST be partitioned shard-aligned — see the zarrs sharding quirk below.
 - **`run_pipeline<T, R>` takes `&Track`.** No `&mut`. `Track` caches an `Arc<Array<FilesystemStore>>` per contig (`RwLock<HashMap<...>>`) so per-chunk reads/writes don't re-open `zarr.json`.
 
@@ -113,46 +113,63 @@ CI runs the first three on push/PR to `main` (`.github/workflows/ci.yml`).
 - Install samply via `pixi global install samply`, then `samply setup` once on macOS to codesign.
 - `samply record --save-only -o prof.json -- ./target/profiling/examples/<name> ...` captures; `samply load prof.json` opens Firefox profiler.
 - Saved JSON keeps raw addresses. To symbolicate in CLI, use `atos -o <binary>.dSYM/Contents/Resources/DWARF/<...> -arch arm64 -l 0x100000000 <addr + 0x100000000>` (samply addresses are __TEXT-relative; add the base).
-- `pbzarr/examples/profile_import.rs` is the throughput harness (synth or `--d4 <path>`). `pbzarr/examples/bench_d4_readers.rs` is a read-only mmap-vs-ssio microbench.
+- `crates/pbzarr-readers/examples/profile_import.rs` is the throughput harness (synth or `--d4 <path>`). `crates/pbzarr-readers/examples/bench_d4_readers.rs` is a read-only mmap-vs-ssio microbench.
 
 ## Project structure
 
 ```
-pbzarr-rs/                    # workspace root (single crate)
-├── Cargo.toml                # [workspace] members = ["pbzarr"]
-├── pixi.toml                 # dev (d4tools) + validate (xarray/zarr) features
+pbzarr-rs/                    # workspace root
+├── Cargo.toml                # [workspace] members = crates/{pbzarr,pbzarr-readers,pbzarr-python}
+├── pyproject.toml            # maturin entry: python-source = python, manifest = crates/pbzarr-python
+├── pixi.toml                 # dev (d4tools) + validate (xarray/zarr) + wheel features
 ├── scripts/
 │   └── validate_xarray_read.py   # cross-language round-trip
 ├── docs/superpowers/specs/   # design docs (uncommitted by default)
-└── pbzarr/
-    ├── Cargo.toml
-    ├── examples/
-    │   ├── fixture_smoke_store.rs
-    │   ├── profile_import.rs       # throughput harness for samply
-    │   └── bench_d4_readers.rs      # mmap vs ssio read-only microbench
-    ├── src/
-    │   ├── lib.rs
-    │   ├── error.rs
-    │   ├── genome.rs         # Genome, Contig, ContigId, Region
-    │   ├── region_query.rs   # RegionQuery + parser
-    │   ├── store.rs          # PbzStore
-    │   ├── track.rs          # TrackConfig, TrackMetadata, Track
-    │   ├── import/
-    │   │   ├── mod.rs
-    │   │   ├── pipeline.rs   # run_pipeline + Config / Report
-    │   │   └── d4.rs         # D4Source + from_d4
-    │   └── io/
-    │       ├── mod.rs
-    │       ├── reader.rs     # ValueReader trait
-    │       ├── d4.rs         # D4Reader
-    │       ├── dtype.rs      # Dtype + Numeric
-    │       └── error.rs
-    └── tests/
-        ├── store_roundtrip.rs
-        ├── track_io.rs
-        ├── import_pipeline.rs
-        ├── import_d4.rs
-        └── d4_reader.rs
+├── python/                   # Python package source (Ruff-style top-level dir)
+│   ├── pbzarr/               # __init__, _open, _store, _track, _region, accessor, _native.pyi
+│   └── tests/
+└── crates/
+    ├── pbzarr/               # core library (the only crate published to crates.io)
+    │   ├── Cargo.toml        # README.md → symlink to repo-root README (for cargo publish)
+    │   ├── examples/
+    │   │   ├── fixture_smoke_store.rs
+    │   │   └── validate_py_written_store.rs
+    │   ├── src/
+    │   │   ├── lib.rs
+    │   │   ├── error.rs
+    │   │   ├── genome.rs         # Genome, Contig, ContigId, Region
+    │   │   ├── region_query.rs   # RegionQuery + parser
+    │   │   ├── store.rs          # PbzStore
+    │   │   ├── track.rs          # TrackConfig, TrackMetadata, Track
+    │   │   ├── import/
+    │   │   │   ├── mod.rs
+    │   │   │   └── pipeline.rs   # run_pipeline + Config / Report (format-agnostic)
+    │   │   └── io/
+    │   │       ├── mod.rs
+    │   │       ├── reader.rs     # ValueReader trait
+    │   │       ├── dtype.rs      # Dtype + Numeric
+    │   │       └── error.rs
+    │   └── tests/
+    │       ├── store_roundtrip.rs
+    │       ├── track_io.rs
+    │       └── import_pipeline.rs
+    ├── pbzarr-readers/       # input-format readers; owns the d4 git dep (not published)
+    │   ├── Cargo.toml
+    │   ├── examples/
+    │   │   ├── profile_import.rs    # throughput harness for samply
+    │   │   └── bench_d4_readers.rs  # mmap vs ssio read-only microbench
+    │   ├── src/
+    │   │   ├── lib.rs
+    │   │   └── d4/
+    │   │       ├── mod.rs
+    │   │       ├── reader.rs        # D4Reader
+    │   │       └── import.rs        # D4Source + from_d4
+    │   └── tests/
+    │       ├── d4_reader.rs
+    │       └── import_d4.rs
+    └── pbzarr-python/        # PyO3 bindings, the _native cdylib (not published)
+        ├── Cargo.toml
+        └── src/lib.rs        # import_d4 → exposed as pbzarr.import_d4
 ```
 
 ## Coding conventions
@@ -205,7 +222,7 @@ In the format:
 - **Coord-array consistency across contigs is NOT validated on open.** Writers ensure consistency; readers trust it. A `pbzarr::validate` helper is deferred.
 - **d4 concurrent reads:** within-file parallelism in `import_d4` depends on the `d4` crate supporting concurrent `read_range`. Not yet verified at scale; works correctly today against a `Mutex` inside `D4Reader`.
 - **d4 import is restricted to `int32` tracks** (d4's actual native dtype; earlier code forced u32 and paid a per-position `try_from`). Widening or narrowing during import is not supported in v0.
-- **d4 dep is pinned** to `cademirch/d4-format@f836299` with feature `local_reader` (mmap-backed; pulls in `mapped_io`, no htslib). `D4Reader` uses `D4TrackReader::split` + `to_codec().decode_block(...)`. This rev fixes two earlier bugs: `SparseArrayReader::split` now clips records for partitions `[0..K]` fully inside one record, and `bit_array.rs` `decode_block` now uses `read_unaligned` so debug-mode pointer-alignment checks don't trip. `pbzarr/examples/bench_d4_readers.rs` keeps the mmap-vs-ssio microbench around for perf regression checks. Bumping the rev requires verifying the `split` + `decode_block` APIs haven't shifted.
+- **d4 dep is pinned** to `cademirch/d4-format@f836299` with feature `local_reader` (mmap-backed; pulls in `mapped_io`, no htslib). `D4Reader` uses `D4TrackReader::split` + `to_codec().decode_block(...)`. This rev fixes two earlier bugs: `SparseArrayReader::split` now clips records for partitions `[0..K]` fully inside one record, and `bit_array.rs` `decode_block` now uses `read_unaligned` so debug-mode pointer-alignment checks don't trip. `crates/pbzarr-readers/examples/bench_d4_readers.rs` keeps the mmap-vs-ssio microbench around for perf regression checks. Bumping the rev requires verifying the `split` + `decode_block` APIs haven't shifted.
 
 ## Deferred
 
