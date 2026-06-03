@@ -1,10 +1,10 @@
 [package]
 name = "pbzarr-python"
-version = "0.1.0"
-edition = "2024"
-authors = ["Cade Mirchandani <cmirchan@ucsc.edu>"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 description = "Python bindings for the pbzarr library"
-license = "MIT"
+license.workspace = true
 publish = false
 
 [lib]

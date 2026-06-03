@@ -3,12 +3,12 @@
 # published itself.
 [package]
 name = "pbzarr-readers"
-version = "0.1.0"
-edition = "2024"
-authors = ["Cade Mirchandani <cmirchan@ucsc.edu>"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 description = "Input-format readers (d4, bed, bedgraph, bigwig) for the pbzarr library"
-license = "MIT"
-repository = "https://github.com/pbzarr/pbzarr"
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [dependencies]

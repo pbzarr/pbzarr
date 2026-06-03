@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pbzarr"
-version = "0.1.0"
+dynamic = ["version"]
 description = "PBZ (Per-Base Zarr) — a Zarr v3 convention for per-base genomic data"
 readme = "README.md"
 requires-python = ">=3.11"

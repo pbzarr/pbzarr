@@ -4,12 +4,11 @@
   "include-component-in-tag": false,
   "changelog-path": "CHANGELOG.md",
   "packages": {
-    "crates/pbzarr": {
-      "release-type": "rust",
+    ".": {
+      "release-type": "simple",
       "release-as": "0.2.0",
       "extra-files": [
-        { "type": "toml", "path": "pyproject.toml", "jsonpath": "$.project.version" },
-        { "type": "toml", "path": "crates/pbzarr-python/Cargo.toml", "jsonpath": "$.package.version" }
+        { "type": "generic", "path": "Cargo.toml" }
       ]
     }
   }

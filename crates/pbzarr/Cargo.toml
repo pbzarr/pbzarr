@@ -1,11 +1,11 @@
 [package]
 name = "pbzarr"
-version = "0.2.0"
-edition = "2024"
-authors = ["Cade Mirchandani <cmirchan@ucsc.edu>"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 description = "A Zarr v3 convention for per-base resolution genomic data"
-license = "MIT"
-repository = "https://github.com/pbzarr/pbzarr"
+license.workspace = true
+repository.workspace = true
 readme = "README.md"
 keywords = ["zarr", "genomics", "bioinformatics", "depth"]
 categories = ["science", "encoding"]

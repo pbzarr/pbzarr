@@ -11,11 +11,13 @@ Python wheel (PyPI) ship in lockstep.
    `refactor:`, ...). release-please reads these to compute the next version and
    build the changelog.
 2. **release-please opens (or updates) a release PR** titled `chore(main): release <version>`.
-   It bumps the version in `crates/pbzarr/Cargo.toml`, and via `extra-files` in
-   `release-please-config.json` also bumps `pyproject.toml` and
-   `crates/pbzarr-python/Cargo.toml`, and writes `CHANGELOG.md`.
+   It bumps the one version line in the root `Cargo.toml` `[workspace.package]`
+   table (annotated `# x-release-please-version`) and writes `CHANGELOG.md`. Every
+   crate inherits that version via `version.workspace = true`, and the wheel reads
+   it through `dynamic = ["version"]` in `pyproject.toml`, so nothing else needs a
+   per-file bump.
 3. **Merge the release PR.** That creates the git tag and GitHub release
-   (`release_created == true`), which triggers the publish jobs in
+   (`releases_created == 'true'`), which triggers the publish jobs in
    `.github/workflows/release.yml`:
    - **build-wheels** — maturin builds abi3 wheels for linux x86_64, macOS x86_64,
      macOS aarch64.
@@ -26,10 +28,15 @@ Python wheel (PyPI) ship in lockstep.
 
 ## Crate and wheel stay linked
 
-There is one version for the whole repo. release-please tracks a single package
-(`crates/pbzarr`) and, via `extra-files`, bumps `pyproject.toml` and
-`crates/pbzarr-python/Cargo.toml` to the same number. So the crate and the wheel
-always carry the same version and are released from the same tag.
+There is one version for the whole repo, and it lives in exactly one place:
+`[workspace.package].version` in the root `Cargo.toml`. release-please tracks a
+single root package (`"."`, `release-type: simple`) and bumps that annotated line
+through its generic updater. Every member crate inherits it with
+`version.workspace = true`, and the wheel derives it via `dynamic = ["version"]`
+(maturin reads the binding crate's inherited version). The crate and the wheel
+cannot drift, and both release from the same tag. (`simple` also keeps a
+release-please-managed `version.txt` at the repo root; it mirrors the same number
+and is not read by cargo or maturin.)
 
 Merging the release PR fires one GitHub release, and that single event triggers
 both `publish-pypi` (through `build-wheels`) and `publish-crate`. They run as
