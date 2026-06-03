@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref (tag) to build and publish wheels for. Republishes wheels to PyPI for an already-released version; the crate is untouched."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -24,17 +29,18 @@ jobs:
 
   build-wheels:
     needs: release-please
-    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    if: ${{ needs.release-please.outputs.releases_created == 'true' || github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64 }
-          - { os: macos-13, target: x86_64 }
-          - { os: macos-14, target: aarch64 }
+          - { os: macos-14, target: universal2-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: PyO3/maturin-action@v1
         with:
           command: build

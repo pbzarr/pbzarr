@@ -19,8 +19,8 @@ Python wheel (PyPI) ship in lockstep.
 3. **Merge the release PR.** That creates the git tag and GitHub release
    (`releases_created == 'true'`), which triggers the publish jobs in
    `.github/workflows/release.yml`:
-   - **build-wheels** — maturin builds abi3 wheels for linux x86_64, macOS x86_64,
-     macOS aarch64.
+   - **build-wheels** — maturin builds abi3 wheels for linux x86_64 and a macOS
+     universal2 wheel (Intel + Apple Silicon) on the macos-14 Apple Silicon runner.
    - **publish-pypi** — uploads the wheels via PyPI Trusted Publishing
      (OIDC, environment `pypi`; no token stored).
    - **publish-crate** — `cargo publish -p pbzarr` via crates.io Trusted
@@ -45,6 +45,13 @@ but if one fails the other can still succeed. Re-run a failed job from the Actio
 tab; it republishes the same pinned version (a target that already exists on
 PyPI/crates.io will reject the re-push, which is the expected safety net). You
 cannot release just the wheel or just the crate, they always move together.
+
+If the wheels fail to build for a version whose crate already published (so the
+tag and GitHub release exist but PyPI is missing the wheel), re-run the `Release`
+workflow via **Run workflow** (`workflow_dispatch`) with the `ref` input set to the
+tag (e.g. `v0.2.0`). That rebuilds the wheels off the tag and runs `publish-pypi`
+through trusted publishing; `publish-crate` stays gated on a fresh release and does
+not re-fire, so the crate is untouched.
 
 ## Version pinning
 
