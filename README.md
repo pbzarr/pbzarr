@@ -1,6 +1,11 @@
-# pbzarr
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/pbzarr-grid-dark.svg">
+  <img alt="pbzarr" src="docs/assets/pbzarr-grid-light.svg">
+</picture>
 
-A Zarr v3 convention for storing per-base resolution genomic data — read depths, methylation, boolean masks, and other cohort-shaped per-base values. Built as an alternative to D4 and bigWig that compresses cleanly across samples and integrates with the xarray / zarr ecosystem.
+# Overview
+
+**pbzarr** is a Zarr v3 convention for storing per-base resolution genomic data — read depths, methylation, boolean masks, and other cohort-shaped per-base values. Built as an alternative to D4 and bigWig that compresses cleanly across samples and integrates with the xarray / zarr ecosystem.
 
 This repo provides:
 
