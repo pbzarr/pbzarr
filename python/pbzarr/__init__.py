@@ -5,6 +5,7 @@ from ._native import PbzError, import_d4
 from ._open import open
 from ._store import create_store
 from ._track import create_track
+from ._write import write_track
 
 __version__ = "0.1.0"
 
@@ -14,5 +15,6 @@ __all__ = [
     "create_track",
     "import_d4",
     "open",
+    "write_track",
     "__version__",
 ]
