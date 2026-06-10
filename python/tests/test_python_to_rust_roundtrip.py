@@ -4,22 +4,21 @@ from pathlib import Path
 import subprocess
 import zarr
 
-from pbzarr import create_store, create_track
+from pbzarr import PbzStore
 
 
 def test_python_writes_rust_reads(tmp_path: Path):
     out = tmp_path / "py.pbz"
 
-    create_store(
+    store = PbzStore.create(
         str(out),
         contigs=["chr1", "chr2"],
         contig_lengths=[100, 50],
         coordinate_space="GRCh38",
     )
-    create_track(str(out), track="mask", dtype="bool")
-    create_track(
-        str(out),
-        track="depth",
+    store.create_track("mask", dtype="bool")
+    store.create_track(
+        "depth",
         dtype="uint16",
         columns=["A", "B", "C"],
         column_dim="sample",

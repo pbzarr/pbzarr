@@ -5,8 +5,18 @@ Registered on `xr.DataTree`. Provides region queries (string-based,
 selection uses a generic `column` kwarg that resolves against whatever
 the track declared as its `column_dim` — pbzarr is not cohort-specific,
 so the API never hardcodes `"sample"`.
+
+The accessor also provides `assign_column_labels`, which papers over a
+real xarray gap: non-dim coords do not auto-propagate from DataTree
+root to children (xarray #9472), so the per-child loop is unavoidable
+for the common case of "attach a label like `pop` to every contig's
+column axis."
 """
 from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
 import xarray as xr
 
 from ._region import parse_region
@@ -61,3 +71,46 @@ class PbzDataTreeAccessor:
                     da = da.sel({col_dim: column})
             return da
         return ds
+
+    def assign_column_labels(
+        self,
+        dim: str,
+        **labels: Mapping[Any, Any],
+    ) -> xr.DataTree:
+        """Attach non-dim coords on `dim` to every child Dataset.
+
+        Each kwarg becomes a new non-dim coord on `dim`, with values looked
+        up in the provided dict from the existing dim values. Children that
+        don't have `dim` are passed through unchanged. Missing keys raise
+        before any work happens, instead of `KeyError`ing mid-compute the
+        way a lambda would.
+
+        Example:
+            labeled = depth.pbz.assign_column_labels(
+                "sample",
+                pop={"s1": "POP_A", "s2": "POP_B"},
+                sex={"s1": "F",     "s2": "M"},
+            )
+        """
+        if not labels:
+            return self._dt
+
+        def _apply(ds: xr.Dataset) -> xr.Dataset:
+            if dim not in ds.dims:
+                return ds
+            dim_values = ds[dim].values
+            new_coords: dict[str, Any] = {}
+            for label_name, mapping in labels.items():
+                missing = [v for v in dim_values if v not in mapping]
+                if missing:
+                    raise ValueError(
+                        f"assign_column_labels: label {label_name!r} missing "
+                        f"keys for dim {dim!r}: {missing}"
+                    )
+                new_coords[label_name] = (
+                    dim,
+                    [mapping[v] for v in dim_values],
+                )
+            return ds.assign_coords(**new_coords)
+
+        return self._dt.map_over_datasets(_apply)

@@ -1,21 +1,21 @@
 """Thin wrapper around xr.open_datatree for pbz stores."""
 from __future__ import annotations
+from typing import Any
+
 import xarray as xr
 
 
-def open(path: str, *, chunks: dict | str | None = None) -> xr.DataTree:
-    """Open a pbz store as an `xr.DataTree`.
+def open(path: str, *, chunks: Any = None) -> xr.DataTree:
+    """Open a pbz store as an `xr.DataTree` (the xarray-flavored entry point).
 
-    Each contig is a child node holding the per-contig data arrays + coord
-    arrays. Defaults to **eager numpy backing** — for cohort-scale reads
-    the zarr codec pipeline (especially via `zarrs-python`) parallelizes
-    chunk decode internally and is faster than layering dask on top
-    (see https://github.com/zarrs/zarr_benchmarks).
+    Defaults to eager (matches `xr.open_datatree`'s convention). Pass
+    `chunks={}` (or any chunk dict) for a dask-backed DataTree where
+    dask chunks align with on-disk zarr chunks.
 
-    Pass `chunks="auto"` or an explicit dict for dask-backed lazy reads
-    if you specifically need out-of-core streaming.
-
-    Use `dt.pbz.region(...)` for region queries; the accessor is registered
-    when `pbzarr` is imported.
+    For the optimized read -> transform -> write pipeline, use `PbzStore`
+    which defaults to lazy. `pbzarr.open` exists for users who want plain
+    xarray semantics without the store handle.
     """
+    if chunks is None:
+        return xr.open_datatree(path, engine="zarr")
     return xr.open_datatree(path, engine="zarr", chunks=chunks)
