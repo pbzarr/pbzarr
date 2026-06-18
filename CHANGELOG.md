@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.1](https://github.com/pbzarr/pbzarr/compare/v0.3.0...v0.3.1) (2026-06-18)
+
+
+### Features
+
+* progress bar for d4/bigWig import via progress=True ([eadac00](https://github.com/pbzarr/pbzarr/commit/eadac00937d412c4ed3a0df333f589017c716173))
+
+
+### Miscellaneous Chores
+
+* release 0.3.1 ([d3e7428](https://github.com/pbzarr/pbzarr/commit/d3e74283c74d70057eb637de19bcd1ec6ca0ab44))
+
 ## [0.3.0](https://github.com/pbzarr/pbzarr/compare/v0.2.1...v0.3.0) (2026-06-18)
 
 
