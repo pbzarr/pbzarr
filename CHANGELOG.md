@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/pbzarr/pbzarr/compare/v0.2.1...v0.3.0) (2026-06-18)
+
+
+### Features
+
+* from_d4/from_bigwig constructors that build a store from the source file ([33794d7](https://github.com/pbzarr/pbzarr/commit/33794d75750aec4c7f98e9d1c3f9ff72d9be287d))
+
 ## [0.2.1](https://github.com/pbzarr/pbzarr/compare/v0.2.0...v0.2.1) (2026-06-18)
 
 
