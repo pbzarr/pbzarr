@@ -6,7 +6,6 @@
   "packages": {
     ".": {
       "release-type": "simple",
-      "release-as": "0.2.0",
       "extra-files": [
         { "type": "generic", "path": "Cargo.toml" }
       ]
