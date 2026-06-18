@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.1](https://github.com/pbzarr/pbzarr/compare/v0.2.0...v0.2.1) (2026-06-18)
+
+
+### Features
+
+* pbzstore class api ([#7](https://github.com/pbzarr/pbzarr/issues/7)) ([a6b31db](https://github.com/pbzarr/pbzarr/commit/a6b31db89b75d5c69fddfcdfb301ca61ceeb3a99))
+* **python:** write_track + create_track(overwrite=True) ([843e444](https://github.com/pbzarr/pbzarr/commit/843e44469f7dfd118a8b395cd470b640cffc7c94))
+
+
+### Miscellaneous Chores
+
+* release 0.2.1 ([4e2b997](https://github.com/pbzarr/pbzarr/commit/4e2b99753cec245163ccb880daf5d36f2c78ce50))
+
 ## [0.2.0](https://github.com/pbzarr/pbzarr/compare/v0.1.0...v0.2.0) (2026-06-03)
 
 
