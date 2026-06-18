@@ -1,6 +1,7 @@
-"""Full Python user journey: create_store -> create_track -> import_d4 -> open + slice."""
+"""End-to-end through PbzStore: create -> create_track -> import_d4 -> open + slice."""
 from __future__ import annotations
 from pathlib import Path
+
 import numpy as np
 
 import pbzarr
@@ -10,18 +11,14 @@ def test_end_to_end_import_then_read(tmp_path: Path, write_d4):
     d4 = write_d4("chr1", 1000)
     out = tmp_path / "e2e.pbz"
 
-    pbzarr.create_store(
+    store = pbzarr.PbzStore.create(
         str(out),
         contigs=["chr1"],
         contig_lengths=[1000],
         coordinate_space="GRCh38",
     )
-    pbzarr.create_track(str(out), track="depth", dtype="uint32")
-    pbzarr.import_d4(
-        str(out),
-        track="depth",
-        sources=[(str(d4), None)],
-    )
+    store.create_track("depth", dtype="int32")
+    store.import_d4("depth", sources=[(str(d4), None)])
 
     dt = pbzarr.open(str(out))
     da = dt.pbz.region("chr1:0-500", track="depth")
@@ -35,15 +32,13 @@ def test_end_to_end_import_then_read(tmp_path: Path, write_d4):
 
 def test_end_to_end_cohort_via_zarr_python_writes(tmp_path: Path):
     """Cohort write path that doesn't go through import_d4: user opens the
-    zarr-python group and writes directly. Documents the v0 pattern from
-    the design doc."""
+    zarr-python group and writes directly. Documents the bypass for v0."""
     import zarr
 
     out = tmp_path / "cohort.pbz"
-    pbzarr.create_store(str(out), contigs=["chr1"], contig_lengths=[100])
-    pbzarr.create_track(
-        str(out),
-        track="meth",
+    store = pbzarr.PbzStore.create(str(out), contigs=["chr1"], contig_lengths=[100])
+    store.create_track(
+        "meth",
         dtype="float32",
         columns=["A", "B"],
         column_dim="sample",
@@ -58,3 +53,14 @@ def test_end_to_end_cohort_via_zarr_python_writes(tmp_path: Path):
     assert da.shape == (10, 2)
     assert da.sel(sample="A")[0].item() == 0.0
     assert da.sel(sample="B")[0].item() == 1.0
+
+
+def test_import_d4_requires_existing_track(tmp_path: Path, write_d4):
+    """Auto-create was dropped; missing-track raises before reaching the binding."""
+    d4 = write_d4("chr1", 100)
+    out = tmp_path / "noauto.pbz"
+    store = pbzarr.PbzStore.create(str(out), contigs=["chr1"], contig_lengths=[100])
+
+    import pytest
+    with pytest.raises(ValueError, match="does not exist"):
+        store.import_d4("depth", sources=[(str(d4), None)])

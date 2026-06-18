@@ -1,26 +1,28 @@
-"""create_track writes per-contig data arrays + (cohort) coord arrays + updates root tracks map."""
+"""PbzStore.create_track writes per-contig arrays + (cohort) coords + updates root tracks map."""
 from __future__ import annotations
+import json
 from pathlib import Path
-import zarr
-import numpy as np
 
-from pbzarr import create_store, create_track
+import numpy as np
+import zarr
+
+from pbzarr import PbzStore
 
 
 def test_create_scalar_track(tmp_path: Path):
     out = tmp_path / "t.pbz"
-    create_store(str(out), contigs=["chr1", "chr2"], contig_lengths=[1000, 500])
+    store = PbzStore.create(str(out), contigs=["chr1", "chr2"], contig_lengths=[1000, 500])
 
-    create_track(str(out), track="mask", dtype="bool")
+    store.create_track("mask", dtype="bool")
 
-    g = zarr.open_group(str(out), mode="r")
-    pbz_ns = g.attrs["perbase_zarr"]
-    assert "mask" in pbz_ns["tracks"]
-    meta = pbz_ns["tracks"]["mask"]
+    assert "mask" in store.tracks
+    meta = store.track_schema("mask")
     assert meta["dtype"] == "bool"
     assert meta["chunk_size"] == 1_000_000
     assert "column_dim" not in meta
+    assert store.column_labels("mask") is None
 
+    g = zarr.open_group(str(out), mode="r")
     arr = g["chr1/mask"]
     assert arr.shape == (1000,)
     assert arr.dtype == bool
@@ -31,24 +33,25 @@ def test_create_scalar_track(tmp_path: Path):
 
 def test_create_cohort_track(tmp_path: Path):
     out = tmp_path / "t.pbz"
-    create_store(str(out), contigs=["chr1"], contig_lengths=[2000])
+    store = PbzStore.create(str(out), contigs=["chr1"], contig_lengths=[2000])
 
-    create_track(
-        str(out),
-        track="depth",
+    store.create_track(
+        "depth",
         dtype="uint16",
         columns=["A", "B", "C"],
         column_dim="sample",
         column_chunk_size=16,
     )
 
-    g = zarr.open_group(str(out), mode="r")
-    pbz_ns = g.attrs["perbase_zarr"]
-    meta = pbz_ns["tracks"]["depth"]
+    meta = store.track_schema("depth")
     assert meta["dtype"] == "uint16"
     assert meta["column_dim"] == "sample"
     assert meta["column_chunk_size"] == 16
+    assert "columns" not in meta, "track_schema must not return labels"
 
+    assert store.column_labels("depth") == ["A", "B", "C"]
+
+    g = zarr.open_group(str(out), mode="r")
     data = g["chr1/depth"]
     assert data.shape == (2000, 3)
     assert data.dtype == np.uint16
@@ -59,10 +62,9 @@ def test_create_cohort_track(tmp_path: Path):
 
 def test_sharded_track_round_trips(tmp_path: Path):
     out = tmp_path / "t.pbz"
-    create_store(str(out), contigs=["chr1"], contig_lengths=[10_000])
-    create_track(
-        str(out),
-        track="depth",
+    store = PbzStore.create(str(out), contigs=["chr1"], contig_lengths=[10_000])
+    store.create_track(
+        "depth",
         dtype="uint32",
         chunk_size=1_000,
         shard_size=4_000,
@@ -76,12 +78,9 @@ def test_sharded_track_round_trips(tmp_path: Path):
     assert (g2["chr1/depth"][:] == np.arange(10_000)).all()
 
 
-import json
-
-
-def _array_codecs(store: str, contig: str, track: str) -> list[dict]:
+def _array_codecs(store_path: str, contig: str, track: str) -> list[dict]:
     """Read the codec list from a track array's Zarr v3 metadata."""
-    meta = json.loads((Path(store) / contig / track / "zarr.json").read_text())
+    meta = json.loads((Path(store_path) / contig / track / "zarr.json").read_text())
     return meta["codecs"]
 
 
@@ -94,8 +93,8 @@ def _blosc_config(codecs: list[dict]) -> dict | None:
 
 def test_default_codecs_are_blosc_zstd5(tmp_path: Path):
     out = tmp_path / "t.pbz"
-    create_store(str(out), contigs=["chr1"], contig_lengths=[1000])
-    create_track(str(out), track="depth", dtype="uint16")
+    store = PbzStore.create(str(out), contigs=["chr1"], contig_lengths=[1000])
+    store.create_track("depth", dtype="uint16")
 
     cfg = _blosc_config(_array_codecs(str(out), "chr1", "depth"))
     assert cfg is not None, "default should apply a Blosc codec"
@@ -105,12 +104,11 @@ def test_default_codecs_are_blosc_zstd5(tmp_path: Path):
 
 def test_compressors_override_is_applied(tmp_path: Path):
     out = tmp_path / "t.pbz"
-    create_store(str(out), contigs=["chr1"], contig_lengths=[1000])
+    store = PbzStore.create(str(out), contigs=["chr1"], contig_lengths=[1000])
 
     from zarr.codecs import BloscCodec, BloscShuffle
-    create_track(
-        str(out),
-        track="depth",
+    store.create_track(
+        "depth",
         dtype="uint16",
         compressors=[BloscCodec(cname="zstd", clevel=1, shuffle=BloscShuffle.shuffle)],
     )
@@ -122,8 +120,8 @@ def test_compressors_override_is_applied(tmp_path: Path):
 
 def test_empty_compressors_means_uncompressed(tmp_path: Path):
     out = tmp_path / "t.pbz"
-    create_store(str(out), contigs=["chr1"], contig_lengths=[1000])
-    create_track(str(out), track="depth", dtype="uint16", compressors=[])
+    store = PbzStore.create(str(out), contigs=["chr1"], contig_lengths=[1000])
+    store.create_track("depth", dtype="uint16", compressors=[])
 
     codecs = _array_codecs(str(out), "chr1", "depth")
     assert _blosc_config(codecs) is None, "empty list must disable compression"

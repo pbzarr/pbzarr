@@ -1,20 +1,17 @@
 """pbzarr — Python wheel for PBZ (Per-Base Zarr) stores."""
 
 from . import accessor  # registers .pbz on DataTree
-from ._native import PbzError, import_d4
+from ._gather import RegionBlocks
+from ._native import PbzError
 from ._open import open
-from ._store import create_store
-from ._track import create_track
-from ._write import write_track
+from ._pbzstore import PbzStore
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "PbzError",
-    "create_store",
-    "create_track",
-    "import_d4",
+    "PbzStore",
+    "RegionBlocks",
     "open",
-    "write_track",
     "__version__",
 ]
