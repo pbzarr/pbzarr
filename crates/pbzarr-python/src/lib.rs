@@ -12,14 +12,25 @@ use pbzarr_readers::{
     BigWigSource, D4Source, from_bigwig as rs_from_bigwig, from_d4 as rs_from_d4,
 };
 
+mod progress;
+
 create_exception!(_native, PbzError, PyRuntimeError);
+
+/// Total bytes an import will write: positions x sources x element size. This
+/// matches the pipeline's per-chunk byte accounting, so a progress bar sized to
+/// it fills to exactly 100%.
+fn total_bytes(store: &PbzStore, n_sources: usize, elem_size: usize) -> u64 {
+    let sum_len: u64 = store.genome().contigs().iter().map(|c| c.length).sum();
+    sum_len * n_sources as u64 * elem_size as u64
+}
 
 /// Bulk-import one or more d4 files into an existing track.
 ///
 /// The track MUST already exist (created via `create_track`). dtype is
 /// read from the track metadata and currently MUST be `int32`.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, workers=None, chunk_size=None, column_chunk_size=None))]
+#[pyo3(signature = (store_path, track, sources, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
+#[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_d4(
     py: Python<'_>,
     store_path: String,
@@ -28,6 +39,7 @@ fn import_d4(
     workers: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
+    progress: bool,
 ) -> PyResult<()> {
     py.allow_threads(|| {
         let store = PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
@@ -48,6 +60,10 @@ fn import_d4(
         if let Some(c) = column_chunk_size {
             config.column_chunk_size = Some(c);
         }
+        if progress {
+            let total = total_bytes(&store, sources.len(), std::mem::size_of::<i32>());
+            config.progress = Some(progress::make_sink(&track, total));
+        }
         rs_from_d4(&store, &track, &sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))?;
         Ok(())
@@ -60,7 +76,8 @@ fn import_d4(
 /// from the track metadata and currently MUST be `float32`. Positions not
 /// covered by a bigWig become `NaN`.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, workers=None, chunk_size=None, column_chunk_size=None))]
+#[pyo3(signature = (store_path, track, sources, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
+#[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bigwig(
     py: Python<'_>,
     store_path: String,
@@ -69,6 +86,7 @@ fn import_bigwig(
     workers: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
+    progress: bool,
 ) -> PyResult<()> {
     py.allow_threads(|| {
         let store = PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
@@ -88,6 +106,10 @@ fn import_bigwig(
         }
         if let Some(c) = column_chunk_size {
             config.column_chunk_size = Some(c);
+        }
+        if progress {
+            let total = total_bytes(&store, sources.len(), std::mem::size_of::<f32>());
+            config.progress = Some(progress::make_sink(&track, total));
         }
         rs_from_bigwig(&store, &track, &sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))?;

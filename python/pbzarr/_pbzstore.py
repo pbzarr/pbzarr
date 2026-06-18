@@ -80,6 +80,7 @@ class PbzStore:
         shard_size: int | None = None,
         column_chunk_size: int | None = None,
         overwrite: bool = False,
+        progress: bool = False,
     ) -> "PbzStore":
         """Build a store from one or more d4 files in a single call.
 
@@ -87,12 +88,15 @@ class PbzStore:
         them. A single path gives a scalar (1D) `int32` track; a `{label: path}`
         mapping gives a 2D track whose columns are the mapping keys, in order.
         Every source must share one reference; a mismatched contig set raises.
+
+        Pass `progress=True` for a live import progress bar.
         """
         return cls._from_source(
             "d4", path, source, track=track, column_dim=column_dim,
             coordinate_space=coordinate_space, workers=workers,
             chunk_size=chunk_size, shard_size=shard_size,
             column_chunk_size=column_chunk_size, overwrite=overwrite,
+            progress=progress,
         )
 
     @classmethod
@@ -109,18 +113,22 @@ class PbzStore:
         shard_size: int | None = None,
         column_chunk_size: int | None = None,
         overwrite: bool = False,
+        progress: bool = False,
     ) -> "PbzStore":
         """Build a store from one or more bigWig files in a single call.
 
         Like `from_d4`, but the track is `float32` and uncovered positions read
         as `0` (the track is created with `fill_value=0.0` so all-gap chunks are
         elided). Contigs and lengths come from the bigWig header.
+
+        Pass `progress=True` for a live import progress bar.
         """
         return cls._from_source(
             "bigwig", path, source, track=track, column_dim=column_dim,
             coordinate_space=coordinate_space, workers=workers,
             chunk_size=chunk_size, shard_size=shard_size,
             column_chunk_size=column_chunk_size, overwrite=overwrite,
+            progress=progress,
         )
 
     @classmethod
@@ -138,6 +146,7 @@ class PbzStore:
         shard_size: int | None,
         column_chunk_size: int | None,
         overwrite: bool,
+        progress: bool,
     ) -> "PbzStore":
         from ._native import bigwig_contigs, d4_contigs
 
@@ -190,9 +199,9 @@ class PbzStore:
             list(zip(paths, labels)) if labels is not None else [(paths[0], None)]
         )
         if fmt == "d4":
-            store.import_d4(track, sources, workers=workers)
+            store.import_d4(track, sources, workers=workers, progress=progress)
         else:
-            store.import_bigwig(track, sources, workers=workers)
+            store.import_bigwig(track, sources, workers=workers, progress=progress)
         return store
 
     # ---- metadata cache ----
@@ -493,12 +502,16 @@ class PbzStore:
         workers: int | None = None,
         chunk_size: int | None = None,
         column_chunk_size: int | None = None,
+        progress: bool = False,
     ) -> None:
         """Populate an existing track from per-sample d4 files.
 
         The track must already exist (call `create_track` first). The d4
         path has dtype, scalar-vs-cohort, and label constraints that make
         auto-create more confusing than the explicit two-call form.
+
+        Pass `progress=True` for a live import progress bar (an indicatif bar
+        on a terminal, periodic plain-line prints under batch jobs / Jupyter).
         """
         if track not in self.tracks:
             raise ValueError(
@@ -514,6 +527,7 @@ class PbzStore:
             workers=workers,
             chunk_size=chunk_size,
             column_chunk_size=column_chunk_size,
+            progress=progress,
         )
         self._invalidate()
 
@@ -525,12 +539,16 @@ class PbzStore:
         workers: int | None = None,
         chunk_size: int | None = None,
         column_chunk_size: int | None = None,
+        progress: bool = False,
     ) -> None:
         """Populate an existing track from per-sample bigWig files.
 
         The track must already exist (call `create_track` first) and be
         `float32`. Positions not covered by a bigWig become `NaN`; an
         all-gap chunk is elided when the track keeps its default `NaN` fill.
+
+        Pass `progress=True` for a live import progress bar (an indicatif bar
+        on a terminal, periodic plain-line prints under batch jobs / Jupyter).
         """
         if track not in self.tracks:
             raise ValueError(
@@ -546,6 +564,7 @@ class PbzStore:
             workers=workers,
             chunk_size=chunk_size,
             column_chunk_size=column_chunk_size,
+            progress=progress,
         )
         self._invalidate()
 

@@ -10,6 +10,7 @@ def import_d4(
     workers: int | None = ...,
     chunk_size: int | None = ...,
     column_chunk_size: int | None = ...,
+    progress: bool = ...,
 ) -> None: ...
 def import_bigwig(
     store_path: str,
@@ -18,6 +19,7 @@ def import_bigwig(
     workers: int | None = ...,
     chunk_size: int | None = ...,
     column_chunk_size: int | None = ...,
+    progress: bool = ...,
 ) -> None: ...
 def d4_contigs(path: str) -> list[tuple[str, int]]: ...
 def bigwig_contigs(path: str) -> list[tuple[str, int]]: ...
