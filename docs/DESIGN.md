@@ -204,11 +204,11 @@ The Rust crate is a single library crate organized in layered modules.
 | `region_query.rs`       | `RegionQuery` and the `<contig>:<start>-<end>` parser.                        |
 | `io/dtype.rs`           | `Dtype` tag, `Numeric` trait, dtype-to-Rust-type mapping.                     |
 | `io/reader.rs`          | `ValueReader` trait. Import sources implement this.                           |
-| `io/d4.rs`              | `D4Reader`. The only built-in `ValueReader` at v0.1, mmap-backed.             |
+| `pbzarr-readers` crate  | `D4Reader` (int32) and `BigWigReader` (float32), the built-in `ValueReader`s, in a separate crate so the core stays free of git dependencies. |
 | `store.rs`              | `PbzStore`. Owns the root group handle and the cached genome.                 |
 | `track.rs`              | `Track`, `TrackConfig`, `TrackMetadata`. Caches per-contig array handles.     |
 | `import/pipeline.rs`    | `run_pipeline`. crossbeam-channel work distribution across workers.           |
-| `import/d4.rs`          | `from_d4`. D4-specific entry point on top of `run_pipeline`.                  |
+| `pbzarr-readers` crate  | `from_d4` / `from_bigwig`. Format-specific entry points on top of `run_pipeline`. |
 | `error.rs`              | `PbzError`, derived via `thiserror`.                                          |
 
 `Track` is not generic over dtype. The on-disk dtype is determined by metadata; runtime checks at `read_region<T>` and `write_region<T>` reject mismatches via `PbzError::DtypeMismatch`. The trade-off is one runtime check per region I/O against simpler types for callers that mix tracks of different dtypes in the same code path.
@@ -237,20 +237,27 @@ let data: ArrayD<u32> = store.track("depth").unwrap().read_region(&region)?;
 
 ### 6.2. Python (`pbzarr`)
 
-The Python wheel is a maturin mixed project. Three user-facing functions are exposed:
+The Python wheel is a maturin mixed project. The user-facing surface is the `PbzStore` class:
 
 ```python
 import pbzarr
 
-pbzarr.create_store("out.pbz", contigs=["chr1"], contig_lengths=[248_956_422],
-                    coordinate_space="GRCh38")
-pbzarr.create_track("out.pbz", track="depth", dtype="uint16",
-                    columns=["A", "B", "C"], column_dim="sample")
-pbzarr.import_d4("out.pbz", track="depth",
-                 sources=[("/data/A.d4", "A"), ("/data/B.d4", "B")])
+# One-shot from a source file: contigs and lengths come from the header, and
+# the dtype is set by the format (d4 -> int32, bigWig -> float32).
+store = pbzarr.PbzStore.from_d4("out.pbz",
+                                {"A": "/data/A.d4", "B": "/data/B.d4"},
+                                track="depth", column_dim="sample")
+
+# Or build it explicitly.
+store = pbzarr.PbzStore.create("out.pbz", contigs=["chr1"],
+                               contig_lengths=[248_956_422],
+                               coordinate_space="GRCh38")
+store.create_track("depth", dtype="int32",
+                   columns=["A", "B", "C"], column_dim="sample")
+store.import_d4("depth", sources=[("/data/A.d4", "A"), ("/data/B.d4", "B")])
 ```
 
-`create_store` and `create_track` are pure Python over `zarr-python`. `import_d4` is a thin PyO3 binding around the Rust import pipeline that releases the GIL during the operation. Custom numpy writes use `zarr-python` directly (e.g., `g["chr1/depth"][:1000, :] = arr`) rather than a PBZ-specific wrapper, since the arrays are normal Zarr v3 arrays once registered.
+`PbzStore.create` and `create_track` are pure Python over `zarr-python`. `import_d4` / `import_bigwig` are thin PyO3 bindings around the Rust import pipeline that release the GIL during the operation, and `from_d4` / `from_bigwig` wrap create plus import in one call, reading the contig list from the source header through the native `d4_contigs` / `bigwig_contigs` helpers. Custom numpy writes use `zarr-python` directly (e.g., `g["chr1/depth"][:1000, :] = arr`) rather than a PBZ-specific wrapper, since the arrays are normal Zarr v3 arrays once registered.
 
 ### 6.3. Read API
 
@@ -273,7 +280,7 @@ Anticipated subcommands:
 
 | Subcommand                                                  | Purpose                                                                                       |
 |-------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
-| `pbz import <input> <store> --track <name>`                 | Bulk import from d4 today; bigWig, bedGraph, BED, BAM/CRAM as readers are added.              |
+| `pbz import <input> <store> --track <name>`                 | Bulk import from d4 and bigWig today; bedGraph, BED, BAM/CRAM as readers are added.           |
 | `pbz export <store> <region> --format tsv\|bed\|bedgraph`   | Stream a region to a text format. Stdout by default; `--output` for a file.                   |
 | `pbz info <store>`                                          | Print store metadata: contigs and lengths, track names, dtypes, chunk shapes, sharding state. |
 | `pbz region <store> <region>`                               | Quick region query; pretty-print the slab to stdout.                                          |
@@ -298,7 +305,7 @@ Cross-language round-trip is enforced by a CI integration test that writes a fix
 
 ## 8. Design Considerations
 
-The Python wheel implements `create_store` and `create_track` in pure Python rather than reusing the Rust implementation via PyO3. The reason is that the small writes those functions perform offer no meaningful Rust speedup, and binding them through PyO3 forces every store-creation call to cross the FFI boundary and re-enter the Rust runtime. The cost of the pure-Python path is that on-disk layout knowledge lives in two places, mitigated by the cross-language round-trip test.
+The Python wheel implements `PbzStore.create` and `create_track` in pure Python rather than reusing the Rust implementation via PyO3. The reason is that the small writes those functions perform offer no meaningful Rust speedup, and binding them through PyO3 forces every store-creation call to cross the FFI boundary and re-enter the Rust runtime. The cost of the pure-Python path is that on-disk layout knowledge lives in two places, mitigated by the cross-language round-trip test.
 
 ---
 
@@ -307,7 +314,7 @@ The Python wheel implements `create_store` and `create_track` in pure Python rat
 * **Validation helpers.** Coord-array consistency across contigs is currently a writer guarantee. A `pbzarr::validate` helper that audits a store for spec conformance is on the list; readers currently trust the writer.
 * **Append modes.** Appending contigs or columns to an existing store is not supported in v0.1. The data model does not preclude it, and it is the major focus moving forward. The planned approach for v0.2 represents staged columns as a cheap size-1 tail on the column axis (a rectilinear chunk grid), folded into the wide compacted chunks by a later compaction step, so appends never rewrite existing chunks. It is blocked on rectilinear chunk-grid support reaching a released xarray. zarr-python supports it in a released version today; the zarrs writer lands in an unreleased version, so the Rust side waits on that release.
 * **Remote stores.** Synchronous I/O against local files is the v0 target. Remote backends are a big win with Zarr, and will be supported eventually.
-* **Additional import formats.** D4 is the only built-in import format at v0.1. bigWig, bedGraph, BED, and BAM/CRAM are the obvious additions; each requires a `ValueReader` implementation and a corresponding `from_*` entry point in `pbzarr::import`.
+* **Additional import formats.** d4 and bigWig are the built-in import formats today. bedGraph, BED, and BAM/CRAM are the obvious additions; each requires a `ValueReader` implementation and a corresponding `from_*` entry point in the `pbzarr-readers` crate.
 
 ---
 
