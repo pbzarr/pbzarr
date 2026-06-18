@@ -68,6 +68,36 @@ def test_store_region_delegates_to_accessor(tmp_path: Path):
     assert int(da.sizes["position"]) == 100
 
 
+def test_region_many_groupby(tmp_path: Path):
+    import flox  # noqa: F401  required dep; the groupby reduce path needs it
+
+    out = _make_store(tmp_path)
+    store = pbzarr.PbzStore(str(out))
+    # spans two contigs, includes a duplicate region
+    regions = [("chr1", 100, 110), ("chr2", 0, 10), ("chr1", 500, 505), ("chr1", 100, 110)]
+
+    # cohort track: gather -> (position, sample) tagged with a region coord
+    g = store.region(regions, track="depth")
+    assert g.dims == ("position", "sample")
+    assert "region" in g.coords
+
+    # use_flox=True forces the flox-backed groupby (errors if flox is missing)
+    with xr.set_options(use_flox=True):
+        m = g.groupby("region").mean("position").transpose("region", "sample")
+        # scalar track: no column dim -> reduces to a (region,) vector
+        vec = store.region(regions, track="mask").groupby("region").mean("position")
+
+    assert m.sizes == {"region": 4, "sample": 3}
+    brute = np.vstack([
+        store.region(f"{c}:{s}-{e}", track="depth").mean("position").values
+        for c, s, e in regions
+    ])
+    assert np.allclose(m.values, brute)
+
+    assert vec.dims == ("region",)
+    assert int(vec.sizes["region"]) == 4
+
+
 def test_assign_column_labels(tmp_path: Path):
     out = _make_store(tmp_path)
     store = pbzarr.PbzStore(str(out))

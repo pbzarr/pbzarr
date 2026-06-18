@@ -67,7 +67,7 @@ Root `perbase_zarr` attribute:
 - **`PbzStore::create(path, genome, coordinate_space) -> Self`**, **`open(path) -> Self`**, accessors `genome()` / `coordinate_space()` / `track_names()` / `track(name)`, plus `create_track(name, config) -> &Track`.
 - **`TrackConfig::new(dtype)` builder.** Chain `.columns(vec)` for 2D, `.column_dim("sample")` to override the default `"column"`, `.chunk_size(n)`, `.column_chunk_size(n)`, `.shard_size(n)`, `.fill_value(v)`, `.description(s)`, `.source(s)`. No public `scalar`/`cohort` constructors.
 - **`Track::read_region<T>(region) -> ArrayD<T>`** and **`write_region<T>(region, ArrayD<T>)`** with runtime dtype check. `write_region` takes ownership of the buffer so zarrs can consume it without a clone. Rank matches the track (1 or 2); callers downcast via `.into_dimensionality::<Ix1>()?` / `Ix2`.
-- **`pbzarr::import`** (core, format-agnostic): `Config`, `Report`, `run_pipeline<T, R: ValueReader<Item=T>>`. Format readers and their entry points live in the `pbzarr-readers` crate: **`pbzarr_readers::d4`** exposes `D4Source`, `D4Reader`, `from_d4(&store, track, sources, config)`. Format-specific entry points use the `from_<format>` naming pattern.
+- **`pbzarr::import`** (core, format-agnostic): `Config`, `Report`, `run_pipeline<T, R: ValueReader<Item=T>>`. Format readers and their entry points live in the `pbzarr-readers` crate: **`pbzarr_readers::d4`** exposes `D4Source`, `D4Reader`, `from_d4(&store, track, sources, config)` (int32 tracks); **`pbzarr_readers::bigwig`** exposes `BigWigSource`, `BigWigReader`, `from_bigwig(...)` (float32 tracks). Format-specific entry points use the `from_<format>` naming pattern.
 - **`ValueReader::read_into(contig_name, start, end, dst: ArrayViewMut2)`** — name-based, no `ContigId` crossing.
 - **`Numeric` trait** has `const DTYPE: Dtype` and `const ZERO: Self`; supertrait bounds include `zarrs::array::Element + ElementOwned`.
 
@@ -75,10 +75,10 @@ The library does not own coordinate-system conversion (callers handle 1-based in
 
 ## Reader/writer architecture
 
-The generic pipeline lives in `pbzarr::import`; format readers live in the separate `pbzarr-readers` crate (not in a CLI; PyO3 binds `from_d4` directly, exposed to Python as `pbzarr.import_d4`).
+The generic pipeline lives in `pbzarr::import`; format readers live in the separate `pbzarr-readers` crate (not in a CLI; PyO3 binds `from_d4` and `from_bigwig` directly, exposed to Python as `PbzStore.import_d4` / `PbzStore.import_bigwig`).
 
 - **`ValueReader` trait** at `pbzarr::io::reader` (`Send + Sync`). Workers fork their reader per-thread via `ValueReader::fork`.
-- **`D4Reader`** at `pbzarr_readers::d4` — the only import format at v0.
+- **`D4Reader`** at `pbzarr_readers::d4` (int32) and **`BigWigReader`** at `pbzarr_readers::bigwig` (float32) — the two import formats at v0.
 - **Parallel-writer pipeline** in `pbzarr::import::pipeline`. `thread::scope` + a single bounded `crossbeam-channel` of tasks. Each worker forks readers, then does read+write itself — no writer thread. Shared `Arc<State>` with `AtomicU64` counters and a `Mutex<Option<PbzError>>` for first error. Zarrs is safe for concurrent writes to non-overlapping shard/chunk files. Tasks are partitioned by the on-disk write unit: one shard per task for sharded tracks (step = `shard_size`), one chunk otherwise. A sub-shard write RMWs the whole shard, so sharded tracks MUST be partitioned shard-aligned — see the zarrs sharding quirk below.
 - **`run_pipeline<T, R>` takes `&Track`.** No `&mut`. `Track` caches an `Arc<Array<FilesystemStore>>` per contig (`RwLock<HashMap<...>>`) so per-chunk reads/writes don't re-open `zarr.json`.
 
@@ -160,16 +160,23 @@ pbzarr-rs/                    # workspace root
     │   │   └── bench_d4_readers.rs  # mmap vs ssio read-only microbench
     │   ├── src/
     │   │   ├── lib.rs
-    │   │   └── d4/
+    │   │   ├── d4/
+    │   │   │   ├── mod.rs
+    │   │   │   ├── reader.rs        # D4Reader
+    │   │   │   └── import.rs        # D4Source + from_d4
+    │   │   └── bigwig/
     │   │       ├── mod.rs
-    │   │       ├── reader.rs        # D4Reader
-    │   │       └── import.rs        # D4Source + from_d4
+    │   │       ├── reader.rs        # BigWigReader (bigtools)
+    │   │       └── import.rs        # BigWigSource + from_bigwig
     │   └── tests/
+    │       ├── common/mod.rs        # in-process .bw fixture writer (dev-only tokio)
     │       ├── d4_reader.rs
-    │       └── import_d4.rs
+    │       ├── import_d4.rs
+    │       ├── bigwig_reader.rs
+    │       └── import_bigwig.rs
     └── pbzarr-python/        # PyO3 bindings, the _native cdylib (not published)
         ├── Cargo.toml
-        └── src/lib.rs        # import_d4 → exposed as pbzarr.import_d4
+        └── src/lib.rs        # import_d4 / import_bigwig → exposed on PbzStore
 ```
 
 ## Coding conventions
@@ -223,6 +230,8 @@ In the format:
 - **d4 concurrent reads:** within-file parallelism in `import_d4` depends on the `d4` crate supporting concurrent `read_range`. Not yet verified at scale; works correctly today against a `Mutex` inside `D4Reader`.
 - **d4 import is restricted to `int32` tracks** (d4's actual native dtype; earlier code forced u32 and paid a per-position `try_from`). Widening or narrowing during import is not supported in v0.
 - **d4 dep is pinned** to `cademirch/d4-format@f836299` with feature `local_reader` (mmap-backed; pulls in `mapped_io`, no htslib). `D4Reader` uses `D4TrackReader::split` + `to_codec().decode_block(...)`. This rev fixes two earlier bugs: `SparseArrayReader::split` now clips records for partitions `[0..K]` fully inside one record, and `bit_array.rs` `decode_block` now uses `read_unaligned` so debug-mode pointer-alignment checks don't trip. `crates/pbzarr-readers/examples/bench_d4_readers.rs` keeps the mmap-vs-ssio microbench around for perf regression checks. Bumping the rev requires verifying the `split` + `decode_block` APIs haven't shifted.
+- **bigWig import is restricted to `float32` tracks** (bigWig's native value type). `BigWigReader` reads each region with `BigWigRead::values`, which returns a per-base `Vec<f32>` with `NaN` for uncovered positions. Those `NaN`s are copied through verbatim and match the f32 track's default `NaN` fill value, so all-gap chunks compare equal to the fill and zarrs elides them (`store_empty_chunks = false`). A track created with a non-`NaN` `fill_value` still imports correctly but stops eliding gap chunks.
+- **bigtools is a crates.io dep, not git** — `bigtools = { default-features = false, features = ["read"] }` (drops the `remote` HTTP, `cli`, and `write` paths). bigtools hard-deps `tokio`, so it compiles into the graph regardless, but the read path is fully synchronous and `BigWigReader` never touches a runtime. The bigWig *writer* (used only to synthesize test fixtures, in `tests/common`) does need a tokio runtime, so it lives in `[dev-dependencies]` (`bigtools` with `write` + `tokio` rt, current-thread + `channel_size = 0`). Python import tests synthesize `.bw` fixtures with `pybigtools` (PyPI dep in the `wheel` pixi feature).
 
 ## Deferred
 
@@ -231,7 +240,7 @@ In the format:
 - Benchmarks: cohort compression, mask generation, cross-sample math, read throughput, sharding sweep (Plan 3).
 - Docs + release: README, FORMAT.md, CHANGELOG, tag v0.1.0 (Plan 4).
 - `pbz` CLI binary (post-v0).
-- Additional input formats: bigWig, bedGraph, BED, BAM/CRAM, VCF.
+- Additional input formats: bedGraph, BED, BAM/CRAM, VCF (d4 and bigWig are implemented).
 - Sharding defaults (currently off; benchmark sweep will inform the default).
 - Multi-resolution tracks (would require track-as-group, breaking change).
 - Append samples / append contigs to an existing store. The v0.2 approach stages new columns as a size-1 tail on a rectilinear column grid, compacted into wide chunks later, so appends never rewrite existing chunks (RMW-free, remote-native). Prototyped on the **`recti-append-poc`** branch (isolated `recti` pixi env with tasks `recti-roundtrip` and `recti-lifecycle`), which proves the append/compact algorithm and its on-disk invariants against zarr-python plus the xarray fork. Gated on upstream: zarr-python 3.2+ supports rectilinear grids behind `zarr.config.set({'array.rectilinear_chunks': True})` (set on BOTH read and write; `dtype="str"` yields vlen-utf8); zarrs has it only on `main`/0.24-dev (0.23.x ships the older `rectangular` grid, NOT rectilinear); released xarray can't read it, needs PR #11279 (`maxrjones/xarray@poc/unified-zarr-chunk-grid`).

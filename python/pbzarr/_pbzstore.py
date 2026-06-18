@@ -16,8 +16,8 @@ import numpy as np
 import xarray as xr
 import zarr
 
-from . import _store, _track
-from ._region import parse_region
+from . import _gather, _store, _track
+from ._region import RegionQuery, parse_region
 
 # Sentinel for the "lazy by default on PbzStore" decision. Distinguishes
 # "user passed nothing -> apply our default" from "user passed chunks=None
@@ -165,13 +165,156 @@ class PbzStore:
 
     def region(
         self,
-        query: str,
+        query: str | Sequence[str | tuple[str, int, int]],
         *,
         track: str | None = None,
         column: str | None = None,
+        lazy: bool = False,
+        workers: int | None = None,
     ) -> xr.Dataset | xr.DataArray:
-        """Slice the store to a region. Delegates to the `.pbz` accessor."""
-        return self.tree.pbz.region(query, track=track, column=column)
+        """Return regions as labeled xarray.
+
+        One region (a string) is a contiguous slice; many regions are gathered
+        into a `region`-tagged DataArray along `position` (groupby-able, composes
+        with xarray/dask). `lazy=True` returns the dask-backed form.
+
+        Use `region` to keep working in xarray (slicing, plotting, full-resolution
+        per-region transforms like `da / da.groupby("region").mean()`, lazy
+        pipelines). For one summary number per region use `region_reduced`; for
+        raw per-region numpy to feed a custom/permutation stat test use
+        `region_blocks`.
+        """
+        if isinstance(query, str) or track is None:
+            # Single slice and the rare multi-track gather both want the
+            # tree-based path (full coords / all variables).
+            return self.tree.pbz.region(query, track=track, column=column)
+        return self._region_tagged(
+            list(query), track=track, column=column, lazy=lazy, workers=workers
+        )
+
+    def region_reduced(
+        self,
+        query: str | Sequence[str | tuple[str, int, int]],
+        *,
+        track: str,
+        reduce: str,
+        column: str | None = None,
+        lazy: bool = False,
+        workers: int | None = None,
+    ) -> xr.DataArray | xr.Dataset:
+        """Collapse each region to one value with a flox-backed `groupby` reduce.
+
+        `reduce` is any xarray groupby reduction (mean, sum, count, max, min, var,
+        std, ...). This is the optimized form of
+        `region(...).groupby("region").<reduce>()` -- flox vectorizes it in one
+        pass instead of a per-group Python loop, so tens of thousands of regions
+        are cheap, and it avoids materializing full-resolution data you collapse
+        anyway. For raw values (non-parametric / permutation tests) use
+        `region_blocks`.
+        """
+        queries = [query] if isinstance(query, str) else list(query)
+        da = self._region_tagged(
+            queries, track=track, column=column, lazy=lazy, workers=workers
+        )
+        grouped = da.groupby("region")
+        try:
+            reducer = getattr(grouped, reduce)
+        except AttributeError as e:
+            raise ValueError(f"unsupported reduce {reduce!r}") from e
+        return reducer()
+
+    def region_blocks(
+        self,
+        query: str | Sequence[str | tuple[str, int, int]],
+        *,
+        track: str,
+        column: str | None = None,
+        workers: int | None = None,
+    ) -> _gather.RegionBlocks:
+        """Return raw per-region values as numpy, aligned to input order.
+
+        Each block is the region's `(n_positions, n_columns)` array (`(n_positions,)`
+        for a scalar track); the shared column labels and a `(contig, start, end)`
+        table come back once. Eager (numpy) with zero per-region xarray overhead --
+        the path for the stat-test loop, e.g. split samples into two groups at each
+        peak and run a per-peak test. For a summary statistic use `region_reduced`;
+        to stay in xarray use `region`.
+        """
+        queries = [query] if isinstance(query, str) else list(query)
+        contigs, resolved, by_contig = self._prepare_multi(queries)
+        g = zarr.open_group(self.path, mode="r")
+        w = _gather.default_workers(self.path, workers)
+        blocks, is_2d, _ncol, _dtype = _gather.gather_blocks(
+            g, track, resolved, by_contig, contigs, workers=w
+        )
+        columns: np.ndarray | None = None
+        if is_2d:
+            labels = self.column_labels(track)
+            columns = np.asarray(labels) if labels is not None else None
+            if column is not None and columns is not None:
+                hits = np.where(columns == column)[0]
+                if hits.size == 0:
+                    raise KeyError(f"column {column!r} not in track {track!r}")
+                idx = int(hits[0])
+                blocks = [b[:, idx] for b in blocks]
+                columns = None
+        return _gather.RegionBlocks(blocks=blocks, columns=columns, regions=resolved)
+
+    def _prepare_multi(
+        self, queries: Sequence[str | tuple[str, int, int]]
+    ) -> tuple[list[str], list[tuple[str, int, int]], dict[str, list[tuple[int, int, int]]]]:
+        """Parse queries, validate contigs, resolve ends, and group by contig.
+
+        Returns `(store_contigs, resolved, by_contig)` where `resolved[i]` is the
+        clipped `(contig, start, end)` for input `i` and `by_contig[contig]` is a
+        list of `(region_id, start, end)`.
+        """
+        rqs = [
+            parse_region(q) if isinstance(q, str) else RegionQuery(*q) for q in queries
+        ]
+        contigs = self.contigs
+        cset = set(contigs)
+        lengths: dict[str, int] = {}
+        resolved: list[tuple[str, int, int]] = []
+        by_contig: dict[str, list[tuple[int, int, int]]] = {}
+        for i, rq in enumerate(rqs):
+            if rq.contig not in cset:
+                raise KeyError(f"contig {rq.contig!r} not in store")
+            if rq.contig not in lengths:
+                lengths[rq.contig] = self.contig_length(rq.contig)
+            s, e = _gather.resolve_region(rq.start, rq.end, lengths[rq.contig])
+            resolved.append((rq.contig, s, e))
+            by_contig.setdefault(rq.contig, []).append((i, s, e))
+        return contigs, resolved, by_contig
+
+    def _region_tagged(
+        self,
+        queries: list[str | tuple[str, int, int]],
+        *,
+        track: str,
+        column: str | None,
+        lazy: bool,
+        workers: int | None,
+    ) -> xr.DataArray:
+        contigs, _resolved, by_contig = self._prepare_multi(queries)
+        g = zarr.open_group(self.path, mode="r")
+        w = _gather.default_workers(self.path, workers)
+        gathered, region_ids, is_2d, _ncol, _dtype = _gather.gather_tagged(
+            g, track, by_contig, contigs, lazy=lazy, workers=w
+        )
+        coords: dict[str, Any] = {"region": ("position", region_ids)}
+        if is_2d:
+            col_dim = str(self.track_schema(track).get("column_dim") or "column")
+            labels = self.column_labels(track)
+            if labels is not None:
+                coords[col_dim] = labels
+            out = xr.DataArray(
+                gathered, dims=("position", col_dim), coords=coords, name=track
+            )
+            if column is not None:
+                out = out.sel({col_dim: column})
+            return out
+        return xr.DataArray(gathered, dims=("position",), coords=coords, name=track)
 
     # ---- writes ----
 
@@ -234,6 +377,38 @@ class PbzStore:
             )
         from ._native import import_d4 as _native_import_d4  # local import: PyO3
         _native_import_d4(
+            self.path,
+            track,
+            list(sources),
+            workers=workers,
+            chunk_size=chunk_size,
+            column_chunk_size=column_chunk_size,
+        )
+        self._invalidate()
+
+    def import_bigwig(
+        self,
+        track: str,
+        sources: Sequence[tuple[str, str | None]],
+        *,
+        workers: int | None = None,
+        chunk_size: int | None = None,
+        column_chunk_size: int | None = None,
+    ) -> None:
+        """Populate an existing track from per-sample bigWig files.
+
+        The track must already exist (call `create_track` first) and be
+        `float32`. Positions not covered by a bigWig become `NaN`; an
+        all-gap chunk is elided when the track keeps its default `NaN` fill.
+        """
+        if track not in self.tracks:
+            raise ValueError(
+                f"track {track!r} does not exist; call create_track first, e.g.:\n"
+                f"  store.create_track({track!r}, dtype='float32', "
+                f"columns=[...], column_dim='sample')"
+            )
+        from ._native import import_bigwig as _native_import_bigwig  # local import: PyO3
+        _native_import_bigwig(
             self.path,
             track,
             list(sources),

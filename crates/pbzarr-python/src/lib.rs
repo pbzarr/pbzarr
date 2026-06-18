@@ -1,4 +1,4 @@
-//! PyO3 bindings for pbzarr. Single function: `import_d4`.
+//! PyO3 bindings for pbzarr: `import_d4` and `import_bigwig`.
 
 use std::path::PathBuf;
 
@@ -8,7 +8,9 @@ use pyo3::prelude::*;
 
 use pbzarr::PbzStore;
 use pbzarr::import::Config;
-use pbzarr_readers::{D4Source, from_d4 as rs_from_d4};
+use pbzarr_readers::{
+    BigWigSource, D4Source, from_bigwig as rs_from_bigwig, from_d4 as rs_from_d4,
+};
 
 create_exception!(_native, PbzError, PyRuntimeError);
 
@@ -52,9 +54,51 @@ fn import_d4(
     })
 }
 
+/// Bulk-import one or more bigWig files into an existing track.
+///
+/// The track MUST already exist (created via `create_track`). dtype is read
+/// from the track metadata and currently MUST be `float32`. Positions not
+/// covered by a bigWig become `NaN`.
+#[pyfunction]
+#[pyo3(signature = (store_path, track, sources, workers=None, chunk_size=None, column_chunk_size=None))]
+fn import_bigwig(
+    py: Python<'_>,
+    store_path: String,
+    track: String,
+    sources: Vec<(String, Option<String>)>,
+    workers: Option<usize>,
+    chunk_size: Option<usize>,
+    column_chunk_size: Option<usize>,
+) -> PyResult<()> {
+    py.allow_threads(|| {
+        let store = PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let sources: Vec<BigWigSource> = sources
+            .into_iter()
+            .map(|(path, sample_label)| BigWigSource {
+                path: PathBuf::from(path),
+                sample_label,
+            })
+            .collect();
+        let mut config = Config::default();
+        if let Some(w) = workers {
+            config.workers = w;
+        }
+        if let Some(c) = chunk_size {
+            config.chunk_size = Some(c);
+        }
+        if let Some(c) = column_chunk_size {
+            config.column_chunk_size = Some(c);
+        }
+        rs_from_bigwig(&store, &track, &sources, config)
+            .map_err(|e| PbzError::new_err(format!("{e}")))?;
+        Ok(())
+    })
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PbzError", m.py().get_type::<PbzError>())?;
     m.add_function(wrap_pyfunction!(import_d4, m)?)?;
+    m.add_function(wrap_pyfunction!(import_bigwig, m)?)?;
     Ok(())
 }
