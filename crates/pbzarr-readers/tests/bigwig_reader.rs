@@ -39,6 +39,26 @@ fn open_reports_contigs_and_n_fields() {
 }
 
 #[test]
+fn contigs_reads_header_pairs() {
+    let dir = TempDir::new().unwrap();
+    let bw = common::write_bigwig(
+        dir.path(),
+        "a",
+        &[("chr1", 1000), ("chr2", 500)],
+        &[("chr1", 0, 1000, 5.0), ("chr2", 0, 500, 5.0)],
+        false,
+    );
+
+    // bigtools does not guarantee chrom order, so compare as a sorted set.
+    let mut contigs = pbzarr_readers::bigwig::contigs(&bw).unwrap();
+    contigs.sort();
+    assert_eq!(
+        contigs,
+        vec![("chr1".to_owned(), 1000u64), ("chr2".to_owned(), 500u64)]
+    );
+}
+
+#[test]
 fn read_into_fills_values_and_zero_gaps() {
     let dir = TempDir::new().unwrap();
     // Cover [0, 20) with 7.5; [20, 1000) is left uncovered (a gap).

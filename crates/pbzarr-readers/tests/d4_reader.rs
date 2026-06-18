@@ -77,6 +77,22 @@ fn open_reports_contigs_and_n_fields() {
 }
 
 #[test]
+fn contigs_reads_header_pairs() {
+    if !d4tools_available() {
+        eprintln!("skipping contigs_reads_header_pairs: d4tools not in PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let d4 = synth_d4(dir.path(), "a", &[("chr1", 1000), ("chr2", 500)], 5);
+
+    let contigs = pbzarr_readers::d4::contigs(&d4).unwrap();
+    assert_eq!(
+        contigs,
+        vec![("chr1".to_owned(), 1000u64), ("chr2".to_owned(), 500u64)]
+    );
+}
+
+#[test]
 fn read_into_fills_constant_buffer() {
     if !d4tools_available() {
         eprintln!("skipping read_into_fills_constant_buffer: d4tools not in PATH");

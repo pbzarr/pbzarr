@@ -9,7 +9,9 @@ Reads return plain xarray. Writes accept xarray. Materialization is explicit.
 """
 from __future__ import annotations
 
+import shutil
 import uuid
+from pathlib import Path
 from typing import Any, Mapping, Sequence, cast
 
 import numpy as np
@@ -63,6 +65,135 @@ class PbzStore:
             coordinate_space=coordinate_space,
         )
         return cls(path, chunks=chunks)
+
+    @classmethod
+    def from_d4(
+        cls,
+        path: str,
+        source: str | Path | Mapping[str, str | Path],
+        *,
+        track: str,
+        column_dim: str | None = None,
+        coordinate_space: str | None = None,
+        workers: int | None = None,
+        chunk_size: int | None = None,
+        shard_size: int | None = None,
+        column_chunk_size: int | None = None,
+        overwrite: bool = False,
+    ) -> "PbzStore":
+        """Build a store from one or more d4 files in a single call.
+
+        Contigs and lengths are read from the d4 header, so you do not supply
+        them. A single path gives a scalar (1D) `int32` track; a `{label: path}`
+        mapping gives a 2D track whose columns are the mapping keys, in order.
+        Every source must share one reference; a mismatched contig set raises.
+        """
+        return cls._from_source(
+            "d4", path, source, track=track, column_dim=column_dim,
+            coordinate_space=coordinate_space, workers=workers,
+            chunk_size=chunk_size, shard_size=shard_size,
+            column_chunk_size=column_chunk_size, overwrite=overwrite,
+        )
+
+    @classmethod
+    def from_bigwig(
+        cls,
+        path: str,
+        source: str | Path | Mapping[str, str | Path],
+        *,
+        track: str,
+        column_dim: str | None = None,
+        coordinate_space: str | None = None,
+        workers: int | None = None,
+        chunk_size: int | None = None,
+        shard_size: int | None = None,
+        column_chunk_size: int | None = None,
+        overwrite: bool = False,
+    ) -> "PbzStore":
+        """Build a store from one or more bigWig files in a single call.
+
+        Like `from_d4`, but the track is `float32` and uncovered positions read
+        as `0` (the track is created with `fill_value=0.0` so all-gap chunks are
+        elided). Contigs and lengths come from the bigWig header.
+        """
+        return cls._from_source(
+            "bigwig", path, source, track=track, column_dim=column_dim,
+            coordinate_space=coordinate_space, workers=workers,
+            chunk_size=chunk_size, shard_size=shard_size,
+            column_chunk_size=column_chunk_size, overwrite=overwrite,
+        )
+
+    @classmethod
+    def _from_source(
+        cls,
+        fmt: str,
+        path: str,
+        source: str | Path | Mapping[str, str | Path],
+        *,
+        track: str,
+        column_dim: str | None,
+        coordinate_space: str | None,
+        workers: int | None,
+        chunk_size: int | None,
+        shard_size: int | None,
+        column_chunk_size: int | None,
+        overwrite: bool,
+    ) -> "PbzStore":
+        from ._native import bigwig_contigs, d4_contigs
+
+        if fmt == "d4":
+            list_contigs, dtype, fill = d4_contigs, "int32", None
+        elif fmt == "bigwig":
+            list_contigs, dtype, fill = bigwig_contigs, "float32", 0.0
+        else:  # defensive: only the two callers above reach here
+            raise ValueError(f"unknown source format {fmt!r}")
+
+        if isinstance(source, Mapping):
+            labels: list[str] | None = [str(k) for k in source.keys()]
+            paths = [str(v) for v in source.values()]
+            if not paths:
+                raise ValueError(f"from_{fmt}: empty source mapping")
+        else:
+            labels = None
+            paths = [str(source)]
+
+        # Contigs come from the first source; every other source must agree, so
+        # a mismatched reference fails loudly instead of silently dropping data.
+        first = list_contigs(paths[0])
+        for p in paths[1:]:
+            if list_contigs(p) != first:
+                raise ValueError(
+                    f"from_{fmt}: contigs in {p!r} differ from {paths[0]!r}; "
+                    f"all sources must share one reference"
+                )
+        names = [c for c, _ in first]
+        lengths = [int(n) for _, n in first]
+
+        if overwrite:
+            shutil.rmtree(path, ignore_errors=True)
+
+        store = cls.create(
+            path, contigs=names, contig_lengths=lengths,
+            coordinate_space=coordinate_space,
+        )
+        store.create_track(
+            track,
+            dtype=dtype,
+            columns=labels,
+            column_dim=column_dim,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            column_chunk_size=column_chunk_size,
+            fill_value=fill,
+        )
+        sources: list[tuple[str, str | None]] = (
+            list(zip(paths, labels)) if labels is not None else [(paths[0], None)]
+        )
+        if fmt == "d4":
+            store.import_d4(track, sources, workers=workers)
+        else:
+            store.import_bigwig(track, sources, workers=workers)
+        return store
 
     # ---- metadata cache ----
 

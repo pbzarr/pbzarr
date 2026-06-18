@@ -16,6 +16,22 @@ use ndarray::ArrayViewMut2;
 use pbzarr::genome::{Contig, Genome};
 use pbzarr::io::{ReaderError, Result, ValueReader};
 
+/// Read a bigWig file's contig list from its header.
+///
+/// Returns `(name, length)` pairs in the file's chrom order. Used by the Python
+/// `PbzStore.from_bigwig` constructor to size a store directly from the source,
+/// so callers do not need pybigtools.
+pub fn contigs<P: AsRef<Path>>(src: P) -> Result<Vec<(String, u64)>> {
+    let path = src.as_ref();
+    let reader = BigWigRead::open_file(path)
+        .map_err(|e| ReaderError::Other(anyhow::anyhow!("open {}: {e}", path.display())))?;
+    Ok(reader
+        .chroms()
+        .iter()
+        .map(|c| (c.name.clone(), c.length as u64))
+        .collect())
+}
+
 struct Shared {
     path: PathBuf,
     genome: Genome,

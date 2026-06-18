@@ -95,10 +95,34 @@ fn import_bigwig(
     })
 }
 
+/// Read a d4 file's contig list from its header.
+///
+/// Returns `(name, length)` pairs in file order, sizing a store directly from
+/// the source without pyd4 or an external d4tools call.
+#[pyfunction]
+fn d4_contigs(py: Python<'_>, path: String) -> PyResult<Vec<(String, u64)>> {
+    py.allow_threads(|| {
+        pbzarr_readers::d4::contigs(&path).map_err(|e| PbzError::new_err(format!("{e}")))
+    })
+}
+
+/// Read a bigWig file's contig list from its header.
+///
+/// Returns `(name, length)` pairs in the file's chrom order, sizing a store
+/// directly from the source without pybigtools.
+#[pyfunction]
+fn bigwig_contigs(py: Python<'_>, path: String) -> PyResult<Vec<(String, u64)>> {
+    py.allow_threads(|| {
+        pbzarr_readers::bigwig::contigs(&path).map_err(|e| PbzError::new_err(format!("{e}")))
+    })
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PbzError", m.py().get_type::<PbzError>())?;
     m.add_function(wrap_pyfunction!(import_d4, m)?)?;
     m.add_function(wrap_pyfunction!(import_bigwig, m)?)?;
+    m.add_function(wrap_pyfunction!(d4_contigs, m)?)?;
+    m.add_function(wrap_pyfunction!(bigwig_contigs, m)?)?;
     Ok(())
 }

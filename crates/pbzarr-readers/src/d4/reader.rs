@@ -17,6 +17,28 @@ use ndarray::ArrayViewMut2;
 use pbzarr::genome::{Contig, Genome};
 use pbzarr::io::{ReaderError, Result, ValueReader};
 
+/// Read a d4 file's contig list from its header without opening the data path.
+///
+/// Returns `(name, length)` pairs in file order. Used by the Python
+/// `PbzStore.from_d4` constructor to size a store directly from the source,
+/// so callers do not need pyd4 or an external d4tools invocation.
+pub fn contigs<P: AsRef<Path>>(src: P) -> Result<Vec<(String, u64)>> {
+    let path = src.as_ref();
+    // Pin the default table generics, as the `D4Reader::inner` field does;
+    // `open_first_track` is otherwise ambiguous over its type parameters.
+    let reader: D4TrackReader =
+        D4TrackReader::open_first_track(path).map_err(|source| ReaderError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(reader
+        .header()
+        .chrom_list()
+        .iter()
+        .map(|c| (c.name.clone(), c.size as u64))
+        .collect())
+}
+
 struct Shared {
     path: PathBuf,
     genome: Genome,
