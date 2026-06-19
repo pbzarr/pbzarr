@@ -1,4 +1,3 @@
-"""Blosc(zstd-5, byte-shuffle) compression — matches the Rust pbzarr default."""
 from __future__ import annotations
 
 

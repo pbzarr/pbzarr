@@ -1,12 +1,3 @@
-//! Head-to-head microbench: `d4::D4TrackReader` (mmap-backed via the
-//! `local_reader` feature) vs. `d4::ssio::D4TrackReader` (streaming, what
-//! pbzarr used before commit 28aeced).
-//!
-//! Pure read into a `Vec<u32>` — no pbzarr pipeline, no zarr writes. Each
-//! reader is exercised by scanning the entire genome in `chunk_size`-sized
-//! requests. Reports wall time and per-iteration spread across `iters` runs.
-//!
-//! Usage:
 //!   cargo run --release --example bench_d4_readers -- <path.d4> [--chunk-size N] [--iters K]
 
 use std::fs::File;

@@ -37,7 +37,7 @@ pub struct Config {
     pub workers: usize,
     /// Override position chunk size. Defaults to `track.chunk_size()`.
     pub chunk_size: Option<usize>,
-    /// Reserved for per-column chunking; unused today.
+    /// Reserved for per-column chunking.
     pub column_chunk_size: Option<usize>,
     /// Optional progress observer.
     pub progress: Option<Arc<dyn ProgressSink>>,

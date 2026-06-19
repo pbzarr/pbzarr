@@ -5,34 +5,19 @@
 
 # pbzarr
 
-pbzarr stores per-base genomic data (read depths, methylation, boolean masks, and other per-position values) in Zarr v3. It is a layout and metadata convention on top of Zarr, not a new binary format: array storage, chunking, and compression are handled by the underlying Zarr library.
+pbzarr stores per-base genomic data (read depths, methylation, boolean masks, and other per-position values) in Zarr v3. It builds on the recent work in the Python array ecosystem: [Zarr](https://zarr.dev), [Xarray](https://xarray.dev), and [Dask](https://www.dask.org). pbzarr has a Rust and Python API for reading and writing pbz stores, and since a pbz store is just a Zarr store, anything that reads Zarr can read pbzarr.
 
-The reason to use Zarr this way is the cohort case. One-file-per-sample formats like D4 and bigWig store each sample on its own, so they do not compress across samples and any cross-sample computation becomes a loop over files. pbzarr keeps many samples in a single chunked `(position, sample)` array, so samples compress together and per-position math across a cohort is one vectorized read. Single-sample stores are still first-class and read back as xarray.
+A store holds one or more tracks. A track is usually a single quantitative signal or metric measured across the whole genome, one value per base. pbzarr keeps that idea but generalizes it: a track is an N-dimensional array indexed by genomic position along its first axis. A 1D track is the familiar one-value-per-base signal; add a second axis and you store many values per base, which is what makes it natural to keep multiple metrics or a whole cohort of samples in a single track.
 
-This repo provides:
+A few things you get from this:
 
-- **`pbzarr` (Rust crate):** store layout, metadata, and region I/O. Delegates array storage and compression to [`zarrs`](https://crates.io/crates/zarrs). This is the only crate published to crates.io.
-- **`pbzarr-readers` (Rust crate, unpublished):** import readers for d4 and bigWig. Kept separate so the core crate carries no git dependencies and stays publishable. The readers are reachable from the Python wheel or when building from this repo, not from the crates.io `pbzarr` crate.
-- **`pbzarr` (Python wheel):** a `PbzStore` class over [`zarr-python`](https://github.com/zarr-developers/zarr-python) for creating stores and tracks, PyO3 bindings for d4 and bigWig import, and an xarray-based read path.
+- Many values per base live in one array, so Zarr compresses the redundancy across that second axis, not just the runs within a single column.
+- Analysis stays vectorized. Sums, means, and masks run across the whole array at once instead of looping over separate files in Python.
+- Xarray and Dask work directly on the store, so there's no separate conversion step before you can label, slice, or parallelize.
 
-Both libraries write the same `.pbz` layout, and either can read what the other writes.
+pbzarr can be thought of as the spiritual successor of [d4](https://github.com/38/d4-format/tree/master). d4 improved on bigWig with compression, better throughput, multi-track files, and a cleaner API. pbzarr pushes on all of those, mostly by leaning on the work behind Zarr, Xarray, and Dask rather than reinventing it.
 
-## Install (Rust)
-
-```toml
-[dependencies]
-pbzarr = "0.2"
-```
-
-## Install (Python)
-
-```bash
-pip install pbzarr            # once published on PyPI
-# or from source, from this repo:
-pixi run install-wheel
-```
-
-The Python wheel pulls in `zarr>=3`, `xarray`, `numpy>=2`, and `dask`.
+For now pbzarr imports from existing formats (d4 and bigWig) rather than generating signal itself, but it does so fast, and once the data is in a pbz store the analysis speedups and disk savings make the conversion worth it. This is all still in active development, so expect rough edges and changes.
 
 ## Quickstart (Python)
 
@@ -99,59 +84,6 @@ dt.pbz.region("chr1:1000-2000", track="depth")
 The `.pbz` accessor on `xr.DataTree` is registered when you `import pbzarr`. Regions use 0-based, half-open coordinates, so `chr1:1000-2000` is `[1000, 2000)`.
 
 > **Note:** Python `PbzStore.create` / `create_track` consolidate metadata after each call. Stores written by the Rust crate do not consolidate yet, so `pbzarr.open(...)` emits a benign `RuntimeWarning` for those; run `zarr.consolidate_metadata(path)` once to silence it.
-
-## Quickstart (Rust)
-
-```rust
-use ndarray::Array2;
-use pbzarr::io::Dtype;
-use pbzarr::import::Config;
-use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
-// Import readers live in the unpublished pbzarr-readers crate (it carries a git
-// dependency on d4); depend on this repo by path or git to use them.
-use pbzarr_readers::d4::{from_d4, D4Source};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let genome = Genome::new(vec![
-        Contig { name: "chr1".into(), length: 248_956_422 },
-        Contig { name: "chr2".into(), length: 242_193_529 },
-    ])?;
-    let mut store = PbzStore::create("out.pbz", genome, Some("GRCh38".into()))?;
-
-    // 1D scalar track
-    store.create_track("mask", TrackConfig::new(Dtype::Bool))?;
-
-    // 2D cohort track; d4 import requires int32
-    store.create_track(
-        "depth",
-        TrackConfig::new(Dtype::I32)
-            .columns(vec!["A".into(), "B".into(), "C".into()])
-            .column_dim("sample"),
-    )?;
-
-    // Import from d4
-    from_d4(
-        &store,
-        "depth",
-        &[
-            D4Source { path: "/data/A.d4".into(), sample_label: Some("A".into()) },
-            D4Source { path: "/data/B.d4".into(), sample_label: Some("B".into()) },
-            D4Source { path: "/data/C.d4".into(), sample_label: Some("C".into()) },
-        ],
-        Config::default(),
-    )?;
-
-    // Read a region
-    let chr1 = store.genome().id("chr1").unwrap();
-    let region = Region { contig: chr1, start: 1_000, end: 2_000 };
-    let data = store.track("depth").unwrap().read_region::<i32>(&region)?;
-    let arr2: Array2<i32> = data.into_dimensionality::<ndarray::Ix2>()?;
-    let _ = arr2;
-    Ok(())
-}
-```
-
-bigWig import is the mirror image: `pbzarr_readers::bigwig::{from_bigwig, BigWigSource}` into a `float32` track.
 
 ## Format at a glance
 

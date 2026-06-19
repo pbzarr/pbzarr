@@ -1,7 +1,3 @@
-//! Throughput harness for the import pipeline. Uses an in-memory `ValueReader`
-//! so the d4 read path is excluded; what's measured is everything from the
-//! pipeline's task dispatch through blosc/zstd encoding and zarr chunk writes.
-//!
 //! Usage:
 //!   cargo build --release --example profile_import
 //!   ./target/release/examples/profile_import \
