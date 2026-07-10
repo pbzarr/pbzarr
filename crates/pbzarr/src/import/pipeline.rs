@@ -2,13 +2,10 @@
 //! scoped worker pool; each worker forks its readers, then reads + writes one
 //! task region directly.
 //!
-//! The task region is sized to the track's on-disk write unit so each region
-//! is encoded exactly once: a sharded track's write unit is the whole shard
-//! (zarrs has no inner-chunk write API; a sub-shard write read-modify-writes
-//! the entire shard), so we partition by `shard_size`; an unsharded track's
-//! write unit is the chunk, so we partition by `chunk_size`. Either way tasks
-//! cover disjoint position ranges, hence disjoint shard/chunk files, so zarrs'
-//! concurrent-write safety holds.
+//! The task region is sized to the track's on-disk chunk (the flat layout is
+//! chunked-only; sharding is deferred), so each region is encoded exactly
+//! once. Tasks cover disjoint position ranges, hence disjoint chunk files, so
+//! zarrs' concurrent-write safety holds.
 
 use std::mem;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -71,6 +68,16 @@ struct State {
     bytes_written: AtomicU64,
     tasks_completed: AtomicUsize,
     first_err: Mutex<Option<PbzError>>,
+    /// Serializes the write half of each task. In the flat layout a
+    /// contig's chunk-local task boundaries aren't guaranteed to align with
+    /// the track's physical chunk grid (contig starts are rarely chunk-size
+    /// multiples), so two tasks touching disjoint position ranges can still
+    /// share one physical chunk. zarrs' sub-chunk write is a read-modify-
+    /// write of the whole chunk, and two concurrent RMWs on the same chunk
+    /// lose whichever write lands first. Serializing writes trades away
+    /// write-side parallelism for correctness until the task partitioner is
+    /// redesigned to align to physical chunk boundaries (deferred).
+    write_lock: Mutex<()>,
 }
 
 impl State {
@@ -130,14 +137,13 @@ where
         )));
     }
 
-    // Partition by the on-disk write unit: a shard for sharded tracks, a chunk
-    // otherwise. A sharded region smaller than its shard would force zarrs to
-    // read-modify-write the whole shard once per inner chunk (∝ chunks/shard);
-    // a full-shard region hits zarrs' single-encode fast path instead.
-    let step = match track.shard_size() {
-        Some(ss) => (ss as u64).max(1),
-        None => (config.chunk_size.unwrap_or_else(|| track.chunk_size()) as u64).max(1),
-    };
+    // Partition by the on-disk chunk so each task hits zarrs' single-encode
+    // fast path.
+    let step = match config.chunk_size {
+        Some(cs) => cs as u64,
+        None => track.chunk_size()? as u64,
+    }
+    .max(1);
     let genome = Arc::clone(track.genome());
 
     let mut tasks: Vec<ChunkTask> = Vec::new();
@@ -171,6 +177,7 @@ where
         bytes_written: AtomicU64::new(0),
         tasks_completed: AtomicUsize::new(0),
         first_err: Mutex::new(None),
+        write_lock: Mutex::new(()),
     });
 
     thread::scope(|scope| {
@@ -281,12 +288,17 @@ where
     }
 
     // Collapse the column axis for scalar tracks; cohort tracks keep both.
+    // The write itself is serialized (see `State::write_lock`): flat-layout
+    // contig starts aren't guaranteed chunk-aligned, so disjoint tasks can
+    // still target the same physical chunk.
+    let _write_guard = state.write_lock.lock().expect("write lock poisoned");
     if track.rank() == 1 {
         let rank1 = buf.remove_axis(Axis(1)).into_dyn();
         track.write_region::<T>(&region, rank1)?;
     } else {
         track.write_region::<T>(&region, buf.into_dyn())?;
     }
+    drop(_write_guard);
 
     let chunk_bytes = (chunk_len * n_readers * mem::size_of::<T>()) as u64;
     state

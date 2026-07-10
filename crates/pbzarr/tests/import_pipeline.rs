@@ -51,10 +51,11 @@ fn pipeline_writes_constants_into_cohort_track() {
     }])
     .unwrap();
 
-    let mut store = PbzStore::create(&path, genome.clone(), None).unwrap();
+    let mut store = PbzStore::create(&path).unwrap();
     store
         .create_track(
             "depth",
+            genome.clone(),
             TrackConfig::new(Dtype::U32)
                 .columns(vec!["A".into(), "B".into()])
                 .column_dim("sample"),
@@ -78,7 +79,7 @@ fn pipeline_writes_constants_into_cohort_track() {
     assert_eq!(report.contigs_written, 1);
 
     let region = Region {
-        contig: store.genome().id("chr1").unwrap(),
+        contig: genome.id("chr1").unwrap(),
         start: 0,
         end: 5_000,
     };
@@ -104,9 +105,9 @@ fn pipeline_writes_constants_into_scalar_track() {
     }])
     .unwrap();
 
-    let mut store = PbzStore::create(&path, genome.clone(), None).unwrap();
+    let mut store = PbzStore::create(&path).unwrap();
     store
-        .create_track("mask", TrackConfig::new(Dtype::U32))
+        .create_track("mask", genome.clone(), TrackConfig::new(Dtype::U32))
         .unwrap();
 
     let readers = vec![ConstReader {
@@ -119,7 +120,7 @@ fn pipeline_writes_constants_into_scalar_track() {
     assert!(report.bytes_written > 0);
 
     let region = Region {
-        contig: store.genome().id("chr1").unwrap(),
+        contig: genome.id("chr1").unwrap(),
         start: 0,
         end: 3_000,
     };
@@ -148,10 +149,11 @@ fn pipeline_spans_multiple_contigs() {
     ])
     .unwrap();
 
-    let mut store = PbzStore::create(&path, genome.clone(), None).unwrap();
+    let mut store = PbzStore::create(&path).unwrap();
     store
         .create_track(
             "depth",
+            genome.clone(),
             TrackConfig::new(Dtype::U32)
                 .columns(vec!["S".into()])
                 .column_dim("sample"),
@@ -168,7 +170,7 @@ fn pipeline_spans_multiple_contigs() {
 
     for (name, len) in [("chr1", 2_000usize), ("chr2", 1_500)] {
         let region = Region {
-            contig: store.genome().id(name).unwrap(),
+            contig: genome.id(name).unwrap(),
             start: 0,
             end: len as u64,
         };

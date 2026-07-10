@@ -50,6 +50,38 @@ impl Dtype {
     }
 }
 
+impl Dtype {
+    /// Inverse of the store-side `dtype_to_zarrs`: map an opened array's
+    /// zarrs `DataType` back to a `Dtype` tag. Errors on any dtype the
+    /// library doesn't support (custom extension types, complex, etc.).
+    pub fn from_zarrs(dt: &zarrs::array::DataType) -> Result<Self, crate::error::PbzError> {
+        use zarrs::array::data_type;
+        if *dt == data_type::uint8() {
+            Ok(Dtype::U8)
+        } else if *dt == data_type::uint16() {
+            Ok(Dtype::U16)
+        } else if *dt == data_type::uint32() {
+            Ok(Dtype::U32)
+        } else if *dt == data_type::int8() {
+            Ok(Dtype::I8)
+        } else if *dt == data_type::int16() {
+            Ok(Dtype::I16)
+        } else if *dt == data_type::int32() {
+            Ok(Dtype::I32)
+        } else if *dt == data_type::float32() {
+            Ok(Dtype::F32)
+        } else if *dt == data_type::float64() {
+            Ok(Dtype::F64)
+        } else if *dt == data_type::bool() {
+            Ok(Dtype::Bool)
+        } else {
+            Err(crate::error::PbzError::InvalidDtype {
+                dtype: dt.to_string(),
+            })
+        }
+    }
+}
+
 impl std::fmt::Display for Dtype {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())

@@ -5,12 +5,12 @@ use std::sync::{Arc, RwLock};
 
 use hashbrown::HashMap;
 use ndarray::Array1;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use zarrs::array::Array;
 use zarrs::array::FillValue;
 use zarrs::array::data_type;
 use zarrs::filesystem::FilesystemStore;
-use zarrs::storage::ReadableWritableListableStorage;
+use zarrs::storage::{ListableStorageTraits, ReadableWritableListableStorage, StorePrefix};
 
 use zarrs::array::codec::api::BytesToBytesCodecTraits;
 use zarrs::array::codec::{BloscCodec, BloscCompressionLevel, BloscCompressor, BloscShuffleMode};
@@ -18,228 +18,130 @@ use zarrs::array::codec::{BloscCodec, BloscCompressionLevel, BloscCompressor, Bl
 use crate::error::PbzError;
 use crate::genome::{Contig, Genome};
 use crate::io::Dtype;
-use crate::track::{Track, TrackConfig, TrackMetadata};
-use crate::{PBZ_FORMAT_VERSION, Result};
+use crate::track::{PerbaseTrackAttrs, Track, TrackConfig};
+use crate::{PERBASE_CONVENTION_NAME, PERBASE_CONVENTION_UUID, Result};
 
-/// A handle to an open PBZ store.
+/// A handle to an open PBZ store: a Zarr group containing track groups.
 pub struct PbzStore {
-    /// Concrete filesystem store for `Array::open` (needs the concrete type).
-    pub(crate) fs: Arc<FilesystemStore>,
-    pub(crate) genome: Arc<Genome>,
-    pub(crate) coordinate_space: Option<String>,
-    pub(crate) tracks: Map<String, Value>,
+    pub(crate) storage: ReadableWritableListableStorage,
     pub(crate) track_handles: HashMap<String, Track>,
 }
 
 impl PbzStore {
-    /// Create a new PBZ store at `path`.
-    ///
-    /// Writes the root `zarr.json` with `perbase_zarr` metadata, then creates
-    /// the `contigs` (string) and `contig_lengths` (int64) 1-D arrays.
-    pub fn create(
-        path: impl AsRef<Path>,
-        genome: Genome,
-        coordinate_space: Option<String>,
-    ) -> Result<Self> {
+    /// Create a new, empty PBZ store at `path`: a Zarr group whose root
+    /// `zarr.json` carries only the `zarr_conventions` marker. Tracks are
+    /// added with `create_track`; the store holds no genome of its own.
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        let fs = FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?;
+        let storage: ReadableWritableListableStorage = Arc::new(fs);
+        Self::create_with_storage(storage)
+    }
 
-        let fs = Arc::new(FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?);
-        let storage: ReadableWritableListableStorage = fs.clone();
-
+    /// Create a new, empty PBZ store over an arbitrary sync zarrs storage
+    /// backend (filesystem, in-memory, or a future async-to-sync adapter).
+    pub fn create_with_storage(storage: ReadableWritableListableStorage) -> Result<Self> {
         let mut root = zarrs::group::GroupBuilder::new()
             .build(storage.clone(), "/")
             .map_err(|e| PbzError::Store(e.to_string()))?;
-        let attrs = root.attributes_mut();
-
-        let root_meta = if let Some(ref cs) = coordinate_space {
-            json!({
-                "version": PBZ_FORMAT_VERSION,
-                "coordinate_space": cs,
-                "tracks": {}
-            })
-        } else {
-            json!({
-                "version": PBZ_FORMAT_VERSION,
-                "tracks": {}
-            })
-        };
-        attrs.insert("perbase_zarr".to_owned(), root_meta);
+        root.attributes_mut().insert(
+            "zarr_conventions".to_owned(),
+            json!([{
+                "uuid": PERBASE_CONVENTION_UUID,
+                "name": PERBASE_CONVENTION_NAME,
+            }]),
+        );
         root.store_metadata()
             .map_err(|e| PbzError::Store(e.to_string()))?;
 
-        let n = genome.len() as u64;
-
-        let contigs_array = zarrs::array::ArrayBuilder::new(
-            vec![n],
-            vec![n.max(1)], // chunk = whole array; avoid zero-length chunk
-            data_type::string(),
-            "",
-        )
-        .dimension_names(["contigs"].into())
-        .build(storage.clone(), "/contigs")
-        .map_err(|e| PbzError::Store(e.to_string()))?;
-        contigs_array
-            .store_metadata()
-            .map_err(|e| PbzError::Store(e.to_string()))?;
-        if n > 0 {
-            let names: Vec<String> = genome.contigs().iter().map(|c| c.name.clone()).collect();
-            let names_array = Array1::from(names).into_dyn();
-            contigs_array
-                .store_chunk(&[0], names_array)
-                .map_err(|e| PbzError::Store(e.to_string()))?;
-        }
-
-        let lengths_array =
-            zarrs::array::ArrayBuilder::new(vec![n], vec![n.max(1)], data_type::int64(), 0i64)
-                .dimension_names(["contigs"].into())
-                .build(storage.clone(), "/contig_lengths")
-                .map_err(|e| PbzError::Store(e.to_string()))?;
-        lengths_array
-            .store_metadata()
-            .map_err(|e| PbzError::Store(e.to_string()))?;
-        if n > 0 {
-            let lengths: Vec<i64> = genome.contigs().iter().map(|c| c.length as i64).collect();
-            let lengths_array_nd = Array1::from(lengths).into_dyn();
-            lengths_array
-                .store_chunk(&[0], lengths_array_nd)
-                .map_err(|e| PbzError::Store(e.to_string()))?;
-        }
-
-        // Create per-contig groups upfront so `create_track` only has to add
-        // arrays. Avoids rewriting empty group metadata on every track add.
-        for contig in genome.contigs() {
-            let group_path = format!("/{}", contig.name);
-            zarrs::group::GroupBuilder::new()
-                .build(fs.clone(), &group_path)
-                .map_err(|e| PbzError::Store(e.to_string()))?
-                .store_metadata()
-                .map_err(|e| PbzError::Store(e.to_string()))?;
-        }
-
         Ok(Self {
-            fs,
-            genome: Arc::new(genome),
-            coordinate_space,
-            tracks: Map::new(),
+            storage,
             track_handles: HashMap::new(),
         })
     }
 
-    /// Open an existing PBZ store at `path` for reading.
-    ///
-    /// Reads root `perbase_zarr` metadata, then re-hydrates the `Genome` from
-    /// the on-disk `contigs` and `contig_lengths` arrays.
+    /// Open an existing PBZ store: enumerate child groups and keep those whose
+    /// attributes declare the `perbase` convention, rebuilding each track's
+    /// `Genome` from its `contigs` and `offsets` arrays.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        let fs = FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?;
+        let storage: ReadableWritableListableStorage = Arc::new(fs);
+        Self::open_with_storage(storage)
+    }
 
-        // Keep the concrete FilesystemStore so Array::open gets a concrete storage
-        // type that satisfies ReadableStorageTraits + 'static without trait-object upcasting.
-        let fs = Arc::new(FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?);
-
-        let root = zarrs::group::Group::open(fs.clone(), "/")
+    /// Open an existing PBZ store over an arbitrary sync zarrs storage
+    /// backend (filesystem, in-memory, or a future async-to-sync adapter).
+    pub fn open_with_storage(storage: ReadableWritableListableStorage) -> Result<Self> {
+        // Guard: the root must carry the zarr_conventions perbase marker.
+        let root = zarrs::group::Group::open(storage.clone(), "/")
             .map_err(|e| PbzError::Store(e.to_string()))?;
-        let attrs = root.attributes();
-        let pbz_ns = attrs
-            .get("perbase_zarr")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| {
-                PbzError::Metadata("missing or invalid 'perbase_zarr' root attribute".into())
-            })?;
-
-        let coordinate_space = pbz_ns
-            .get("coordinate_space")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_owned());
-
-        let tracks: Map<String, Value> = pbz_ns
-            .get("tracks")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
-
-        let contigs_arr =
-            Array::open(fs.clone(), "/contigs").map_err(|e| PbzError::Store(e.to_string()))?;
-        let n = contigs_arr.shape()[0] as usize;
-        let names: Vec<String> = if n == 0 {
-            Vec::new()
-        } else {
-            let nd: ndarray::ArrayD<String> = contigs_arr
-                .retrieve_chunk::<ndarray::ArrayD<String>>(&[0])
-                .map_err(|e| PbzError::Store(e.to_string()))?;
-            nd.into_raw_vec_and_offset().0
-        };
-
-        let lengths_arr = Array::open(fs.clone(), "/contig_lengths")
-            .map_err(|e| PbzError::Store(e.to_string()))?;
-        let lengths: Vec<i64> = if n == 0 {
-            Vec::new()
-        } else {
-            let nd: ndarray::ArrayD<i64> = lengths_arr
-                .retrieve_chunk::<ndarray::ArrayD<i64>>(&[0])
-                .map_err(|e| PbzError::Store(e.to_string()))?;
-            nd.into_raw_vec_and_offset().0
-        };
-
-        if lengths.len() != names.len() {
-            return Err(PbzError::Metadata(format!(
-                "contig name/length mismatch: {} names but {} lengths",
-                names.len(),
-                lengths.len()
-            )));
+        if !PerbaseTrackAttrs::conforms(root.attributes()) {
+            return Err(PbzError::Metadata(
+                "not a pbz 0.4 store (missing zarr_conventions perbase marker); regenerate".into(),
+            ));
         }
 
-        let contigs: Vec<Contig> = names
-            .into_iter()
-            .zip(lengths)
-            .map(|(name, length)| Contig {
-                name,
-                length: length as u64,
-            })
-            .collect();
-
-        let genome = Arc::new(Genome::new(contigs)?);
+        let listing = storage
+            .list_dir(&StorePrefix::root())
+            .map_err(|e| PbzError::Store(e.to_string()))?;
 
         let mut track_handles: HashMap<String, Track> = HashMap::new();
-        for (name, val) in &tracks {
-            let metadata: TrackMetadata = serde_json::from_value(val.clone()).map_err(|e| {
-                PbzError::Metadata(format!("invalid track metadata for '{name}': {e}"))
-            })?;
-            let dtype = Dtype::from_str(&metadata.dtype)?;
+        for prefix in listing.prefixes() {
+            let name = prefix.as_str().trim_end_matches('/').to_owned();
+            if name.is_empty() {
+                continue;
+            }
+            let group = match zarrs::group::Group::open(storage.clone(), &format!("/{name}")) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            if !PerbaseTrackAttrs::conforms(group.attributes()) {
+                continue;
+            }
+            let attrs: PerbaseTrackAttrs =
+                serde_json::from_value(Value::Object(group.attributes().clone()))
+                    .map_err(|e| PbzError::Metadata(format!("track '{name}': {e}")))?;
+
+            let values = Array::open(storage.clone(), &format!("/{name}/values"))
+                .map_err(|e| PbzError::Store(e.to_string()))?;
+            let dtype = Dtype::from_zarrs(values.data_type())?;
+            let rank = values.shape().len();
+            let column_dim = if rank == 2 {
+                values
+                    .dimension_names()
+                    .as_ref()
+                    .and_then(|d| d.get(1))
+                    .and_then(|n| n.clone())
+            } else {
+                None
+            };
+
+            let genome = rehydrate_genome(&storage, &name, attrs.genome_name.as_deref())?;
+
             track_handles.insert(
                 name.clone(),
                 Track {
                     name: name.clone(),
-                    metadata,
+                    genome: Arc::new(genome),
                     dtype,
-                    fs: Arc::clone(&fs),
-                    genome: Arc::clone(&genome),
-                    arrays: RwLock::new(HashMap::new()),
+                    rank,
+                    column_dim,
+                    storage: Arc::clone(&storage),
+                    values: RwLock::new(Some(Arc::new(values))),
                 },
             );
         }
 
         Ok(Self {
-            fs,
-            genome,
-            coordinate_space,
-            tracks,
+            storage,
             track_handles,
         })
     }
 
-    /// The genome (ordered contig list) for this store.
-    pub fn genome(&self) -> &Genome {
-        &self.genome
-    }
-
-    /// The coordinate space label (e.g. `"GRCh38"`), if set.
-    pub fn coordinate_space(&self) -> Option<&str> {
-        self.coordinate_space.as_deref()
-    }
-
     /// Iterate over the names of all tracks in this store.
     pub fn track_names(&self) -> impl Iterator<Item = &str> {
-        self.tracks.keys().map(|s| s.as_str())
+        self.track_handles.keys().map(|s| s.as_str())
     }
 
     /// Return a reference to the named track, or `None` if it doesn't exist.
@@ -247,138 +149,153 @@ impl PbzStore {
         self.track_handles.get(name)
     }
 
-    /// Create a new track in this store.
-    ///
-    /// Writes a Zarr array under `/<contig>/<track_name>` for every contig in
-    /// the genome, then updates the root `perbase_zarr.tracks` attribute.
-    ///
-    /// Returns an error if the track name already exists.
-    pub fn create_track(&mut self, name: &str, config: TrackConfig) -> Result<&Track> {
-        if self.tracks.contains_key(name) {
+    /// The genome of a named track (for resolving regions against it).
+    pub fn genome_for(&self, track: &str) -> Option<&Genome> {
+        self.track_handles.get(track).map(|t| t.genome.as_ref())
+    }
+
+    /// Create a new flat track group `/<name>/` sized to `genome`'s total
+    /// length, with `values`, `offsets`, `contigs`, and (cohort) column-label
+    /// arrays. The `perbase:` interpretation block is written to the group
+    /// `zarr.json` last, so a reader recognizes the track only once it is
+    /// fully created.
+    pub fn create_track(
+        &mut self,
+        name: &str,
+        genome: Genome,
+        config: TrackConfig,
+    ) -> Result<&Track> {
+        if self.track_handles.contains_key(name) {
             return Err(PbzError::Metadata(format!("track '{name}' already exists")));
         }
 
-        let col_dim: Option<String> = if config.columns.is_some() {
-            Some(
-                config
-                    .column_dim
-                    .clone()
-                    .unwrap_or_else(|| "column".to_owned()),
-            )
-        } else {
-            None
-        };
-        let columns: Option<&[String]> = config.columns.as_deref();
-        let n_cols = columns.map(|c| c.len()).unwrap_or(0) as u64;
-
+        let total_len: u64 = genome.contigs().iter().map(|c| c.length).sum();
         let zarrs_dt = dtype_to_zarrs(config.dtype);
         let default_fill = default_fill_value(config.dtype);
         let data_codecs = default_data_codecs(config.dtype)?;
+        let chunk_pos = (config.chunk_size as u64).min(total_len.max(1)).max(1);
 
-        // Contig groups are created in `PbzStore::create`; we only add arrays here.
-        for contig in self.genome.contigs() {
-            let contig_len = contig.length;
-            let chunk_pos = (config.chunk_size as u64).min(contig_len).max(1);
-            let data_path = format!("/{}/{}", contig.name, name);
+        // The track group.
+        zarrs::group::GroupBuilder::new()
+            .build(self.storage.clone(), &format!("/{name}"))
+            .map_err(|e| PbzError::Store(e.to_string()))?
+            .store_metadata()
+            .map_err(|e| PbzError::Store(e.to_string()))?;
 
-            if let (Some(col_dim_name), Some(cols)) = (col_dim.as_deref(), columns) {
-                let col_chunk_size = config
+        let (rank, col_dim): (usize, Option<String>) = match config.columns.as_deref() {
+            Some(cols) => {
+                let n_cols = cols.len() as u64;
+                let col_dim_name = config
+                    .column_dim
+                    .clone()
+                    .unwrap_or_else(|| "column".to_owned());
+                let col_chunk = config
                     .column_chunk_size
                     .map(|s| s as u64)
                     .unwrap_or(n_cols)
                     .min(n_cols)
                     .max(1);
-
-                // With sharding: shard shape = [shard_size, shard_col_size], inner chunk = [chunk_pos, col_chunk_size].
-                // Without sharding: chunk shape = [chunk_pos, col_chunk_size].
-                let (outer_pos, outer_col) = match (config.shard_size, config.shard_column_size) {
-                    (Some(ss), scs) => {
-                        let sp = (ss as u64).min(contig_len).max(1);
-                        let sc = scs.map(|s| (s as u64).min(n_cols).max(1)).unwrap_or(n_cols);
-                        (sp, sc)
-                    }
-                    (None, _) => (chunk_pos, col_chunk_size),
-                };
-
                 let mut builder = zarrs::array::ArrayBuilder::new(
-                    vec![contig_len, n_cols],
-                    vec![outer_pos, outer_col],
+                    vec![total_len, n_cols],
+                    vec![chunk_pos, col_chunk],
                     zarrs_dt.clone(),
                     default_fill.clone(),
                 );
                 builder
-                    .dimension_names(["position", col_dim_name].into())
+                    .dimension_names(["position", col_dim_name.as_str()].into())
                     .bytes_to_bytes_codecs(data_codecs.clone());
-                if config.shard_size.is_some() {
-                    builder.subchunk_shape(vec![chunk_pos, col_chunk_size]);
-                }
-                let arr = builder
-                    .build(self.fs.clone(), &data_path)
-                    .map_err(|e| PbzError::Store(e.to_string()))?;
-                arr.store_metadata()
+                builder
+                    .build(self.storage.clone(), &format!("/{name}/values"))
+                    .map_err(|e| PbzError::Store(e.to_string()))?
+                    .store_metadata()
                     .map_err(|e| PbzError::Store(e.to_string()))?;
 
-                let coord_path = format!("/{}/{}", contig.name, col_dim_name);
-                let coord_arr = zarrs::array::ArrayBuilder::new(
+                // Column-label coord array, named after the column dim.
+                let coord = zarrs::array::ArrayBuilder::new(
                     vec![n_cols],
                     vec![n_cols.max(1)],
                     data_type::string(),
                     "",
                 )
-                .dimension_names([col_dim_name].into())
-                .build(self.fs.clone(), &coord_path)
+                .dimension_names([col_dim_name.as_str()].into())
+                .build(self.storage.clone(), &format!("/{name}/{col_dim_name}"))
                 .map_err(|e| PbzError::Store(e.to_string()))?;
-                coord_arr
+                coord
                     .store_metadata()
                     .map_err(|e| PbzError::Store(e.to_string()))?;
                 if n_cols > 0 {
-                    let labels = Array1::from(cols.to_vec()).into_dyn();
-                    coord_arr
-                        .store_chunk(&[0], labels)
+                    coord
+                        .store_chunk(&[0], Array1::from(cols.to_vec()).into_dyn())
                         .map_err(|e| PbzError::Store(e.to_string()))?;
                 }
-            } else {
-                // With sharding: chunk shape passed to builder is shard shape; subchunk_shape is inner chunk.
-                let outer_pos = if let Some(ss) = config.shard_size {
-                    (ss as u64).min(contig_len).max(1)
-                } else {
-                    chunk_pos
-                };
-
+                (2, Some(col_dim_name))
+            }
+            None => {
                 let mut builder = zarrs::array::ArrayBuilder::new(
-                    vec![contig_len],
-                    vec![outer_pos],
+                    vec![total_len],
+                    vec![chunk_pos],
                     zarrs_dt.clone(),
                     default_fill.clone(),
                 );
                 builder
                     .dimension_names(["position"].into())
                     .bytes_to_bytes_codecs(data_codecs.clone());
-                if config.shard_size.is_some() {
-                    builder.subchunk_shape(vec![chunk_pos]);
-                }
-                let arr = builder
-                    .build(self.fs.clone(), &data_path)
+                builder
+                    .build(self.storage.clone(), &format!("/{name}/values"))
+                    .map_err(|e| PbzError::Store(e.to_string()))?
+                    .store_metadata()
                     .map_err(|e| PbzError::Store(e.to_string()))?;
-                arr.store_metadata()
-                    .map_err(|e| PbzError::Store(e.to_string()))?;
+                (1, None)
             }
+        };
+
+        // offsets (int64[k+1]) and contigs (vlen-utf8[k]).
+        let offsets = genome.offsets();
+        let k = genome.len() as u64;
+        let off_arr = zarrs::array::ArrayBuilder::new(
+            vec![k + 1],
+            vec![(k + 1).max(1)],
+            data_type::int64(),
+            0i64,
+        )
+        .dimension_names(["contig_boundary"].into())
+        .build(self.storage.clone(), &format!("/{name}/offsets"))
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+        off_arr
+            .store_metadata()
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+        off_arr
+            .store_chunk(&[0], Array1::from(offsets).into_dyn())
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+
+        let contigs_arr =
+            zarrs::array::ArrayBuilder::new(vec![k], vec![k.max(1)], data_type::string(), "")
+                .dimension_names(["contig"].into())
+                .build(self.storage.clone(), &format!("/{name}/contigs"))
+                .map_err(|e| PbzError::Store(e.to_string()))?;
+        contigs_arr
+            .store_metadata()
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+        if k > 0 {
+            let names: Vec<String> = genome.contigs().iter().map(|c| c.name.clone()).collect();
+            contigs_arr
+                .store_chunk(&[0], Array1::from(names).into_dyn())
+                .map_err(|e| PbzError::Store(e.to_string()))?;
         }
 
-        let metadata = track_metadata_from_config(&config);
-        let meta_val =
-            serde_json::to_value(&metadata).map_err(|e| PbzError::Metadata(e.to_string()))?;
-        self.tracks.insert(name.to_owned(), meta_val);
-
-        let mut root = zarrs::group::Group::open(self.fs.clone(), "/")
+        // Completion marker: write the perbase block on the group LAST.
+        let attrs = PerbaseTrackAttrs::new(&genome, &config);
+        let mut group = zarrs::group::Group::open(self.storage.clone(), &format!("/{name}"))
             .map_err(|e| PbzError::Store(e.to_string()))?;
-        let attrs = root.attributes_mut();
-        let pbz_ns = attrs
-            .get_mut("perbase_zarr")
-            .and_then(|v| v.as_object_mut())
-            .ok_or_else(|| PbzError::Metadata("missing perbase_zarr attribute".into()))?;
-        pbz_ns.insert("tracks".to_owned(), Value::Object(self.tracks.clone()));
-        root.store_metadata()
+        let attr_val =
+            serde_json::to_value(&attrs).map_err(|e| PbzError::Metadata(e.to_string()))?;
+        if let Some(obj) = attr_val.as_object() {
+            for (kk, vv) in obj {
+                group.attributes_mut().insert(kk.clone(), vv.clone());
+            }
+        }
+        group
+            .store_metadata()
             .map_err(|e| PbzError::Store(e.to_string()))?;
 
         let dtype = config.dtype;
@@ -386,16 +303,63 @@ impl PbzStore {
             name.to_owned(),
             Track {
                 name: name.to_owned(),
-                metadata,
+                genome: Arc::new(genome),
                 dtype,
-                fs: Arc::clone(&self.fs),
-                genome: Arc::clone(&self.genome),
-                arrays: RwLock::new(HashMap::new()),
+                rank,
+                column_dim: col_dim,
+                storage: Arc::clone(&self.storage),
+                values: RwLock::new(None),
             },
         );
-
         Ok(self.track_handles.get(name).expect("just inserted"))
     }
+}
+
+/// Rebuild a track's `Genome` from its on-disk `contigs` and `offsets` arrays.
+fn rehydrate_genome(
+    storage: &ReadableWritableListableStorage,
+    track_name: &str,
+    genome_name: Option<&str>,
+) -> Result<Genome> {
+    let contigs_arr = Array::open(storage.clone(), &format!("/{track_name}/contigs"))
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+    let k = contigs_arr.shape()[0] as usize;
+    let names: Vec<String> = if k == 0 {
+        Vec::new()
+    } else {
+        contigs_arr
+            .retrieve_chunk::<ndarray::ArrayD<String>>(&[0])
+            .map_err(|e| PbzError::Store(e.to_string()))?
+            .into_raw_vec_and_offset()
+            .0
+    };
+    let offsets_arr = Array::open(storage.clone(), &format!("/{track_name}/offsets"))
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+    let offsets: Vec<i64> = offsets_arr
+        .retrieve_chunk::<ndarray::ArrayD<i64>>(&[0])
+        .map_err(|e| PbzError::Store(e.to_string()))?
+        .into_raw_vec_and_offset()
+        .0;
+    if offsets.len() != k + 1 {
+        return Err(PbzError::Metadata(format!(
+            "track '{track_name}': offsets len {} != contigs {} + 1",
+            offsets.len(),
+            k
+        )));
+    }
+    let contigs: Vec<Contig> = names
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| Contig {
+            name,
+            length: (offsets[i + 1] - offsets[i]) as u64,
+        })
+        .collect();
+    let mut genome = Genome::new(contigs)?;
+    if let Some(n) = genome_name {
+        genome = genome.with_name(n);
+    }
+    Ok(genome)
 }
 
 /// Default compression: Blosc(zstd, level 5, byte shuffle), per the pbzarr spec.
@@ -457,18 +421,30 @@ fn default_fill_value(d: Dtype) -> FillValue {
     }
 }
 
-/// Convert a `TrackConfig` to the on-disk `TrackMetadata`.
-fn track_metadata_from_config(cfg: &TrackConfig) -> TrackMetadata {
-    TrackMetadata {
-        dtype: cfg.dtype.to_string(),
-        chunk_size: cfg.chunk_size,
-        column_dim: cfg.column_dim.clone(),
-        column_chunk_size: cfg.column_chunk_size,
-        shard_size: cfg.shard_size,
-        shard_column_size: cfg.shard_column_size,
-        fill_value: cfg.fill_value.clone(),
-        description: cfg.description.clone(),
-        source: cfg.source.clone(),
-        extra: cfg.extra.clone(),
+#[cfg(test)]
+mod tests {
+    use super::dtype_to_zarrs;
+    use crate::io::Dtype;
+
+    // The reopen path (`Dtype::from_zarrs`) is only exercised through I32
+    // tracks elsewhere in the test suite; this closes the gap for every
+    // dtype the store can write.
+    #[test]
+    fn dtype_round_trips_through_zarrs_data_type() {
+        let all = [
+            Dtype::U8,
+            Dtype::U16,
+            Dtype::U32,
+            Dtype::I8,
+            Dtype::I16,
+            Dtype::I32,
+            Dtype::F32,
+            Dtype::F64,
+            Dtype::Bool,
+        ];
+        for d in all {
+            let zdt = dtype_to_zarrs(d);
+            assert_eq!(Dtype::from_zarrs(&zdt).unwrap(), d);
+        }
     }
 }

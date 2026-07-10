@@ -1,18 +1,18 @@
-//! Track metadata + I/O. See `docs/superpowers/specs/2026-05-25-pbz-v0-ship-design.md`.
+//! Track metadata + I/O. See `docs/superpowers/specs/2026-07-09-flat-self-describing-track-convention.md`.
 
 use std::sync::{Arc, RwLock};
 
-use hashbrown::HashMap;
 use ndarray::ArrayD;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zarrs::array::{Array, ArraySubset};
-use zarrs::filesystem::FilesystemStore;
+use zarrs::storage::{ReadableWritableListableStorage, ReadableWritableListableStorageTraits};
 
 use crate::Result;
 use crate::error::PbzError;
 use crate::genome::{Genome, Region};
 use crate::io::{Dtype, Numeric};
+use crate::{PBZ_FORMAT_VERSION, PERBASE_CONVENTION_NAME, PERBASE_CONVENTION_UUID};
 
 /// User-supplied configuration for a new track.
 #[derive(Debug, Clone)]
@@ -106,44 +106,99 @@ impl TrackConfig {
     }
 }
 
-/// On-disk track metadata as it appears in `root.perbase_zarr.tracks[name]`.
-/// Round-trippable via serde.
+/// One entry of the `zarr_conventions` array.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrackMetadata {
-    pub dtype: String,
-    pub chunk_size: usize,
+pub struct ConventionRef {
+    pub uuid: String,
+    pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub column_dim: Option<String>,
+    pub spec_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub column_chunk_size: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shard_size: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shard_column_size: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fill_value: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub schema_url: Option<String>,
 }
 
-/// Track handle with I/O methods for reading and writing regions.
+/// The interpretation block written on a track group's `zarr.json`. Structural
+/// facts (dtype, chunks, shards, dim names, labels) are recovered from the
+/// arrays and are deliberately absent here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerbaseTrackAttrs {
+    pub zarr_conventions: Vec<ConventionRef>,
+    #[serde(rename = "perbase:version")]
+    pub version: String,
+    #[serde(rename = "perbase:genome_checksum")]
+    pub genome_checksum: String,
+    #[serde(
+        rename = "perbase:genome_name",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub genome_name: Option<String>,
+    #[serde(rename = "perbase:ragged_index")]
+    pub ragged_index: String,
+    #[serde(rename = "perbase:ragged_contigs")]
+    pub ragged_contigs: String,
+    #[serde(rename = "perbase:coordinates")]
+    pub coordinates: String,
+    #[serde(
+        rename = "perbase:description",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<String>,
+    #[serde(
+        rename = "perbase:source",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source: Option<String>,
+}
+
+impl PerbaseTrackAttrs {
+    pub fn new(genome: &Genome, config: &TrackConfig) -> Self {
+        Self {
+            zarr_conventions: vec![ConventionRef {
+                uuid: PERBASE_CONVENTION_UUID.to_owned(),
+                name: PERBASE_CONVENTION_NAME.to_owned(),
+                spec_url: None,
+                schema_url: None,
+            }],
+            version: PBZ_FORMAT_VERSION.to_owned(),
+            genome_checksum: genome.checksum(),
+            genome_name: genome.name().map(|s| s.to_owned()),
+            ragged_index: "offsets".to_owned(),
+            ragged_contigs: "contigs".to_owned(),
+            coordinates: "0-based-half-open".to_owned(),
+            description: config.description.clone(),
+            source: config.source.clone(),
+        }
+    }
+
+    /// Whether a group's attributes declare the `perbase` convention. Used by
+    /// store discovery to recognize track groups and to gate on completion
+    /// (the block is written last, so its presence means "fully written").
+    pub fn conforms(attrs: &Map<String, Value>) -> bool {
+        attrs
+            .get("zarr_conventions")
+            .and_then(|v| v.as_array())
+            .is_some_and(|arr| {
+                arr.iter().any(|c| {
+                    c.get("name").and_then(|n| n.as_str()) == Some(PERBASE_CONVENTION_NAME)
+                })
+            })
+    }
+}
+
+/// Track handle: addressing + I/O over one flat `values` array.
 pub struct Track {
     pub(crate) name: String,
-    pub(crate) metadata: TrackMetadata,
-    /// Parsed dtype tag. Validated at construction so `dtype()` is panic-free.
-    pub(crate) dtype: Dtype,
-    /// Concrete filesystem store; shared via Arc with the owning PbzStore.
-    pub(crate) fs: Arc<FilesystemStore>,
-    /// Genome shared with the owning PbzStore; needed to map ContigId → name.
     pub(crate) genome: Arc<Genome>,
-    /// Per-contig `zarrs::Array` cache. `Array::open` re-reads `zarr.json`
-    /// from disk, so without this every read/write would do that — turning a
-    /// 250-chunk-per-contig import into 250 metadata reloads per track.
-    pub(crate) arrays: RwLock<HashMap<String, Arc<Array<FilesystemStore>>>>,
+    pub(crate) dtype: Dtype,
+    pub(crate) rank: usize,
+    pub(crate) column_dim: Option<String>,
+    pub(crate) storage: ReadableWritableListableStorage,
+    /// Cached `values` array; `Array::open` re-reads `zarr.json`, so opening
+    /// once keeps per-region reads/writes cheap.
+    pub(crate) values: RwLock<Option<Arc<Array<dyn ReadableWritableListableStorageTraits>>>>,
 }
 
 impl Track {
@@ -151,13 +206,9 @@ impl Track {
         &self.name
     }
 
-    /// The genome shared with the owning store.
+    /// The genome owned by this track.
     pub fn genome(&self) -> &Arc<Genome> {
         &self.genome
-    }
-
-    pub fn metadata(&self) -> &TrackMetadata {
-        &self.metadata
     }
 
     /// Runtime dtype tag. Validated at `PbzStore::open` / `create_track` time.
@@ -167,79 +218,70 @@ impl Track {
 
     /// Rank of this track: 1 for scalar, 2 for cohort (has `column_dim`).
     pub fn rank(&self) -> usize {
-        if self.metadata.column_dim.is_some() {
-            2
-        } else {
-            1
-        }
+        self.rank
     }
 
     /// The column dimension name if this is a cohort track.
     pub fn column_dim(&self) -> Option<&str> {
-        self.metadata.column_dim.as_deref()
+        self.column_dim.as_deref()
     }
 
-    /// Position chunk size for this track.
-    pub fn chunk_size(&self) -> usize {
-        self.metadata.chunk_size
+    /// Total flat length `ΣL` of this track (sum of its genome's contig lengths).
+    pub fn total_len(&self) -> u64 {
+        self.genome.contigs().iter().map(|c| c.length).sum()
     }
 
-    /// Position shard size, or `None` if the track is unsharded. When set, the
-    /// on-disk write unit is the whole shard (the inner chunk has no standalone
-    /// write API in zarrs), so importers must write a shard at a time.
-    pub fn shard_size(&self) -> Option<usize> {
-        self.metadata.shard_size
-    }
-
-    /// Column shard size for a sharded cohort track, or `None`.
-    pub fn shard_column_size(&self) -> Option<usize> {
-        self.metadata.shard_column_size
+    /// Position chunk size for this track, read from the `values` array's
+    /// chunk shape at the first chunk (uniform except at the tail).
+    pub fn chunk_size(&self) -> Result<usize> {
+        let arr = self.values_array()?;
+        let indices = vec![0u64; self.rank];
+        let shape = arr
+            .chunk_shape_usize(&indices)
+            .map_err(|e| PbzError::Store(format!("chunk shape for {}: {e}", self.name)))?;
+        shape.first().copied().ok_or_else(|| {
+            PbzError::Metadata(format!("track {:?}: rank-0 values array", self.name))
+        })
     }
 
     /// Number of columns: 1 for scalar (rank-1) tracks; for cohort (rank-2)
-    /// tracks, reads shape[1] from the zarr array on the first contig.
-    ///
-    /// Returns `Err` if the store has no contigs (degenerate case) or the
-    /// underlying zarrs `Array::open` fails.
+    /// tracks, reads shape[1] from the `values` array.
     pub fn columns_count(&self) -> Result<usize> {
-        if self.rank() == 1 {
+        if self.rank == 1 {
             return Ok(1);
         }
-        let first = self.genome.contigs().first().ok_or_else(|| {
-            PbzError::Metadata(format!(
-                "track {:?}: cannot determine column count, store has no contigs",
-                self.name
-            ))
-        })?;
-        let arr = self.array_for(&first.name)?;
-        Ok(arr.shape()[1] as usize)
+        Ok(self.values_array()?.shape()[1] as usize)
     }
 
-    /// Return the cached `Array` handle for `contig_name`, opening it lazily
-    /// on first use. Concurrent reads share the cache without serializing.
-    fn array_for(&self, contig_name: &str) -> Result<Arc<Array<FilesystemStore>>> {
-        if let Some(arr) = self
-            .arrays
-            .read()
-            .expect("track array cache lock poisoned")
-            .get(contig_name)
-        {
+    /// The cached `values` array, opened lazily on first use.
+    pub(crate) fn values_array(
+        &self,
+    ) -> Result<Arc<Array<dyn ReadableWritableListableStorageTraits>>> {
+        if let Some(arr) = self.values.read().expect("values lock poisoned").as_ref() {
             return Ok(Arc::clone(arr));
         }
-        let mut w = self
-            .arrays
-            .write()
-            .expect("track array cache lock poisoned");
-        // Re-check under the write lock in case another thread won the race.
-        if let Some(arr) = w.get(contig_name) {
+        let mut w = self.values.write().expect("values lock poisoned");
+        if let Some(arr) = w.as_ref() {
             return Ok(Arc::clone(arr));
         }
-        let path = format!("/{}/{}", contig_name, self.name);
-        let arr = Array::open(Arc::clone(&self.fs), &path)
+        let path = format!("/{}/values", self.name);
+        let arr = Array::open(Arc::clone(&self.storage), &path)
             .map_err(|e| PbzError::Store(format!("open {path}: {e}")))?;
         let arr = Arc::new(arr);
-        w.insert(contig_name.to_owned(), Arc::clone(&arr));
+        *w = Some(Arc::clone(&arr));
         Ok(arr)
+    }
+
+    /// Flat base offset of a region's contig on the `values` position axis.
+    fn base_of(&self, region: &Region) -> Result<u64> {
+        let idx = region.contig.as_usize();
+        let offsets = self.genome.offsets();
+        offsets
+            .get(idx)
+            .map(|b| *b as u64)
+            .ok_or_else(|| PbzError::InvalidRegion {
+                message: format!("unknown contig id {:?}", region.contig),
+            })
     }
 
     /// Read an arbitrary region. Returns an `ArrayD<T>` whose rank matches the
@@ -247,37 +289,28 @@ impl Track {
     ///
     /// Returns `Err` if `T::DTYPE` doesn't match the track's dtype.
     pub fn read_region<T: Numeric>(&self, region: &Region) -> Result<ArrayD<T>> {
-        if T::DTYPE != self.dtype() {
+        if T::DTYPE != self.dtype {
             return Err(PbzError::InvalidDtype {
                 dtype: format!(
                     "track {:?} is {} but caller requested {}",
                     self.name,
-                    self.dtype(),
+                    self.dtype,
                     T::DTYPE
                 ),
             });
         }
-        let contig = self
-            .genome
-            .get(region.contig)
-            .ok_or_else(|| PbzError::InvalidRegion {
-                message: format!("unknown contig id {:?}", region.contig),
-            })?;
-        let arr = self.array_for(&contig.name)?;
-
+        let base = self.base_of(region)?;
+        let arr = self.values_array()?;
+        let (start, end) = (base + region.start, base + region.end);
         #[allow(clippy::single_range_in_vec_init)]
-        let subset = if self.rank() == 1 {
-            // Single-element range array is intentional: new_with_ranges takes &[Range<u64>].
-            let ranges = [region.start..region.end];
-            ArraySubset::new_with_ranges(&ranges)
+        let subset = if self.rank == 1 {
+            ArraySubset::new_with_ranges(&[start..end])
         } else {
             let n_cols = arr.shape()[1];
-            ArraySubset::new_with_ranges(&[region.start..region.end, 0..n_cols])
+            ArraySubset::new_with_ranges(&[start..end, 0..n_cols])
         };
-        let nd = arr
-            .retrieve_array_subset::<ArrayD<T>>(&subset)
-            .map_err(|e| PbzError::Store(format!("read {}: {e}", self.name)))?;
-        Ok(nd)
+        arr.retrieve_array_subset::<ArrayD<T>>(&subset)
+            .map_err(|e| PbzError::Store(format!("read {}: {e}", self.name)))
     }
 
     /// Write data into an arbitrary region.
@@ -290,88 +323,68 @@ impl Track {
     /// Returns `Err` if `T::DTYPE` doesn't match the track dtype, or if the
     /// data rank doesn't match the track rank.
     pub fn write_region<T: Numeric>(&self, region: &Region, data: ArrayD<T>) -> Result<()> {
-        if T::DTYPE != self.dtype() {
+        if T::DTYPE != self.dtype {
             return Err(PbzError::InvalidDtype {
                 dtype: format!(
                     "track {:?} is {} but caller wrote {}",
                     self.name,
-                    self.dtype(),
+                    self.dtype,
                     T::DTYPE
                 ),
             });
         }
-        let expected_rank = self.rank();
-        if data.ndim() != expected_rank {
+        if data.ndim() != self.rank {
             return Err(PbzError::Metadata(format!(
                 "rank mismatch for track {:?}: expected {} got {}",
                 self.name,
-                expected_rank,
+                self.rank,
                 data.ndim(),
             )));
         }
-        let contig = self
-            .genome
-            .get(region.contig)
-            .ok_or_else(|| PbzError::InvalidRegion {
-                message: format!("unknown contig id {:?}", region.contig),
-            })?;
-        let arr = self.array_for(&contig.name)?;
-
+        let base = self.base_of(region)?;
+        let arr = self.values_array()?;
+        let (start, end) = (base + region.start, base + region.end);
         #[allow(clippy::single_range_in_vec_init)]
-        let subset = if expected_rank == 1 {
-            // Single-element range array is intentional: new_with_ranges takes &[Range<u64>].
-            let ranges = [region.start..region.end];
-            ArraySubset::new_with_ranges(&ranges)
+        let subset = if self.rank == 1 {
+            ArraySubset::new_with_ranges(&[start..end])
         } else {
-            ArraySubset::new_with_ranges(&[region.start..region.end, 0..(data.shape()[1] as u64)])
+            ArraySubset::new_with_ranges(&[start..end, 0..(data.shape()[1] as u64)])
         };
         arr.store_array_subset(&subset, data)
-            .map_err(|e| PbzError::Store(format!("write {}: {e}", self.name)))?;
-        Ok(())
+            .map_err(|e| PbzError::Store(format!("write {}: {e}", self.name)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::genome::Contig;
 
     #[test]
-    fn metadata_roundtrip_scalar_and_cohort() {
-        let scalar = TrackMetadata {
-            dtype: "bool".into(),
-            chunk_size: 1_000_000,
-            column_dim: None,
-            column_chunk_size: None,
-            shard_size: None,
-            shard_column_size: None,
-            fill_value: None,
-            description: None,
-            source: None,
-            extra: Map::new(),
-        };
-        let json = serde_json::to_string(&scalar).unwrap();
-        let back: TrackMetadata = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.dtype, "bool");
-        assert!(back.column_dim.is_none());
-        // optional fields elided from JSON
-        assert!(!json.contains("column_dim"));
-        assert!(!json.contains("fill_value"));
+    fn perbase_attrs_roundtrip_and_conform() {
+        let g = Genome::new(vec![Contig {
+            name: "chr1".into(),
+            length: 100,
+        }])
+        .unwrap()
+        .with_name("hg38");
+        let cfg = TrackConfig::new(Dtype::I32);
+        let attrs = PerbaseTrackAttrs::new(&g, &cfg);
 
-        let cohort = TrackMetadata {
-            dtype: "uint16".into(),
-            chunk_size: 1_000_000,
-            column_dim: Some("sample".into()),
-            column_chunk_size: Some(16),
-            shard_size: None,
-            shard_column_size: None,
-            fill_value: None,
-            description: None,
-            source: None,
-            extra: Map::new(),
-        };
-        let json = serde_json::to_string(&cohort).unwrap();
-        let back: TrackMetadata = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.column_dim.as_deref(), Some("sample"));
-        assert_eq!(back.column_chunk_size, Some(16));
+        let val = serde_json::to_value(&attrs).unwrap();
+        let obj = val.as_object().unwrap();
+        assert!(PerbaseTrackAttrs::conforms(obj));
+        assert_eq!(obj["perbase:version"], "0.4");
+        assert_eq!(obj["perbase:genome_name"], "hg38");
+        assert_eq!(obj["perbase:ragged_index"], "offsets");
+        assert!(obj["zarr_conventions"].is_array());
+
+        // A plain group without the marker does not conform.
+        let plain = serde_json::json!({"foo": 1});
+        assert!(!PerbaseTrackAttrs::conforms(plain.as_object().unwrap()));
+
+        let back: PerbaseTrackAttrs = serde_json::from_value(val).unwrap();
+        assert_eq!(back.version, "0.4");
+        assert_eq!(back.genome_checksum, g.checksum());
     }
 }
