@@ -816,6 +816,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "md5"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1043,13 +1049,14 @@ checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "pbzarr"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
  "fs-err",
  "hashbrown 0.17.1",
  "log",
+ "md5",
  "ndarray",
  "serde",
  "serde_json",
@@ -1060,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "pbzarr-python"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "indicatif",
  "pbzarr",
@@ -1070,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "pbzarr-readers"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "bigtools",
