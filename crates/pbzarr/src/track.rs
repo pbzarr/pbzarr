@@ -1,4 +1,4 @@
-//! Track metadata + I/O. See `docs/superpowers/specs/2026-07-09-flat-self-describing-track-convention.md`.
+//! Track metadata + I/O.
 
 use std::sync::{Arc, RwLock};
 

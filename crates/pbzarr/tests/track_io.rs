@@ -139,6 +139,81 @@ fn cohort_track_reopens_with_column_dim() {
 }
 
 #[test]
+fn sharded_cohort_track_roundtrips_across_shard_boundary() {
+    use ndarray::Array2;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    let g = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 100,
+    }])
+    .unwrap();
+    let mut store = PbzStore::create(&path).unwrap();
+    store
+        .create_track(
+            "depth",
+            g,
+            TrackConfig::new(Dtype::I32)
+                .columns(vec!["a".into(), "b".into()])
+                .chunk_size(10)
+                .column_chunk_size(2)
+                .shard_size(40),
+        )
+        .unwrap();
+    // chunk_size() reports the shard extent, not the subchunk.
+    let track = store.track("depth").unwrap();
+    assert_eq!(track.chunk_size().unwrap(), 40);
+
+    // Region [30,55) straddles the shard boundary at 40.
+    let region = store
+        .genome_for("depth")
+        .unwrap()
+        .resolve(&"chr1:30-55".parse().unwrap())
+        .unwrap();
+    let data: ArrayD<i32> = Array2::from_shape_vec((25, 2), (0..50).collect())
+        .unwrap()
+        .into_dyn();
+    track.write_region(&region, data.clone()).unwrap();
+
+    let got: ArrayD<i32> = track.read_region(&region).unwrap();
+    assert_eq!(got, data);
+
+    let store = PbzStore::open(&path).unwrap();
+    let track = store.track("depth").unwrap();
+    assert_eq!(track.chunk_size().unwrap(), 40);
+    let got: ArrayD<i32> = track.read_region(&region).unwrap();
+    assert_eq!(got, data);
+}
+
+#[test]
+fn custom_fill_value_fills_untouched_positions() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    let g = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 100,
+    }])
+    .unwrap();
+    let mut store = PbzStore::create(&path).unwrap();
+    store
+        .create_track(
+            "d",
+            g,
+            TrackConfig::new(Dtype::I32).fill_value(serde_json::json!(-1)),
+        )
+        .unwrap();
+    let track = store.track("d").unwrap();
+    // Never written → reads back the custom fill, not the dtype default of 0.
+    let region = store
+        .genome_for("d")
+        .unwrap()
+        .resolve(&"chr1:0-10".parse().unwrap())
+        .unwrap();
+    let got: ArrayD<i32> = track.read_region(&region).unwrap();
+    assert_eq!(got.into_raw_vec_and_offset().0, vec![-1i32; 10]);
+}
+
+#[test]
 fn region_spanning_chunk_boundary_is_correct() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");

@@ -171,9 +171,14 @@ impl PbzStore {
 
         let total_len: u64 = genome.contigs().iter().map(|c| c.length).sum();
         let zarrs_dt = dtype_to_zarrs(config.dtype);
-        let default_fill = default_fill_value(config.dtype);
+        let fill = resolve_fill_value(config.dtype, config.fill_value.as_ref())?;
         let data_codecs = default_data_codecs(config.dtype)?;
         let chunk_pos = (config.chunk_size as u64).min(total_len.max(1)).max(1);
+        // Shards span full column width, so cross-sample compression still
+        // applies within a shard.
+        let shard_pos = config
+            .shard_size
+            .map(|s| (s as u64).min(total_len.max(1)).max(1));
 
         // The track group.
         zarrs::group::GroupBuilder::new()
@@ -195,15 +200,26 @@ impl PbzStore {
                     .unwrap_or(n_cols)
                     .min(n_cols)
                     .max(1);
+                let shard_col = config
+                    .shard_column_size
+                    .map(|s| (s as u64).min(n_cols).max(1))
+                    .unwrap_or(n_cols);
+                let outer_chunk = match shard_pos {
+                    Some(sp) => vec![sp, shard_col],
+                    None => vec![chunk_pos, col_chunk],
+                };
                 let mut builder = zarrs::array::ArrayBuilder::new(
                     vec![total_len, n_cols],
-                    vec![chunk_pos, col_chunk],
+                    outer_chunk,
                     zarrs_dt.clone(),
-                    default_fill.clone(),
+                    fill.clone(),
                 );
                 builder
                     .dimension_names(["position", col_dim_name.as_str()].into())
                     .bytes_to_bytes_codecs(data_codecs.clone());
+                if shard_pos.is_some() {
+                    builder.subchunk_shape(Some(vec![chunk_pos, col_chunk]));
+                }
                 builder
                     .build(self.storage.clone(), &format!("/{name}/values"))
                     .map_err(|e| PbzError::Store(e.to_string()))?
@@ -231,15 +247,22 @@ impl PbzStore {
                 (2, Some(col_dim_name))
             }
             None => {
+                let outer_chunk = match shard_pos {
+                    Some(sp) => vec![sp],
+                    None => vec![chunk_pos],
+                };
                 let mut builder = zarrs::array::ArrayBuilder::new(
                     vec![total_len],
-                    vec![chunk_pos],
+                    outer_chunk,
                     zarrs_dt.clone(),
-                    default_fill.clone(),
+                    fill.clone(),
                 );
                 builder
                     .dimension_names(["position"].into())
                     .bytes_to_bytes_codecs(data_codecs.clone());
+                if shard_pos.is_some() {
+                    builder.subchunk_shape(Some(vec![chunk_pos]));
+                }
                 builder
                     .build(self.storage.clone(), &format!("/{name}/values"))
                     .map_err(|e| PbzError::Store(e.to_string()))?
@@ -287,6 +310,10 @@ impl PbzStore {
         let attrs = PerbaseTrackAttrs::new(&genome, &config);
         let mut group = zarrs::group::Group::open(self.storage.clone(), &format!("/{name}"))
             .map_err(|e| PbzError::Store(e.to_string()))?;
+        // Extra attrs first, so the perbase block wins on any key collision.
+        for (kk, vv) in &config.extra {
+            group.attributes_mut().insert(kk.clone(), vv.clone());
+        }
         let attr_val =
             serde_json::to_value(&attrs).map_err(|e| PbzError::Metadata(e.to_string()))?;
         if let Some(obj) = attr_val.as_object() {
@@ -404,6 +431,35 @@ fn dtype_to_zarrs(d: Dtype) -> zarrs::array::DataType {
         Dtype::F64 => data_type::float64(),
         Dtype::Bool => data_type::bool(),
     }
+}
+
+/// Resolve a track's fill value: use the caller's `TrackConfig::fill_value`
+/// (a JSON scalar) when set, coerced to the track dtype, else the dtype default.
+fn resolve_fill_value(d: Dtype, custom: Option<&Value>) -> Result<FillValue> {
+    let Some(v) = custom else {
+        return Ok(default_fill_value(d));
+    };
+    let bad = || PbzError::Metadata(format!("fill_value {v} out of range for {d} track"));
+    let fv = match d {
+        Dtype::U8 => FillValue::from(u8::try_from(v.as_u64().ok_or_else(&bad)?).map_err(|_| bad())?),
+        Dtype::U16 => {
+            FillValue::from(u16::try_from(v.as_u64().ok_or_else(&bad)?).map_err(|_| bad())?)
+        }
+        Dtype::U32 => {
+            FillValue::from(u32::try_from(v.as_u64().ok_or_else(&bad)?).map_err(|_| bad())?)
+        }
+        Dtype::I8 => FillValue::from(i8::try_from(v.as_i64().ok_or_else(&bad)?).map_err(|_| bad())?),
+        Dtype::I16 => {
+            FillValue::from(i16::try_from(v.as_i64().ok_or_else(&bad)?).map_err(|_| bad())?)
+        }
+        Dtype::I32 => {
+            FillValue::from(i32::try_from(v.as_i64().ok_or_else(&bad)?).map_err(|_| bad())?)
+        }
+        Dtype::F32 => FillValue::from(v.as_f64().ok_or_else(&bad)? as f32),
+        Dtype::F64 => FillValue::from(v.as_f64().ok_or_else(&bad)?),
+        Dtype::Bool => FillValue::from(v.as_bool().ok_or_else(&bad)?),
+    };
+    Ok(fv)
 }
 
 /// Default fill value for a dtype: 0 for ints, NaN for floats, false for bool.
