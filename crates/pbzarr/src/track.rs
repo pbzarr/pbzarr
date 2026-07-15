@@ -323,6 +323,19 @@ impl Track {
     /// Returns `Err` if `T::DTYPE` doesn't match the track dtype, or if the
     /// data rank doesn't match the track rank.
     pub fn write_region<T: Numeric>(&self, region: &Region, data: ArrayD<T>) -> Result<()> {
+        let base = self.base_of(region)?;
+        self.write_flat(base + region.start, base + region.end, data)
+    }
+
+    /// Write `data` into the half-open flat position range `[start, end)`,
+    /// which may span contig boundaries. The import pipeline uses this to write
+    /// one physical chunk at a time regardless of where contigs begin.
+    pub(crate) fn write_flat<T: Numeric>(
+        &self,
+        start: u64,
+        end: u64,
+        data: ArrayD<T>,
+    ) -> Result<()> {
         if T::DTYPE != self.dtype {
             return Err(PbzError::InvalidDtype {
                 dtype: format!(
@@ -341,9 +354,7 @@ impl Track {
                 data.ndim(),
             )));
         }
-        let base = self.base_of(region)?;
         let arr = self.values_array()?;
-        let (start, end) = (base + region.start, base + region.end);
         #[allow(clippy::single_range_in_vec_init)]
         let subset = if self.rank == 1 {
             ArraySubset::new_with_ranges(&[start..end])
