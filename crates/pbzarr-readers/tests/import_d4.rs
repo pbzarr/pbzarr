@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pbzarr::import::Config;
-use pbzarr::io::Dtype;
-use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
+use pbzarr::{PbzStore, Region};
 use pbzarr_readers::{D4Source, from_d4};
 use tempfile::TempDir;
 
@@ -90,48 +89,41 @@ fn sharded_scalar_import_matches_unsharded() {
     }
     let dir = TempDir::new().unwrap();
     let d4 = write_synthetic_d4(dir.path(), "chr1", 10_000);
-    let genome = || {
-        Genome::new(vec![Contig {
-            name: "chr1".into(),
-            length: 10_000,
-        }])
-        .unwrap()
-    };
-    let region = |store: &PbzStore| Region {
-        contig: store.genome().id("chr1").unwrap(),
-        start: 0,
-        end: 10_000,
-    };
     let src = || {
         vec![D4Source {
             path: d4.clone(),
             sample_label: None,
         }]
     };
+    let region = |store: &PbzStore| Region {
+        contig: store.genome_for("depth").unwrap().id("chr1").unwrap(),
+        start: 0,
+        end: 10_000,
+    };
 
     let plain_path = dir.path().join("plain.pbz");
-    let mut plain = PbzStore::create(&plain_path, genome(), None).unwrap();
-    plain
-        .create_track("depth", TrackConfig::new(Dtype::I32).chunk_size(1_000))
-        .unwrap();
-    from_d4(&plain, "depth", &src(), Config::default()).unwrap();
+    let mut plain = PbzStore::create(&plain_path).unwrap();
+    from_d4(
+        &mut plain,
+        "depth",
+        &src(),
+        Config {
+            chunk_size: Some(1_000),
+            ..Config::default()
+        },
+    )
+    .unwrap();
 
     let sharded_path = dir.path().join("sharded.pbz");
-    let mut sharded = PbzStore::create(&sharded_path, genome(), None).unwrap();
-    sharded
-        .create_track(
-            "depth",
-            TrackConfig::new(Dtype::I32)
-                .chunk_size(1_000)
-                .shard_size(4_000),
-        )
-        .unwrap();
+    let mut sharded = PbzStore::create(&sharded_path).unwrap();
     from_d4(
-        &sharded,
+        &mut sharded,
         "depth",
         &src(),
         Config {
             workers: 4,
+            chunk_size: Some(1_000),
+            shard_size: Some(4_000),
             ..Config::default()
         },
     )
@@ -168,49 +160,35 @@ fn sharded_cohort_import_matches_unsharded() {
             sample_label: Some(format!("s{i}")),
         })
         .collect();
-    let cols: Vec<String> = (0..3).map(|i| format!("s{i}")).collect();
-    let genome = || {
-        Genome::new(vec![Contig {
-            name: "chr1".into(),
-            length: 10_000,
-        }])
-        .unwrap()
-    };
     let region = |store: &PbzStore| Region {
-        contig: store.genome().id("chr1").unwrap(),
+        contig: store.genome_for("depth").unwrap().id("chr1").unwrap(),
         start: 0,
         end: 10_000,
     };
 
     let plain_path = dir.path().join("plain.pbz");
-    let mut plain = PbzStore::create(&plain_path, genome(), None).unwrap();
-    plain
-        .create_track(
-            "depth",
-            TrackConfig::new(Dtype::I32)
-                .columns(cols.clone())
-                .chunk_size(1_000),
-        )
-        .unwrap();
-    from_d4(&plain, "depth", &sources, Config::default()).unwrap();
+    let mut plain = PbzStore::create(&plain_path).unwrap();
+    from_d4(
+        &mut plain,
+        "depth",
+        &sources,
+        Config {
+            chunk_size: Some(1_000),
+            ..Config::default()
+        },
+    )
+    .unwrap();
 
     let sharded_path = dir.path().join("sharded.pbz");
-    let mut sharded = PbzStore::create(&sharded_path, genome(), None).unwrap();
-    sharded
-        .create_track(
-            "depth",
-            TrackConfig::new(Dtype::I32)
-                .columns(cols.clone())
-                .chunk_size(1_000)
-                .shard_size(4_000),
-        )
-        .unwrap();
+    let mut sharded = PbzStore::create(&sharded_path).unwrap();
     from_d4(
-        &sharded,
+        &mut sharded,
         "depth",
         &sources,
         Config {
             workers: 4,
+            chunk_size: Some(1_000),
+            shard_size: Some(4_000),
             ..Config::default()
         },
     )
@@ -229,6 +207,8 @@ fn sharded_cohort_import_matches_unsharded() {
     assert_eq!(plain_data, sharded_data);
     // Sanity: the three columns really do differ (offsets applied).
     assert_ne!(sharded_data[[0, 0]], sharded_data[[0, 1]]);
+    // A multi-source import defaults the column axis to "sample".
+    assert_eq!(plain.track("depth").unwrap().column_dim(), Some("sample"));
 }
 
 #[test]
@@ -241,18 +221,9 @@ fn import_one_d4_into_scalar_track() {
     let d4 = write_synthetic_d4(dir.path(), "chr1", 1_000);
 
     let store_path = dir.path().join("out.pbz");
-    let genome = Genome::new(vec![Contig {
-        name: "chr1".into(),
-        length: 1_000,
-    }])
-    .unwrap();
-    let mut store = PbzStore::create(&store_path, genome, None).unwrap();
-    store
-        .create_track("depth", TrackConfig::new(Dtype::I32))
-        .unwrap();
-
+    let mut store = PbzStore::create(&store_path).unwrap();
     from_d4(
-        &store,
+        &mut store,
         "depth",
         &[D4Source {
             path: d4,
@@ -262,16 +233,14 @@ fn import_one_d4_into_scalar_track() {
     )
     .unwrap();
 
+    let track = store.track("depth").unwrap();
+    assert_eq!(track.rank(), 1);
     let region = Region {
-        contig: store.genome().id("chr1").unwrap(),
+        contig: store.genome_for("depth").unwrap().id("chr1").unwrap(),
         start: 0,
         end: 1_000,
     };
-    let got = store
-        .track("depth")
-        .unwrap()
-        .read_region::<i32>(&region)
-        .unwrap();
+    let got = track.read_region::<i32>(&region).unwrap();
     let arr = got.into_dimensionality::<ndarray::Ix1>().unwrap();
 
     for i in 0..100u32 {
@@ -282,24 +251,22 @@ fn import_one_d4_into_scalar_track() {
     }
 }
 
-/// Regression: d4 file orders contigs differently from the pbz store. The
-/// pipeline must resolve `ContigId` in the *store's* genome to a name, then
-/// hand the name to the reader (which looks it up in *its* genome). Earlier
-/// code shared the `ContigId` directly and silently wrote chr2 data into
-/// chr1's array when ordering differed.
+/// A multi-contig d4 imports each contig's data under the right name, even when
+/// the file orders contigs unusually. The track genome is built from the d4
+/// header, and the pipeline resolves each task's flat range back to a contig
+/// name before handing it to the reader.
 #[test]
-fn import_d4_multi_contig_out_of_order_writes_correct_contigs() {
+fn import_d4_multi_contig_writes_correct_contigs() {
     if !have_d4tools() {
         eprintln!("skip: d4tools not on PATH");
         return;
     }
     let dir = TempDir::new().unwrap();
 
-    // d4 has chr2 first, chr1 second (reverse of pbz order).
+    // d4 has chr2 first, chr1 second. chr2 values: 100. chr1 values: 7.
     let d4_path = dir.path().join("a.d4");
     let bg_path = d4_path.with_extension("bedgraph");
     let sizes_path = d4_path.with_extension("sizes");
-    // chr2 values: 100. chr1 values: 7.
     std::fs::write(&bg_path, "chr2\t0\t500\t100\nchr1\t0\t300\t7\n").unwrap();
     std::fs::write(&sizes_path, "chr2\t500\nchr1\t300\n").unwrap();
     let status = Command::new("d4tools")
@@ -311,26 +278,10 @@ fn import_d4_multi_contig_out_of_order_writes_correct_contigs() {
         .unwrap();
     assert!(status.success(), "d4tools create failed");
 
-    // pbz store has chr1 first, chr2 second.
     let store_path = dir.path().join("out.pbz");
-    let genome = Genome::new(vec![
-        Contig {
-            name: "chr1".into(),
-            length: 300,
-        },
-        Contig {
-            name: "chr2".into(),
-            length: 500,
-        },
-    ])
-    .unwrap();
-    let mut store = PbzStore::create(&store_path, genome, None).unwrap();
-    store
-        .create_track("depth", TrackConfig::new(Dtype::I32))
-        .unwrap();
-
+    let mut store = PbzStore::create(&store_path).unwrap();
     from_d4(
-        &store,
+        &mut store,
         "depth",
         &[D4Source {
             path: d4_path,
@@ -340,13 +291,12 @@ fn import_d4_multi_contig_out_of_order_writes_correct_contigs() {
     )
     .unwrap();
 
-    let chr1_id = store.genome().id("chr1").unwrap();
-    let chr2_id = store.genome().id("chr2").unwrap();
+    let genome = store.genome_for("depth").unwrap();
     let chr1 = store
         .track("depth")
         .unwrap()
         .read_region::<i32>(&Region {
-            contig: chr1_id,
+            contig: genome.id("chr1").unwrap(),
             start: 0,
             end: 300,
         })
@@ -357,7 +307,7 @@ fn import_d4_multi_contig_out_of_order_writes_correct_contigs() {
         .track("depth")
         .unwrap()
         .read_region::<i32>(&Region {
-            contig: chr2_id,
+            contig: genome.id("chr2").unwrap(),
             start: 0,
             end: 500,
         })

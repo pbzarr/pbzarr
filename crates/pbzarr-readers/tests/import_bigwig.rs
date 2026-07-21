@@ -6,8 +6,7 @@ mod common;
 use std::path::Path;
 
 use pbzarr::import::Config;
-use pbzarr::io::Dtype;
-use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
+use pbzarr::{PbzStore, Region};
 use pbzarr_readers::{BigWigSource, from_bigwig};
 use tempfile::TempDir;
 
@@ -49,18 +48,9 @@ fn import_one_bigwig_into_scalar_track() {
     );
 
     let store_path = dir.path().join("out.pbz");
-    let genome = Genome::new(vec![Contig {
-        name: "chr1".into(),
-        length: 1_000,
-    }])
-    .unwrap();
-    let mut store = PbzStore::create(&store_path, genome, None).unwrap();
-    store
-        .create_track("signal", TrackConfig::new(Dtype::F32))
-        .unwrap();
-
+    let mut store = PbzStore::create(&store_path).unwrap();
     from_bigwig(
-        &store,
+        &mut store,
         "signal",
         &[BigWigSource {
             path: bw,
@@ -70,16 +60,14 @@ fn import_one_bigwig_into_scalar_track() {
     )
     .unwrap();
 
+    let track = store.track("signal").unwrap();
+    assert_eq!(track.rank(), 1);
     let region = Region {
-        contig: store.genome().id("chr1").unwrap(),
+        contig: store.genome_for("signal").unwrap().id("chr1").unwrap(),
         start: 0,
         end: 1_000,
     };
-    let got = store
-        .track("signal")
-        .unwrap()
-        .read_region::<f32>(&region)
-        .unwrap();
+    let got = track.read_region::<f32>(&region).unwrap();
     let arr = got.into_dimensionality::<ndarray::Ix1>().unwrap();
 
     for i in 0..100u32 {
@@ -103,48 +91,41 @@ fn sharded_scalar_import_matches_unsharded() {
         &banded("chr1", 10_000, 0.0),
         false,
     );
-    let genome = || {
-        Genome::new(vec![Contig {
-            name: "chr1".into(),
-            length: 10_000,
-        }])
-        .unwrap()
-    };
-    let region = |store: &PbzStore| Region {
-        contig: store.genome().id("chr1").unwrap(),
-        start: 0,
-        end: 10_000,
-    };
     let src = || {
         vec![BigWigSource {
             path: bw.clone(),
             sample_label: None,
         }]
     };
+    let region = |store: &PbzStore| Region {
+        contig: store.genome_for("signal").unwrap().id("chr1").unwrap(),
+        start: 0,
+        end: 10_000,
+    };
 
     let plain_path = dir.path().join("plain.pbz");
-    let mut plain = PbzStore::create(&plain_path, genome(), None).unwrap();
-    plain
-        .create_track("signal", TrackConfig::new(Dtype::F32).chunk_size(1_000))
-        .unwrap();
-    from_bigwig(&plain, "signal", &src(), Config::default()).unwrap();
+    let mut plain = PbzStore::create(&plain_path).unwrap();
+    from_bigwig(
+        &mut plain,
+        "signal",
+        &src(),
+        Config {
+            chunk_size: Some(1_000),
+            ..Config::default()
+        },
+    )
+    .unwrap();
 
     let sharded_path = dir.path().join("sharded.pbz");
-    let mut sharded = PbzStore::create(&sharded_path, genome(), None).unwrap();
-    sharded
-        .create_track(
-            "signal",
-            TrackConfig::new(Dtype::F32)
-                .chunk_size(1_000)
-                .shard_size(4_000),
-        )
-        .unwrap();
+    let mut sharded = PbzStore::create(&sharded_path).unwrap();
     from_bigwig(
-        &sharded,
+        &mut sharded,
         "signal",
         &src(),
         Config {
             workers: 4,
+            chunk_size: Some(1_000),
+            shard_size: Some(4_000),
             ..Config::default()
         },
     )
@@ -181,25 +162,25 @@ fn cohort_import_distinct_columns() {
             sample_label: Some(format!("s{i}")),
         })
         .collect();
-    let cols: Vec<String> = (0..3).map(|i| format!("s{i}")).collect();
 
     let store_path = dir.path().join("cohort.pbz");
-    let genome = Genome::new(vec![Contig {
-        name: "chr1".into(),
-        length: 2_000,
-    }])
+    let mut store = PbzStore::create(&store_path).unwrap();
+    from_bigwig(
+        &mut store,
+        "signal",
+        &sources,
+        Config {
+            chunk_size: Some(1_000),
+            // The column axis is generic; override the "sample" default.
+            column_dim: Some("context".into()),
+            ..Config::default()
+        },
+    )
     .unwrap();
-    let mut store = PbzStore::create(&store_path, genome, None).unwrap();
-    store
-        .create_track(
-            "signal",
-            TrackConfig::new(Dtype::F32).columns(cols).chunk_size(1_000),
-        )
-        .unwrap();
-    from_bigwig(&store, "signal", &sources, Config::default()).unwrap();
 
+    assert_eq!(store.track("signal").unwrap().column_dim(), Some("context"));
     let region = Region {
-        contig: store.genome().id("chr1").unwrap(),
+        contig: store.genome_for("signal").unwrap().id("chr1").unwrap(),
         start: 0,
         end: 2_000,
     };
@@ -218,8 +199,7 @@ fn cohort_import_distinct_columns() {
 }
 
 /// Positions with no bigWig coverage import as 0 ("no coverage" = 0 for
-/// coverage/percent tracks), matching a 0-fill track. Covered positions keep
-/// their value.
+/// coverage/percent tracks): `from_bigwig` creates the track with a 0.0 fill.
 #[test]
 fn uncovered_positions_import_as_zero() {
     let dir = TempDir::new().unwrap();
@@ -233,33 +213,23 @@ fn uncovered_positions_import_as_zero() {
     );
 
     let store_path = dir.path().join("sparse.pbz");
-    let genome = Genome::new(vec![Contig {
-        name: "chr1".into(),
-        length: 3_000,
-    }])
-    .unwrap();
-    let mut store = PbzStore::create(&store_path, genome, None).unwrap();
-    store
-        .create_track(
-            "signal",
-            TrackConfig::new(Dtype::F32)
-                .chunk_size(1_000)
-                .fill_value(serde_json::json!(0.0)),
-        )
-        .unwrap();
+    let mut store = PbzStore::create(&store_path).unwrap();
     from_bigwig(
-        &store,
+        &mut store,
         "signal",
         &[BigWigSource {
             path: bw,
             sample_label: None,
         }],
-        Config::default(),
+        Config {
+            chunk_size: Some(1_000),
+            ..Config::default()
+        },
     )
     .unwrap();
 
     let track = store.track("signal").unwrap();
-    let cid = store.genome().id("chr1").unwrap();
+    let cid = store.genome_for("signal").unwrap().id("chr1").unwrap();
 
     // Covered [0, 100) keeps 9.0.
     let head = track

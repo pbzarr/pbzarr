@@ -8,6 +8,7 @@
 use crate::error::{PbzError, Result};
 use crate::region_query::RegionQuery;
 use hashbrown::HashMap;
+use std::path::Path;
 
 /// Index of a contig in a [`Genome`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -46,6 +47,7 @@ pub struct Contig {
 pub struct Genome {
     contigs: Vec<Contig>,
     by_name: HashMap<String, ContigId>,
+    name: Option<String>,
 }
 
 impl Genome {
@@ -72,7 +74,11 @@ impl Genome {
                 )));
             }
         }
-        Ok(Self { contigs, by_name })
+        Ok(Self {
+            contigs,
+            by_name,
+            name: None,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -104,6 +110,94 @@ impl Genome {
             .iter()
             .enumerate()
             .map(|(i, c)| (ContigId(i as u32), c))
+    }
+
+    /// The prefix-sum flat-start index over this genome's contigs.
+    ///
+    /// Returns `k + 1` entries: `offsets[i]` is the flat start of contig `i`,
+    /// `offsets[0] == 0`, and `offsets[k]` is `ΣL` (the total length). Written
+    /// verbatim as the on-disk `offsets` array.
+    pub fn offsets(&self) -> Vec<i64> {
+        let mut out = Vec::with_capacity(self.contigs.len() + 1);
+        let mut acc: i64 = 0;
+        out.push(0);
+        for c in &self.contigs {
+            acc += c.length as i64;
+            out.push(acc);
+        }
+        out
+    }
+
+    /// Attach an optional decorative name (e.g. `"hg38"`). Excluded from
+    /// `checksum()`; never consulted for compatibility.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// The decorative genome name, if set.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The canonical byte payload the genome checksum is computed over: one
+    /// `"{name}\t{length}\n"` record per contig, contigs sorted by name in
+    /// Unicode-codepoint (byte) order, with a trailing newline after the last
+    /// record. This exact string is the cross-language contract; the Python
+    /// implementation must reproduce it byte-for-byte.
+    pub fn checksum_payload(&self) -> String {
+        let mut ordered: Vec<&Contig> = self.contigs.iter().collect();
+        ordered.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut buf = String::new();
+        for c in ordered {
+            buf.push_str(&c.name);
+            buf.push('\t');
+            buf.push_str(&c.length.to_string());
+            buf.push('\n');
+        }
+        buf
+    }
+
+    /// A genome / contig-set identity: `"md5:"` + lowercase hex of the MD5 of
+    /// `checksum_payload()`. The decorative name is excluded. This is the sole
+    /// identity used for track mergeability (ADR 0002-adjacent; see spec).
+    pub fn checksum(&self) -> String {
+        let digest = md5::compute(self.checksum_payload().as_bytes());
+        format!("md5:{digest:x}")
+    }
+
+    /// Build a `Genome` from a FASTA index (`.fai`): tab-separated, column 0 is
+    /// the contig name and column 1 its length; remaining columns are ignored.
+    ///
+    /// A convenience for the hand-rolled / CLI case. Importers build the `Genome`
+    /// from the source file's own header instead.
+    pub fn from_fai(path: impl AsRef<Path>) -> Result<Self> {
+        let text = std::fs::read_to_string(path.as_ref())
+            .map_err(|e| PbzError::Store(format!("read fai: {e}")))?;
+        let mut contigs = Vec::new();
+        for (lineno, line) in text.lines().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let mut cols = line.split('\t');
+            let name = cols.next().filter(|s| !s.is_empty()).ok_or_else(|| {
+                PbzError::Metadata(format!("fai line {}: missing name", lineno + 1))
+            })?;
+            let length: u64 = cols
+                .next()
+                .ok_or_else(|| {
+                    PbzError::Metadata(format!("fai line {}: missing length", lineno + 1))
+                })?
+                .parse()
+                .map_err(|e| {
+                    PbzError::Metadata(format!("fai line {}: bad length: {e}", lineno + 1))
+                })?;
+            contigs.push(Contig {
+                name: name.to_owned(),
+                length,
+            });
+        }
+        Genome::new(contigs)
     }
     /// Resolve a [`RegionQuery`] against this genome.
     ///
@@ -164,5 +258,108 @@ impl Region {
 impl std::fmt::Display for Region {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}-{}", self.contig, self.start, self.end)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offsets_is_prefix_sum() {
+        let g = Genome::new(vec![
+            Contig {
+                name: "chr1".into(),
+                length: 1000,
+            },
+            Contig {
+                name: "chr2".into(),
+                length: 500,
+            },
+            Contig {
+                name: "chr3".into(),
+                length: 250,
+            },
+        ])
+        .unwrap();
+        assert_eq!(g.offsets(), vec![0, 1000, 1500, 1750]);
+    }
+
+    #[test]
+    fn name_defaults_none_and_sets() {
+        let g = Genome::new(vec![Contig {
+            name: "chr1".into(),
+            length: 10,
+        }])
+        .unwrap();
+        assert_eq!(g.name(), None);
+        let g = g.with_name("hg38");
+        assert_eq!(g.name(), Some("hg38"));
+    }
+
+    #[test]
+    fn checksum_payload_is_canonical() {
+        // Deliberately unsorted input; payload must sort by name (codepoint order).
+        let g = Genome::new(vec![
+            Contig {
+                name: "chr2".into(),
+                length: 500,
+            },
+            Contig {
+                name: "chr1".into(),
+                length: 1000,
+            },
+        ])
+        .unwrap();
+        assert_eq!(g.checksum_payload(), "chr1\t1000\nchr2\t500\n");
+    }
+
+    #[test]
+    fn checksum_excludes_name_and_is_md5_hex() {
+        let a = Genome::new(vec![Contig {
+            name: "chr1".into(),
+            length: 10,
+        }])
+        .unwrap();
+        let b = a.clone().with_name("hg38");
+        // decorative name must not change the checksum
+        assert_eq!(a.checksum(), b.checksum());
+        let c = a.checksum();
+        assert!(c.starts_with("md5:"));
+        assert_eq!(c.len(), "md5:".len() + 32);
+        assert!(
+            c["md5:".len()..]
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+        );
+    }
+
+    #[test]
+    fn from_fai_reads_name_and_length() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("ref.fa.fai");
+        // name \t length \t offset \t linebases \t linewidth
+        let mut f = std::fs::File::create(&p).unwrap();
+        writeln!(f, "chr1\t1000\t6\t60\t61").unwrap();
+        writeln!(f, "chr2\t500\t1024\t60\t61").unwrap();
+        drop(f);
+
+        let g = Genome::from_fai(&p).unwrap();
+        assert_eq!(g.len(), 2);
+        assert_eq!(
+            g.contigs()[0],
+            Contig {
+                name: "chr1".into(),
+                length: 1000
+            }
+        );
+        assert_eq!(
+            g.contigs()[1],
+            Contig {
+                name: "chr2".into(),
+                length: 500
+            }
+        );
     }
 }

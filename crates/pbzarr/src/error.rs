@@ -10,12 +10,6 @@ pub enum PbzError {
         available: Vec<String>,
     },
 
-    #[error("track not found: {name} (available: {available:?})")]
-    TrackNotFound {
-        name: String,
-        available: Vec<String>,
-    },
-
     #[error("invalid region: {message}")]
     InvalidRegion { message: String },
 

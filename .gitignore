@@ -1,8 +1,9 @@
 /target
 /.pixi
 /profiles
-CLAUDE.md
 docs/superpowers
+docs/adr
+CONTEXT.md
 .claude
 # Python build artifacts
 __pycache__/

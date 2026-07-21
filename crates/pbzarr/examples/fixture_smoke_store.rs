@@ -20,13 +20,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             name: "chr2".into(),
             length: 1_000,
         },
-    ])?;
-    let mut store = PbzStore::create(&path, genome, Some("GRCh38".into()))?;
+    ])?
+    .with_name("GRCh38");
+    let mut store = PbzStore::create(&path)?;
 
     // 1D track
-    store.create_track("mask", TrackConfig::new(Dtype::Bool))?;
-    let chr1 = store.genome().id("chr1").unwrap();
-    let chr2 = store.genome().id("chr2").unwrap();
+    store.create_track("mask", genome.clone(), TrackConfig::new(Dtype::Bool))?;
+    let chr1 = genome.id("chr1").unwrap();
+    let chr2 = genome.id("chr2").unwrap();
 
     let region = Region {
         contig: chr1,
@@ -47,6 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2D track with named sample axis
     store.create_track(
         "depth",
+        genome.clone(),
         TrackConfig::new(Dtype::U16)
             .columns(vec!["A".into(), "B".into(), "C".into()])
             .column_dim("sample"),

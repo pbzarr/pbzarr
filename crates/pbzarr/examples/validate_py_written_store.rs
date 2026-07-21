@@ -14,15 +14,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let store = PbzStore::open(&path)?;
 
-    let names: Vec<String> = store
-        .genome()
-        .contigs()
-        .iter()
-        .map(|c| c.name.clone())
-        .collect();
-    assert_eq!(names, vec!["chr1".to_string(), "chr2".to_string()]);
-    assert_eq!(store.coordinate_space(), Some("GRCh38"));
-
     let mut tracks: Vec<String> = store.track_names().map(|s| s.to_owned()).collect();
     tracks.sort();
     assert!(tracks.contains(&"mask".to_string()), "expected mask track");
@@ -31,9 +22,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "expected depth track"
     );
 
+    let names: Vec<String> = store
+        .genome_for("depth")
+        .expect("depth track discovered")
+        .contigs()
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert_eq!(names, vec!["chr1".to_string(), "chr2".to_string()]);
+    assert_eq!(store.genome_for("depth").unwrap().name(), Some("GRCh38"));
+
     // read depth's chr1; Python wrote (i, i*2, i*3) for i in 0..100
     let depth = store.track("depth").unwrap();
-    let chr1 = store.genome().id("chr1").unwrap();
+    let chr1 = store.genome_for("depth").unwrap().id("chr1").unwrap();
     let region = Region {
         contig: chr1,
         start: 0,

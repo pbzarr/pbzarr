@@ -157,42 +157,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .unwrap_or_else(|| tmp.path().join("profile.pbz"));
 
-    let mut store = PbzStore::create(&path, genome.clone(), None)?;
-
-    let column_names: Vec<String> = (0..args.cols).map(|i| format!("s{i}")).collect();
-    // d4 import requires int32; the synth path uses u32. Match the path.
-    let track_dtype = if args.d4.is_some() {
-        Dtype::I32
-    } else {
-        Dtype::U32
-    };
-    let mut cfg = TrackConfig::new(track_dtype)
-        .columns(column_names.clone())
-        .column_dim("sample")
-        .chunk_size(args.chunk_size)
-        .column_chunk_size(args.column_chunk_size);
-    if let Some(s) = args.shard_size {
-        cfg = cfg.shard_size(s);
-    }
-    store.create_track("depth", cfg)?;
+    let mut store = PbzStore::create(&path)?;
 
     let import_cfg = Config {
         workers: args.workers,
         chunk_size: Some(args.chunk_size),
-        column_chunk_size: None,
+        column_chunk_size: Some(args.column_chunk_size),
+        shard_size: args.shard_size,
+        shard_column_size: None,
+        column_dim: None,
         progress: None,
     };
 
     let t0 = Instant::now();
     let report = if let Some(ref d4) = args.d4 {
+        // `from_d4` builds the genome and creates the (int32) track itself.
         let sources: Vec<D4Source> = (0..args.cols)
             .map(|_| D4Source {
                 path: d4.clone(),
                 sample_label: None,
             })
             .collect();
-        from_d4(&store, "depth", &sources, import_cfg)?
+        from_d4(&mut store, "depth", &sources, import_cfg)?
     } else {
+        // Synth path: create the u32 track ourselves, then drive the pipeline.
+        let column_names: Vec<String> = (0..args.cols).map(|i| format!("s{i}")).collect();
+        let mut cfg = TrackConfig::new(Dtype::U32)
+            .columns(column_names)
+            .column_dim("sample")
+            .chunk_size(args.chunk_size)
+            .column_chunk_size(args.column_chunk_size);
+        if let Some(s) = args.shard_size {
+            cfg = cfg.shard_size(s);
+        }
+        store.create_track("depth", genome.clone(), cfg)?;
         let readers: Vec<SynthReader> = (0..args.cols)
             .map(|i| SynthReader {
                 genome: genome.clone(),

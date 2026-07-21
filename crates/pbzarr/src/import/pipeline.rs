@@ -1,14 +1,14 @@
 //! Generic import pipeline. Drives `ValueReader` sources into a `Track` via a
 //! scoped worker pool; each worker forks its readers, then reads + writes one
-//! task region directly.
+//! task directly.
 //!
-//! The task region is sized to the track's on-disk write unit so each region
-//! is encoded exactly once: a sharded track's write unit is the whole shard
-//! (zarrs has no inner-chunk write API; a sub-shard write read-modify-writes
-//! the entire shard), so we partition by `shard_size`; an unsharded track's
-//! write unit is the chunk, so we partition by `chunk_size`. Either way tasks
-//! cover disjoint position ranges, hence disjoint shard/chunk files, so zarrs'
-//! concurrent-write safety holds.
+//! Each task is one physical write unit: a chunk-aligned segment of the flat
+//! position axis at full column width (the shard, when the track is sharded).
+//! Task boundaries land on the chunk grid, so every task writes a whole chunk
+//! that no other task touches. That keeps zarrs on its single-encode path and
+//! removes the concurrent read-modify-write hazard entirely, so no write lock
+//! is needed. A task may straddle contig boundaries; the reader fill loop
+//! visits each overlapping contig by name.
 
 use std::mem;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -20,7 +20,6 @@ use ndarray::{Array2, Axis};
 
 use crate::Result;
 use crate::error::PbzError;
-use crate::genome::Region;
 use crate::io::{Numeric, ValueReader};
 use crate::track::Track;
 
@@ -35,10 +34,24 @@ pub trait ProgressSink: Send + Sync {
 pub struct Config {
     /// Number of reader/writer worker threads.
     pub workers: usize,
-    /// Override position chunk size. Defaults to `track.chunk_size()`.
+    /// Position chunk size for the track being imported. Consumed by the
+    /// format readers (`from_d4`/`from_bigwig`) when they create the track;
+    /// `run_pipeline` always steps by the track's on-disk write unit.
     pub chunk_size: Option<usize>,
-    /// Reserved for per-column chunking.
+    /// Column chunk size for the track being imported. Consumed at track
+    /// creation, like `chunk_size`.
     pub column_chunk_size: Option<usize>,
+    /// Position shard size for the track being imported. Consumed at track
+    /// creation, like `chunk_size`; `None` leaves the track unsharded.
+    pub shard_size: Option<usize>,
+    /// Column shard size for the track being imported. Consumed at track
+    /// creation; ignored unless `shard_size` is set.
+    pub shard_column_size: Option<usize>,
+    /// Column-axis dimension name for a cohort import (several sources). The
+    /// axis is generic; the readers default it to `"sample"`, but set this to
+    /// `"strand"`, `"context"`, etc. when the columns are not samples. Ignored
+    /// for single-source (scalar) imports.
+    pub column_dim: Option<String>,
     /// Optional progress observer.
     pub progress: Option<Arc<dyn ProgressSink>>,
 }
@@ -49,6 +62,9 @@ impl Default for Config {
             workers: 4,
             chunk_size: None,
             column_chunk_size: None,
+            shard_size: None,
+            shard_column_size: None,
+            column_dim: None,
             progress: None,
         }
     }
@@ -62,9 +78,12 @@ pub struct Report {
     pub tasks_completed: usize,
 }
 
-#[derive(Clone, Debug)]
+/// A chunk-aligned segment `[start, end)` of the flat position axis, at full
+/// column width. Boundaries land on the track's physical chunk grid.
+#[derive(Clone, Copy, Debug)]
 struct ChunkTask {
-    region: Region,
+    start: u64,
+    end: u64,
 }
 
 struct State {
@@ -130,36 +149,19 @@ where
         )));
     }
 
-    // Partition by the on-disk write unit: a shard for sharded tracks, a chunk
-    // otherwise. A sharded region smaller than its shard would force zarrs to
-    // read-modify-write the whole shard once per inner chunk (∝ chunks/shard);
-    // a full-shard region hits zarrs' single-encode fast path instead.
-    let step = match track.shard_size() {
-        Some(ss) => (ss as u64).max(1),
-        None => (config.chunk_size.unwrap_or_else(|| track.chunk_size()) as u64).max(1),
-    };
+    // Step by the track's physical write unit so each task writes one whole
+    // chunk (or shard) that no other task touches.
+    let step = (track.chunk_size()? as u64).max(1);
     let genome = Arc::clone(track.genome());
+    let total = track.total_len();
+    let n_contigs = genome.iter().filter(|(_, c)| c.length > 0).count();
 
     let mut tasks: Vec<ChunkTask> = Vec::new();
-    let mut n_contigs = 0usize;
-    for (contig_id, contig) in genome.iter() {
-        let len = contig.length;
-        if len == 0 {
-            continue;
-        }
-        n_contigs += 1;
-        let n_steps = len.div_ceil(step);
-        for step_idx in 0..n_steps {
-            let start = step_idx * step;
-            let end = (start + step).min(len);
-            tasks.push(ChunkTask {
-                region: Region {
-                    contig: contig_id,
-                    start,
-                    end,
-                },
-            });
-        }
+    let n_chunks = total.div_ceil(step);
+    for i in 0..n_chunks {
+        let start = i * step;
+        let end = (start + step).min(total);
+        tasks.push(ChunkTask { start, end });
     }
 
     let workers = config.workers.max(1);
@@ -256,36 +258,49 @@ where
     T: Numeric,
     R: ValueReader<Item = T>,
 {
-    let region = task.region;
-    let chunk_len = region.len();
-    let contig_name = genome
-        .get(region.contig)
-        .ok_or_else(|| {
-            PbzError::Metadata(format!(
-                "pipeline: unknown contig id {:?} in task",
-                region.contig
-            ))
-        })?
-        .name
-        .clone();
+    let (gs, ge) = (task.start, task.end);
+    let chunk_len = (ge - gs) as usize;
 
     // Scratch buffer: (chunk_len, n_readers). Pre-fill with `T::ZERO`; readers
-    // are expected to overwrite every position they cover.
+    // overwrite every position they cover.
     let mut buf = Array2::<T>::from_elem((chunk_len, n_readers), T::ZERO);
 
-    for (col_idx, reader) in forked.iter_mut().enumerate() {
-        let dst = buf.slice_mut(ndarray::s![.., col_idx..col_idx + 1]);
-        reader
-            .read_into(&contig_name, region.start, region.end, dst)
-            .map_err(|e| PbzError::Metadata(format!("reader {col_idx} failed on {region}: {e}")))?;
+    // The task may straddle contig boundaries; fill each overlapping contig's
+    // slice of the buffer by name. Contigs are in offset order, so stop once
+    // one starts past the task.
+    let offsets = genome.offsets();
+    for (i, contig) in genome.contigs().iter().enumerate() {
+        let c_start = offsets[i] as u64;
+        if c_start >= ge {
+            break;
+        }
+        let c_end = offsets[i + 1] as u64;
+        if c_end <= gs {
+            continue;
+        }
+        let ov_start = gs.max(c_start);
+        let ov_end = ge.min(c_end);
+        let (buf_lo, buf_hi) = ((ov_start - gs) as usize, (ov_end - gs) as usize);
+        let (local_lo, local_hi) = (ov_start - c_start, ov_end - c_start);
+        for (col_idx, reader) in forked.iter_mut().enumerate() {
+            let dst = buf.slice_mut(ndarray::s![buf_lo..buf_hi, col_idx..col_idx + 1]);
+            reader
+                .read_into(&contig.name, local_lo, local_hi, dst)
+                .map_err(|e| {
+                    PbzError::Metadata(format!(
+                        "reader {col_idx} failed on {} [{local_lo},{local_hi}): {e}",
+                        contig.name
+                    ))
+                })?;
+        }
     }
 
     // Collapse the column axis for scalar tracks; cohort tracks keep both.
     if track.rank() == 1 {
         let rank1 = buf.remove_axis(Axis(1)).into_dyn();
-        track.write_region::<T>(&region, rank1)?;
+        track.write_flat::<T>(gs, ge, rank1)?;
     } else {
-        track.write_region::<T>(&region, buf.into_dyn())?;
+        track.write_flat::<T>(gs, ge, buf.into_dyn())?;
     }
 
     let chunk_bytes = (chunk_len * n_readers * mem::size_of::<T>()) as u64;
