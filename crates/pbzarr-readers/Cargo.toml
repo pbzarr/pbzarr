@@ -15,6 +15,7 @@ publish = false
 pbzarr = { path = "../pbzarr" }
 ndarray = "0.17"
 anyhow = "1"
+serde_json = "1"
 d4 = { git = "https://github.com/cademirch/d4-format.git", rev = "f836299", default-features = false, features = ["local_reader"] }
 # Read-only: drops the `remote` (HTTP), `cli`, and `write` paths. bigtools
 # hard-deps tokio regardless, but the read path is fully synchronous, so the
@@ -23,7 +24,6 @@ bigtools = { version = "0.5.8", default-features = false, features = ["read"] }
 
 [dev-dependencies]
 tempfile = "3"
-serde_json = "1"
 # Fixture synthesis only: the bigtools writer needs a tokio runtime, kept out of
 # the library by living here. A current-thread runtime suffices for tiny files.
 bigtools = { version = "0.5.8", default-features = false, features = ["read", "write"] }

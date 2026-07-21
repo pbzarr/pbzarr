@@ -41,6 +41,17 @@ pub struct Config {
     /// Column chunk size for the track being imported. Consumed at track
     /// creation, like `chunk_size`.
     pub column_chunk_size: Option<usize>,
+    /// Position shard size for the track being imported. Consumed at track
+    /// creation, like `chunk_size`; `None` leaves the track unsharded.
+    pub shard_size: Option<usize>,
+    /// Column shard size for the track being imported. Consumed at track
+    /// creation; ignored unless `shard_size` is set.
+    pub shard_column_size: Option<usize>,
+    /// Column-axis dimension name for a cohort import (several sources). The
+    /// axis is generic; the readers default it to `"sample"`, but set this to
+    /// `"strand"`, `"context"`, etc. when the columns are not samples. Ignored
+    /// for single-source (scalar) imports.
+    pub column_dim: Option<String>,
     /// Optional progress observer.
     pub progress: Option<Arc<dyn ProgressSink>>,
 }
@@ -51,6 +62,9 @@ impl Default for Config {
             workers: 4,
             chunk_size: None,
             column_chunk_size: None,
+            shard_size: None,
+            shard_column_size: None,
+            column_dim: None,
             progress: None,
         }
     }

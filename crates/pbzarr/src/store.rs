@@ -441,14 +441,18 @@ fn resolve_fill_value(d: Dtype, custom: Option<&Value>) -> Result<FillValue> {
     };
     let bad = || PbzError::Metadata(format!("fill_value {v} out of range for {d} track"));
     let fv = match d {
-        Dtype::U8 => FillValue::from(u8::try_from(v.as_u64().ok_or_else(&bad)?).map_err(|_| bad())?),
+        Dtype::U8 => {
+            FillValue::from(u8::try_from(v.as_u64().ok_or_else(&bad)?).map_err(|_| bad())?)
+        }
         Dtype::U16 => {
             FillValue::from(u16::try_from(v.as_u64().ok_or_else(&bad)?).map_err(|_| bad())?)
         }
         Dtype::U32 => {
             FillValue::from(u32::try_from(v.as_u64().ok_or_else(&bad)?).map_err(|_| bad())?)
         }
-        Dtype::I8 => FillValue::from(i8::try_from(v.as_i64().ok_or_else(&bad)?).map_err(|_| bad())?),
+        Dtype::I8 => {
+            FillValue::from(i8::try_from(v.as_i64().ok_or_else(&bad)?).map_err(|_| bad())?)
+        }
         Dtype::I16 => {
             FillValue::from(i16::try_from(v.as_i64().ok_or_else(&bad)?).map_err(|_| bad())?)
         }
