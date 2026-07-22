@@ -21,6 +21,10 @@ d4 = { git = "https://github.com/cademirch/d4-format.git", rev = "f836299", defa
 # hard-deps tokio regardless, but the read path is fully synchronous, so the
 # reader never touches a runtime.
 bigtools = { version = "0.5.8", default-features = false, features = ["read"] }
+noodles-bgzf = "0.48"
+noodles-csi = "0.57"
+noodles-tabix = "0.63"
+noodles-core = "0.20"
 
 [dev-dependencies]
 tempfile = "3"
