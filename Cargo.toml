@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/pbzarr", "crates/pbzarr-readers", "crates/pbzarr-python"]
 
 [workspace.package]
-version = "0.4.0" # x-release-please-version
+version = "0.5.0" # x-release-please-version
 edition = "2024"
 license = "MIT"
 authors = ["Cade Mirchandani <cmirchan@ucsc.edu>"]
