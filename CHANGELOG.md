@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/pbzarr/pbzarr/compare/v0.4.0...v0.5.0) (2026-07-22)
+
+
+### Features
+
+* python flat api ([#13](https://github.com/pbzarr/pbzarr/issues/13)) ([bd5881d](https://github.com/pbzarr/pbzarr/commit/bd5881d9ea24317478c0d2001093ee47f50cdb81))
+* single-pass multi-column BED import to per-column tracks ([#12](https://github.com/pbzarr/pbzarr/issues/12)) ([ae90098](https://github.com/pbzarr/pbzarr/commit/ae900984e0cc6f1a25237dc2d534cb04ae656027))
+
 ## [0.4.0](https://github.com/pbzarr/pbzarr/compare/v0.3.1...v0.4.0) (2026-07-21)
 
 
