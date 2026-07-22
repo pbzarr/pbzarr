@@ -73,7 +73,7 @@ fn track_config<T: Numeric>(sources: &[BedSource], config: &Config) -> TrackConf
 }
 
 /// Zero fill matching `T::ZERO` so all-gap chunks are elided on write.
-fn zero_fill(dtype: Dtype) -> serde_json::Value {
+pub(super) fn zero_fill(dtype: Dtype) -> serde_json::Value {
     match dtype {
         Dtype::F32 | Dtype::F64 => serde_json::json!(0.0),
         Dtype::Bool => serde_json::json!(false),
