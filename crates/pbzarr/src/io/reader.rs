@@ -1,5 +1,6 @@
 use crate::genome::Genome;
-use crate::io::dtype::Numeric;
+use crate::io::column::ColumnSinkMut;
+use crate::io::dtype::{Dtype, Numeric};
 use crate::io::error::Result;
 use ndarray::ArrayViewMut2;
 pub trait ValueReader: Send + Sync {
@@ -34,6 +35,36 @@ pub trait ValueReader: Send + Sync {
     /// Produce a worker-local handle for use on a single thread.
     /// Shared state (index, header) is reused via `Arc`; per-thread
     /// state (file handle, decode buffers) is freshly allocated.
+    fn fork(&self) -> Result<Self>
+    where
+        Self: Sized;
+}
+
+/// Multi-column analogue of [`ValueReader`]: one source fans out to several
+/// tracks of possibly different dtypes in a single decode pass. Each element of
+/// `columns()` is one target track's dtype, in track order; `read_into` fills
+/// one [`ColumnSinkMut`] per column for the same `[start, end)` window.
+pub trait MultiValueReader: Send + Sync {
+    /// Contigs present in the source file, with lengths.
+    fn contigs(&self) -> &Genome;
+
+    /// Dtype of each target column/track, in order. `sinks` in `read_into`
+    /// matches this length and order.
+    fn columns(&self) -> &[Dtype];
+
+    /// Fill each sink with values for `[start, end)` on the contig named
+    /// `contig_name`. `sinks[i]` is already sliced to the window; the reader
+    /// indexes it from 0. Positions the source does not cover are left as the
+    /// caller's fill.
+    fn read_into(
+        &self,
+        contig_name: &str,
+        start: u64,
+        end: u64,
+        sinks: &mut [ColumnSinkMut<'_>],
+    ) -> Result<()>;
+
+    /// Worker-local handle, sharing index/header via `Arc` (see `ValueReader::fork`).
     fn fork(&self) -> Result<Self>
     where
         Self: Sized;

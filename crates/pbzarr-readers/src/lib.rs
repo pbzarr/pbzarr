@@ -9,6 +9,9 @@ pub mod bed;
 pub mod bigwig;
 pub mod d4;
 
-pub use bed::{BedReader, BedSource, column_index_by_name, from_bed};
+pub use bed::{
+    BedColumnSpec, BedMultiReader, BedReader, BedSchema, BedSource, ColumnSelector,
+    column_index_by_name, from_bed, from_bed_multi,
+};
 pub use bigwig::{BigWigReader, BigWigSource, from_bigwig};
 pub use d4::{D4Reader, D4Source, from_d4};

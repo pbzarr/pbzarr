@@ -34,7 +34,7 @@ pub struct BedReader<T> {
     _marker: PhantomData<T>,
 }
 
-fn open_bgzf(path: &Path) -> Result<bgzf::io::Reader<File>> {
+pub(super) fn open_bgzf(path: &Path) -> Result<bgzf::io::Reader<File>> {
     let file = File::open(path).map_err(|source| ReaderError::Io {
         path: path.to_path_buf(),
         source,
