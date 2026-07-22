@@ -1,6 +1,6 @@
 //! PyO3 bindings for pbzarr: `import_d4`, `import_bigwig`, and `import_bed`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -9,10 +9,22 @@ use pyo3::prelude::*;
 use pbzarr::Genome;
 use pbzarr::PbzStore;
 use pbzarr::import::Config;
+use pbzarr::io::Dtype;
 use pbzarr_readers::{
-    BedSource, BigWigSource, D4Source, column_index_by_name, from_bed as rs_from_bed,
-    from_bigwig as rs_from_bigwig, from_d4 as rs_from_d4,
+    BedColumnSpec, BedSchema, BedSource, BigWigSource, D4Source, column_index_by_name,
+    from_bed as rs_from_bed, from_bed_multi as rs_from_bed_multi, from_bigwig as rs_from_bigwig,
+    from_d4 as rs_from_d4,
 };
+
+/// Bytes per element for progress accounting.
+fn dtype_bytes(dt: Dtype) -> u64 {
+    match dt {
+        Dtype::U8 | Dtype::I8 | Dtype::Bool => 1,
+        Dtype::U16 | Dtype::I16 => 2,
+        Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
+        Dtype::F64 => 8,
+    }
+}
 
 mod progress;
 
@@ -208,6 +220,68 @@ fn import_bed(
     })
 }
 
+/// Single-pass, multi-column import of one tabix-indexed BED into N scalar
+/// tracks. `columns` is an ordered list of `(header_name, dtype)`; each becomes
+/// a track named after the column. `genome` is a .fai / chrom.sizes path.
+#[pyfunction]
+#[pyo3(signature = (store_path, bed_gz, columns, genome, workers=None, chunk_size=None, shard_size=None, progress=false))]
+#[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
+fn import_bed_multi(
+    py: Python<'_>,
+    store_path: String,
+    bed_gz: String,
+    columns: Vec<(String, String)>,
+    genome: String,
+    workers: Option<usize>,
+    chunk_size: Option<usize>,
+    shard_size: Option<usize>,
+    progress: bool,
+) -> PyResult<()> {
+    py.allow_threads(|| {
+        if columns.is_empty() {
+            return Err(PbzError::new_err("bed multi import: no columns"));
+        }
+        let mut store =
+            PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let genome = Genome::from_fai(&genome).map_err(|e| PbzError::new_err(format!("{e}")))?;
+
+        let parsed: Vec<(String, Dtype)> = columns
+            .iter()
+            .map(|(name, ds)| {
+                Dtype::from_str(ds)
+                    .map(|dt| (name.clone(), dt))
+                    .map_err(|e| PbzError::new_err(format!("column {name:?}: {e}")))
+            })
+            .collect::<PyResult<_>>()?;
+        let schema = BedSchema(
+            parsed
+                .iter()
+                .map(|(name, dt)| BedColumnSpec::named(name.clone(), *dt))
+                .collect(),
+        );
+
+        let mut config = Config::default();
+        if let Some(w) = workers {
+            config.workers = w;
+        }
+        if let Some(c) = chunk_size {
+            config.chunk_size = Some(c);
+        }
+        if let Some(s) = shard_size {
+            config.shard_size = Some(s);
+        }
+        if progress {
+            let sum_len: u64 = genome.contigs().iter().map(|c| c.length).sum();
+            let per_pos: u64 = parsed.iter().map(|(_, dt)| dtype_bytes(*dt)).sum();
+            config.progress = Some(progress::make_sink("bed-multi", sum_len * per_pos));
+        }
+
+        rs_from_bed_multi(&mut store, Path::new(&bed_gz), &schema, genome, config)
+            .map_err(|e| PbzError::new_err(format!("{e}")))?;
+        Ok(())
+    })
+}
+
 /// Create a new empty flat pbz store (a bare `zarr_conventions` marker root).
 /// The imports open this store and add tracks to it.
 #[pyfunction]
@@ -245,6 +319,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(import_d4, m)?)?;
     m.add_function(wrap_pyfunction!(import_bigwig, m)?)?;
     m.add_function(wrap_pyfunction!(import_bed, m)?)?;
+    m.add_function(wrap_pyfunction!(import_bed_multi, m)?)?;
     m.add_function(wrap_pyfunction!(create_store, m)?)?;
     m.add_function(wrap_pyfunction!(d4_contigs, m)?)?;
     m.add_function(wrap_pyfunction!(bigwig_contigs, m)?)?;
