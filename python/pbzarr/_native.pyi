@@ -21,5 +21,17 @@ def import_bigwig(
     column_chunk_size: int | None = ...,
     progress: bool = ...,
 ) -> None: ...
+def import_bed(
+    store_path: str,
+    track: str,
+    sources: Sequence[tuple[str, str | None]],
+    column: str,
+    dtype: str,
+    genome: str,
+    workers: int | None = ...,
+    chunk_size: int | None = ...,
+    column_chunk_size: int | None = ...,
+    progress: bool = ...,
+) -> None: ...
 def d4_contigs(path: str) -> list[tuple[str, int]]: ...
 def bigwig_contigs(path: str) -> list[tuple[str, int]]: ...
