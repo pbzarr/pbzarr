@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/pbzarr/pbzarr/compare/v0.5.0...v0.5.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* add PbzStore.import_bed_multi for single-pass multi-column BED import ([#15](https://github.com/pbzarr/pbzarr/issues/15)) ([f96eef0](https://github.com/pbzarr/pbzarr/commit/f96eef01b5fd62071ed02a7c86ceb769b77e8677))
+
 ## [0.5.0](https://github.com/pbzarr/pbzarr/compare/v0.4.0...v0.5.0) (2026-07-22)
 
 
