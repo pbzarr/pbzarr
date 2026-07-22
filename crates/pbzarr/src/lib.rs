@@ -3,12 +3,14 @@ pub mod genome;
 pub mod import;
 pub mod io;
 pub mod region_query;
+pub mod stack;
 pub mod store;
 pub mod track;
 
 pub use error::{PbzError, Result};
 pub use genome::{Contig, ContigId, Genome, Region};
 pub use region_query::{RegionQuery, parse_region_query};
+pub use stack::{StackConfig, stack};
 pub use store::PbzStore;
 pub use track::{ConventionRef, PerbaseTrackAttrs, Track, TrackConfig};
 

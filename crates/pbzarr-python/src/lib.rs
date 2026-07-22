@@ -10,6 +10,7 @@ use pbzarr::Genome;
 use pbzarr::PbzStore;
 use pbzarr::import::Config;
 use pbzarr::io::Dtype;
+use pbzarr::{StackConfig, stack as rs_stack};
 use pbzarr_readers::{
     BedColumnSpec, BedSchema, BedSource, BigWigSource, D4Source, column_index_by_name,
     from_bed as rs_from_bed, from_bed_multi as rs_from_bed_multi, from_bigwig as rs_from_bigwig,
@@ -282,6 +283,57 @@ fn import_bed_multi(
     })
 }
 
+/// Combine single-sample stores into a fresh cohort store `out`.
+///
+/// `sources` is a list of `(store_path, label)`; `label=None` defaults to the
+/// store's filename stem. Each shared scalar track becomes a `(ΣL, N)` cohort
+/// track. All sources must share a genome; `tracks=None` stacks every track of
+/// the first source (each must exist in all sources).
+#[pyfunction]
+#[pyo3(signature = (sources, out, tracks=None, column_dim=None, column_chunk_size=None, workers=None))]
+fn stack(
+    py: Python<'_>,
+    sources: Vec<(String, Option<String>)>,
+    out: String,
+    tracks: Option<Vec<String>>,
+    column_dim: Option<String>,
+    column_chunk_size: Option<usize>,
+    workers: Option<usize>,
+) -> PyResult<()> {
+    py.allow_threads(|| {
+        if sources.is_empty() {
+            return Err(PbzError::new_err("stack: no sources"));
+        }
+        let opened: Vec<(PbzStore, String)> = sources
+            .iter()
+            .map(|(path, label)| {
+                let store = PbzStore::open(path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+                let label = label.clone().unwrap_or_else(|| {
+                    Path::new(path)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.clone())
+                });
+                Ok((store, label))
+            })
+            .collect::<PyResult<_>>()?;
+
+        let mut out_store =
+            PbzStore::create(&out).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let mut config = StackConfig {
+            tracks,
+            column_dim,
+            column_chunk_size,
+            ..StackConfig::default()
+        };
+        if let Some(w) = workers {
+            config.workers = w;
+        }
+        rs_stack(opened, &mut out_store, config).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        Ok(())
+    })
+}
+
 /// Create a new empty flat pbz store (a bare `zarr_conventions` marker root).
 /// The imports open this store and add tracks to it.
 #[pyfunction]
@@ -321,6 +373,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(import_bed, m)?)?;
     m.add_function(wrap_pyfunction!(import_bed_multi, m)?)?;
     m.add_function(wrap_pyfunction!(create_store, m)?)?;
+    m.add_function(wrap_pyfunction!(stack, m)?)?;
     m.add_function(wrap_pyfunction!(d4_contigs, m)?)?;
     m.add_function(wrap_pyfunction!(bigwig_contigs, m)?)?;
     Ok(())
