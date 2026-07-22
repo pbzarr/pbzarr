@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use bigtools::BigWigWrite;
 use bigtools::beddata::BedParserStreamingIterator;
@@ -14,6 +15,7 @@ use bigtools::beddata::BedParserStreamingIterator;
 /// Write a bigWig from `intervals` (`chrom, start, end, value`) over the given
 /// `chrom_sizes`. Intervals must be sorted by start within each chrom; pass
 /// `allow_out_of_order = true` when chroms themselves are not in sorted order.
+#[allow(dead_code)]
 pub fn write_bigwig(
     tmp: &Path,
     name: &str,
@@ -44,4 +46,56 @@ pub fn write_bigwig(
         .unwrap();
     out.write(vals, runtime).unwrap();
     bw_path
+}
+
+/// True if both `bgzip` and `tabix` are on PATH.
+#[allow(dead_code)]
+pub fn htslib_available() -> bool {
+    ["bgzip", "tabix"].iter().all(|bin| {
+        Command::new(bin)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// Write a plain BED with a `#`-prefixed header, bgzip it, and tabix-index it.
+/// `rows` are `(chrom, start, end, data_cells)`; the header names chrom/start/end
+/// plus one entry per data cell. Returns the `.bed.gz` path (sibling `.tbi` next
+/// to it). Rows MUST be coordinate-sorted.
+#[allow(dead_code)]
+pub fn write_bed_bgzip_tabix(
+    dir: &Path,
+    name: &str,
+    header: &[&str],
+    rows: &[(&str, u64, u64, Vec<&str>)],
+) -> PathBuf {
+    let bed_path = dir.join(format!("{name}.bed"));
+    let mut f = std::fs::File::create(&bed_path).unwrap();
+    writeln!(f, "#{}", header.join("\t")).unwrap();
+    for (chrom, start, end, cells) in rows {
+        write!(f, "{chrom}\t{start}\t{end}").unwrap();
+        for c in cells {
+            write!(f, "\t{c}").unwrap();
+        }
+        writeln!(f).unwrap();
+    }
+    drop(f);
+
+    let status = Command::new("bgzip")
+        .arg("-f")
+        .arg(&bed_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "bgzip failed");
+    let gz_path = dir.join(format!("{name}.bed.gz"));
+
+    let status = Command::new("tabix")
+        .args(["-f", "-p", "bed"])
+        .arg(&gz_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "tabix failed");
+    gz_path
 }

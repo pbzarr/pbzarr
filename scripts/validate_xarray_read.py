@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 
-import numpy as np
 import xarray as xr
 
 
@@ -19,30 +18,24 @@ def main() -> int:
             check=True,
         )
 
-        dt = xr.open_datatree(out, engine="zarr")
+        dt = xr.open_datatree(out, engine="zarr", consolidated=False)
 
-        # root has contigs + contig_lengths
-        assert "contigs" in dt, list(dt.data_vars) + list(dt.coords)
-        names = list(dt["contigs"].values)
-        assert names == ["chr1", "chr2"], names
+        # tracks are the children now (not contigs)
+        assert set(dt.children) == {"mask", "depth"}, list(dt.children)
 
-        chr1 = dt["chr1"].to_dataset()
-        assert "mask" in chr1, list(chr1.data_vars)
-        assert chr1["mask"].dims == ("position",), chr1["mask"].dims
-        assert "depth" in chr1
-        assert chr1["depth"].dims == ("position", "sample"), chr1["depth"].dims
-        assert list(chr1.coords["sample"].values) == ["A", "B", "C"], \
-            list(chr1.coords["sample"].values)
+        depth_ds = dt["depth"].to_dataset()
+        assert depth_ds["values"].dims == ("position", "sample"), depth_ds["values"].dims
+        assert list(depth_ds["sample"].values) == ["A", "B", "C"], list(depth_ds["sample"].values)
 
-        # values
-        mask = chr1["mask"].values
+        mask = dt["mask"].to_dataset()["values"].values   # flat (3000,)
+        depth = depth_ds["values"].values                  # flat (3000, 3)
+
+        # chr1 occupies flat positions 0..2000
         for i in range(2_000):
             assert mask[i] == (i % 7 == 0), f"mask[{i}] mismatch (got {mask[i]})"
-        depth = chr1["depth"].values
-        for i in range(2_000):
-            assert depth[i, 0] == i, f"depth[{i},0]={depth[i,0]}"
-            assert depth[i, 1] == i * 2, f"depth[{i},1]={depth[i,1]}"
-            assert depth[i, 2] == i * 3, f"depth[{i},2]={depth[i,2]}"
+            assert depth[i, 0] == i, f"depth[{i},0]={depth[i, 0]}"
+            assert depth[i, 1] == i * 2, f"depth[{i},1]={depth[i, 1]}"
+            assert depth[i, 2] == i * 3, f"depth[{i},2]={depth[i, 2]}"
 
     print("round-trip OK")
     return 0

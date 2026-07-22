@@ -24,6 +24,7 @@ doc = "cargo doc --workspace --no-deps --open"
 [feature.dev.dependencies]
 # osx-arm64 has 0.3.11; linux-64/osx-64 ship 0.3.10. Pin to the 0.3 line.
 d4tools = ">=0.3.10,<0.4"
+htslib = ">=1.24,<2"
 
 # --- validate feature: cross-language xarray round-trip ---
 [feature.validate.dependencies]

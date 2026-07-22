@@ -5,8 +5,10 @@
 //! pipeline; the `from_<format>` functions are the bulk-import entry points.
 //! Future formats (bed, bedgraph) will land as sibling modules.
 
+pub mod bed;
 pub mod bigwig;
 pub mod d4;
 
+pub use bed::{BedReader, BedSource, column_index_by_name, from_bed};
 pub use bigwig::{BigWigReader, BigWigSource, from_bigwig};
 pub use d4::{D4Reader, D4Source, from_d4};

@@ -1,4 +1,4 @@
-//! PyO3 bindings for pbzarr: `import_d4` and `import_bigwig`.
+//! PyO3 bindings for pbzarr: `import_d4`, `import_bigwig`, and `import_bed`.
 
 use std::path::PathBuf;
 
@@ -6,10 +6,12 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use pbzarr::Genome;
 use pbzarr::PbzStore;
 use pbzarr::import::Config;
 use pbzarr_readers::{
-    BigWigSource, D4Source, from_bigwig as rs_from_bigwig, from_d4 as rs_from_d4,
+    BedSource, BigWigSource, D4Source, column_index_by_name, from_bed as rs_from_bed,
+    from_bigwig as rs_from_bigwig, from_d4 as rs_from_d4,
 };
 
 mod progress;
@@ -129,6 +131,92 @@ fn import_bigwig(
     })
 }
 
+/// Import one column from N bgzipped, tabix-indexed BED files into a track.
+///
+/// `column` is a header name; `dtype` is one of "int32" | "float32" | "bool".
+/// `genome` is a .fai / chrom.sizes path (BED files carry no contig lengths).
+#[pyfunction]
+#[pyo3(signature = (store_path, track, sources, column, dtype, genome, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
+#[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
+fn import_bed(
+    py: Python<'_>,
+    store_path: String,
+    track: String,
+    sources: Vec<(String, Option<String>)>,
+    column: String,
+    dtype: String,
+    genome: String,
+    workers: Option<usize>,
+    chunk_size: Option<usize>,
+    column_chunk_size: Option<usize>,
+    progress: bool,
+) -> PyResult<()> {
+    py.allow_threads(|| {
+        let mut store =
+            PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let bed_sources: Vec<BedSource> = sources
+            .iter()
+            .map(|(path, sample_label)| BedSource {
+                path: PathBuf::from(path),
+                sample_label: sample_label.clone(),
+            })
+            .collect();
+        let (first, _) = bed_sources
+            .first()
+            .map(|s| (&s.path, ()))
+            .ok_or_else(|| PbzError::new_err("bed import: no sources"))?;
+        let column_idx =
+            column_index_by_name(first, &column).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let genome = Genome::from_fai(&genome).map_err(|e| PbzError::new_err(format!("{e}")))?;
+
+        let mut config = Config::default();
+        if let Some(w) = workers {
+            config.workers = w;
+        }
+        if let Some(c) = chunk_size {
+            config.chunk_size = Some(c);
+        }
+        if let Some(c) = column_chunk_size {
+            config.column_chunk_size = Some(c);
+        }
+        if progress {
+            let sum_len: u64 = genome.contigs().iter().map(|c| c.length).sum();
+            let elem = match dtype.as_str() {
+                "int32" => std::mem::size_of::<i32>(),
+                "float32" => std::mem::size_of::<f32>(),
+                "bool" => std::mem::size_of::<bool>(),
+                other => return Err(PbzError::new_err(format!("unsupported dtype {other:?}"))),
+            };
+            let total = (sum_len) * bed_sources.len() as u64 * elem as u64;
+            config.progress = Some(progress::make_sink(&track, total));
+        }
+
+        match dtype.as_str() {
+            "int32" => {
+                rs_from_bed::<i32>(&mut store, &track, &bed_sources, column_idx, genome, config)
+            }
+            "float32" => {
+                rs_from_bed::<f32>(&mut store, &track, &bed_sources, column_idx, genome, config)
+            }
+            "bool" => {
+                rs_from_bed::<bool>(&mut store, &track, &bed_sources, column_idx, genome, config)
+            }
+            other => return Err(PbzError::new_err(format!("unsupported dtype {other:?}"))),
+        }
+        .map_err(|e| PbzError::new_err(format!("{e}")))?;
+        Ok(())
+    })
+}
+
+/// Create a new empty flat pbz store (a bare `zarr_conventions` marker root).
+/// The imports open this store and add tracks to it.
+#[pyfunction]
+fn create_store(store_path: String) -> PyResult<()> {
+    PbzStore::create(&store_path)
+        .map(|_| ())
+        .map_err(|e| PbzError::new_err(format!("{e}")))
+}
+
 /// Read a d4 file's contig list from its header.
 ///
 /// Returns `(name, length)` pairs in file order, sizing a store directly from
@@ -156,6 +244,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PbzError", m.py().get_type::<PbzError>())?;
     m.add_function(wrap_pyfunction!(import_d4, m)?)?;
     m.add_function(wrap_pyfunction!(import_bigwig, m)?)?;
+    m.add_function(wrap_pyfunction!(import_bed, m)?)?;
+    m.add_function(wrap_pyfunction!(create_store, m)?)?;
     m.add_function(wrap_pyfunction!(d4_contigs, m)?)?;
     m.add_function(wrap_pyfunction!(bigwig_contigs, m)?)?;
     Ok(())
