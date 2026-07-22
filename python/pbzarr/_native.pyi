@@ -33,6 +33,16 @@ def import_bed(
     column_chunk_size: int | None = ...,
     progress: bool = ...,
 ) -> None: ...
+def import_bed_multi(
+    store_path: str,
+    bed_gz: str,
+    columns: Sequence[tuple[str, str]],
+    genome: str,
+    workers: int | None = ...,
+    chunk_size: int | None = ...,
+    shard_size: int | None = ...,
+    progress: bool = ...,
+) -> None: ...
 def create_store(store_path: str) -> None: ...
 def d4_contigs(path: str) -> list[tuple[str, int]]: ...
 def bigwig_contigs(path: str) -> list[tuple[str, int]]: ...

@@ -44,3 +44,28 @@ class PbzStore:
         import xarray as xr
 
         return xr.open_datatree(self.path, engine="zarr", consolidated=False)
+
+    def import_bed_multi(
+        self,
+        bed: str,
+        columns: dict[str, str],
+        *,
+        genome: str,
+        workers: int | None = None,
+        chunk_size: int | None = None,
+        shard_size: int | None = None,
+        progress: bool = False,
+    ) -> list[Track]:
+        """Import many BED columns into per-column scalar tracks in one pass.
+
+        `columns` maps a header column name to a dtype ("int32", "float32",
+        "bool", ...); each becomes a track named after the column. `genome` is a
+        .fai / chrom.sizes path. Returns the created `Track` handles in order.
+        """
+        from ._native import import_bed_multi as _native_import_bed_multi
+
+        items = list(columns.items())
+        _native_import_bed_multi(
+            self.path, str(bed), items, str(genome), workers, chunk_size, shard_size, progress
+        )
+        return [self.track(name) for name, _ in items]
