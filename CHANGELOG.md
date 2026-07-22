@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/pbzarr/pbzarr/compare/v0.3.1...v0.4.0) (2026-07-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* 0.3 stores are unreadable; flat storage-agnostic layout per track group (values + offsets/contigs ragged index), per-track genome, no migration.
+
+### Features
+
+* flat layout ([#10](https://github.com/pbzarr/pbzarr/issues/10)) ([54b7461](https://github.com/pbzarr/pbzarr/commit/54b74618ccc92bdb89f856c098198bdaff6430ac))
+
 ## [0.3.1](https://github.com/pbzarr/pbzarr/compare/v0.3.0...v0.3.1) (2026-06-18)
 
 
