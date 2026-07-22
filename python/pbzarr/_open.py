@@ -17,5 +17,5 @@ def open(path: str, *, chunks: Any = None) -> xr.DataTree:
     xarray semantics without the store handle.
     """
     if chunks is None:
-        return xr.open_datatree(path, engine="zarr")
-    return xr.open_datatree(path, engine="zarr", chunks=chunks)
+        return xr.open_datatree(path, engine="zarr", consolidated=False)
+    return xr.open_datatree(path, engine="zarr", chunks=chunks, consolidated=False)

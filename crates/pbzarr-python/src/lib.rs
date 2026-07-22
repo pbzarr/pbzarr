@@ -208,6 +208,15 @@ fn import_bed(
     })
 }
 
+/// Create a new empty flat pbz store (a bare `zarr_conventions` marker root).
+/// The imports open this store and add tracks to it.
+#[pyfunction]
+fn create_store(store_path: String) -> PyResult<()> {
+    PbzStore::create(&store_path)
+        .map(|_| ())
+        .map_err(|e| PbzError::new_err(format!("{e}")))
+}
+
 /// Read a d4 file's contig list from its header.
 ///
 /// Returns `(name, length)` pairs in file order, sizing a store directly from
@@ -236,6 +245,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(import_d4, m)?)?;
     m.add_function(wrap_pyfunction!(import_bigwig, m)?)?;
     m.add_function(wrap_pyfunction!(import_bed, m)?)?;
+    m.add_function(wrap_pyfunction!(create_store, m)?)?;
     m.add_function(wrap_pyfunction!(d4_contigs, m)?)?;
     m.add_function(wrap_pyfunction!(bigwig_contigs, m)?)?;
     Ok(())

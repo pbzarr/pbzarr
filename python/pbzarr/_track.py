@@ -1,195 +1,111 @@
-"""Pure-Python create_track via zarr-python v3.
+"""Track: the standalone read/query unit over one flat track.
 
-Writes the per-contig data array + (for cohort tracks) the column-dim coord
-array, then updates the root `perbase_zarr.tracks` map. Matches the layout
-that the Rust pbzarr crate writes.
+Holds (store_path, name). Materializes the track via import_*, then reads it
+(metadata + region API) by resolving contig regions to flat slices. Mirrors the
+Rust `Track`.
 """
 from __future__ import annotations
-from typing import Any, Sequence, cast
 
-import numpy as np
 import zarr
 
-from ._compression import default_data_codecs
+from . import _read
+from ._read import RegionBlocks
+from ._region import RegionQuery, parse_region
 
-DEFAULT_CHUNK_SIZE = 1_000_000
-DEFAULT_COLUMN_CHUNK_SIZE = 16
+
+def _rq_list(query) -> list[RegionQuery]:
+    if isinstance(query, str):
+        return [parse_region(query)]
+    if isinstance(query, tuple):
+        return [RegionQuery(*query)]
+    return [parse_region(q) if isinstance(q, str) else RegionQuery(*q) for q in query]
 
 
-def create_track(
-    path: str,
-    *,
-    track: str,
-    dtype: str,
-    columns: Sequence[str] | None = None,
-    column_dim: str | None = None,
-    chunk_size: int | None = None,
-    column_chunk_size: int | None = None,
-    shard_size: int | None = None,
-    shard_column_size: int | None = None,
-    compressors: Sequence | None = None,
-    fill_value=None,
-    description: str | None = None,
-    source: str | None = None,
-    overwrite: bool = False,
-) -> None:
-    """Register a new track in the store at `path`.
+def _is_single(query) -> bool:
+    return isinstance(query, (str, tuple))
 
-    Pass `columns=[...]` for a 2D cohort track; omit for a 1D scalar track.
-    `column_dim` defaults to `"column"` when `columns` is given.
-    `compressors` overrides the data-array codecs; `None` uses the library
-    default (Blosc zstd-5, byte shuffle) and `[]` writes uncompressed.
-    The chosen codec is recorded on the array and reused by any later
-    writer that fills it. If the track will be populated through
-    `import_d4` (the Rust/zarrs path), pick a codec `zarrs` can also
-    encode, since the importer encodes through the pipeline recorded here.
-    Pass `overwrite=True` to replace an existing track of the same name;
-    the existing per-contig data arrays are deleted before recreation.
-    """
-    g = zarr.open_group(path, mode="r+")
 
-    pbz_ns: dict[str, Any] = dict(_attr_dict(g.attrs, "perbase_zarr"))
-    tracks: dict[str, Any] = dict(_attr_dict_from(pbz_ns, "tracks"))
-
-    contigs = [str(v) for v in np.asarray(_array(g, "contigs")[:])]
-    contig_lengths = [int(v) for v in np.asarray(_array(g, "contig_lengths")[:])]
-
-    if track in tracks:
-        if not overwrite:
-            raise ValueError(f"track {track!r} already exists")
-        for name in contigs:
-            cg = _group(g, name)
-            if track in cg:
-                del cg[track]
-        tracks.pop(track)
-
-    chunk = chunk_size if chunk_size is not None else DEFAULT_CHUNK_SIZE
-    np_dtype = np.dtype(dtype)
-    codecs = list(compressors) if compressors is not None else default_data_codecs()
-
-    if columns is not None:
-        n_cols = len(columns)
-        dim_name = column_dim if column_dim is not None else "column"
-        col_chunk = (
-            column_chunk_size if column_chunk_size is not None
-            else DEFAULT_COLUMN_CHUNK_SIZE
-        )
-    else:
-        n_cols = 0
-        dim_name = None
-        col_chunk = None
-
-    for name, length in zip(contigs, contig_lengths):
-        contig_g = g.require_group(name)
-        inner_pos = max(1, min(chunk, length))
-
-        if columns is not None:
-            assert dim_name is not None and col_chunk is not None
-            inner_col = max(1, min(col_chunk, n_cols))
-            data_shape: tuple[int, ...] = (length, n_cols)
-            data_chunks: tuple[int, ...] = (inner_pos, inner_col)
-            dims = ["position", dim_name]
-            if shard_size is not None:
-                col_shard = shard_column_size or n_cols
-                # Shard must be an exact multiple of inner chunk size; do not
-                # clamp to contig length (zarr handles partial edge shards).
-                pos_shard = max(inner_pos, (shard_size // inner_pos) * inner_pos)
-                data_shards: tuple[int, ...] | None = (
-                    pos_shard,
-                    max(1, min(col_shard, n_cols)),
-                )
-            else:
-                data_shards = None
+def _norm_sources(sources) -> list[tuple[str, str | None]]:
+    out: list[tuple[str, str | None]] = []
+    for s in sources:
+        if isinstance(s, (tuple, list)):
+            out.append((str(s[0]), s[1] if len(s) > 1 else None))
         else:
-            data_shape = (length,)
-            data_chunks = (inner_pos,)
-            dims = ["position"]
-            if shard_size is not None:
-                pos_shard = max(inner_pos, (shard_size // inner_pos) * inner_pos)
-                data_shards = (pos_shard,)
-            else:
-                data_shards = None
-
-        contig_g.create_array(
-            track,
-            shape=data_shape,
-            chunks=data_chunks,
-            shards=data_shards,
-            dtype=np_dtype,
-            dimension_names=dims,
-            compressors=codecs,
-        )
-
-        if columns is not None:
-            assert dim_name is not None
-            labels = np.array(list(columns), dtype=str)
-            if dim_name in contig_g:
-                coord_existing = _array(contig_g, dim_name)
-                existing = [str(v) for v in np.asarray(coord_existing[:])]
-                if existing != list(labels):
-                    raise ValueError(
-                        f"column dim {dim_name!r} already exists on {name!r} "
-                        f"with different labels; pick a different column_dim"
-                    )
-            else:
-                coord = contig_g.create_array(
-                    dim_name,
-                    shape=(n_cols,),
-                    chunks=(n_cols,),
-                    dtype=str,
-                    dimension_names=[dim_name],
-                )
-                coord[:] = labels
-
-    meta: dict[str, Any] = {"dtype": dtype, "chunk_size": chunk}
-    if columns is not None:
-        meta["column_dim"] = dim_name
-        if col_chunk is not None:
-            meta["column_chunk_size"] = col_chunk
-    if shard_size is not None:
-        meta["shard_size"] = shard_size
-    if shard_column_size is not None:
-        meta["shard_column_size"] = shard_column_size
-    if fill_value is not None:
-        meta["fill_value"] = fill_value
-    if description is not None:
-        meta["description"] = description
-    if source is not None:
-        meta["source"] = source
-
-    tracks[track] = meta
-    pbz_ns["tracks"] = tracks
-    g.attrs["perbase_zarr"] = pbz_ns
-
-    # Refresh consolidated metadata so readers benefit from the fast path.
-    zarr.consolidate_metadata(g.store)
+            out.append((str(s), None))
+    return out
 
 
-def _attr_dict(attrs: Any, key: str) -> dict[str, Any]:
-    val = attrs.get(key, {})
-    if not isinstance(val, dict):
-        return {}
-    return cast(dict[str, Any], val)
+class Track:
+    def __init__(self, store_path: str, name: str):
+        self.store_path = str(store_path)
+        self.name = name
 
+    def _values(self) -> "zarr.Array":
+        return zarr.open_array(f"{self.store_path}/{self.name}/values", mode="r")
 
-def _attr_dict_from(d: dict[str, Any], key: str) -> dict[str, Any]:
-    val = d.get(key, {})
-    if not isinstance(val, dict):
-        return {}
-    return cast(dict[str, Any], val)
+    @property
+    def dtype(self) -> str:
+        return str(self._values().dtype)
 
+    @property
+    def rank(self) -> int:
+        return len(self._values().metadata.dimension_names)
 
-def _array(g: zarr.Group, name: str) -> zarr.Array:
-    node = g[name]
-    assert isinstance(node, zarr.Array), (
-        f"expected {name!r} to be a zarr Array, got {type(node).__name__}"
-    )
-    return node
+    @property
+    def column_dim(self) -> str | None:
+        dims = self._values().metadata.dimension_names
+        return dims[1] if len(dims) == 2 else None
 
+    def total_len(self) -> int:
+        return int(self._values().shape[0])
 
-def _group(g: zarr.Group, name: str) -> zarr.Group:
-    node = g[name]
-    assert isinstance(node, zarr.Group), (
-        f"expected {name!r} to be a zarr Group, got {type(node).__name__}"
-    )
-    return node
+    def genome(self) -> list[tuple[str, int]]:
+        ta = _read.open_track(self.store_path, self.name)
+        return [(c, int(ta.offsets[i + 1] - ta.offsets[i])) for i, c in enumerate(ta.contigs)]
+
+    def column_labels(self) -> list[str] | None:
+        return _read.open_track(self.store_path, self.name).labels
+
+    def region(self, query, *, column: str | None = None):
+        rqs = _rq_list(query)
+        if _is_single(query):
+            return _read.read_region(self.store_path, self.name, rqs[0], column)
+        return _read.gather_regions(self.store_path, self.name, rqs, column)
+
+    def region_reduced(self, query, *, reduce: str, column: str | None = None):
+        da = _read.gather_regions(self.store_path, self.name, _rq_list(query), column)
+        grouped = da.groupby("region")
+        try:
+            reducer = getattr(grouped, reduce)
+        except AttributeError as e:
+            raise ValueError(f"unsupported reduce {reduce!r}") from e
+        return reducer()
+
+    def region_blocks(self, query, *, column: str | None = None) -> RegionBlocks:
+        return _read.region_blocks(self.store_path, self.name, _rq_list(query), column)
+
+    def dataset(self):
+        import xarray as xr
+
+        return xr.open_datatree(self.store_path, engine="zarr", consolidated=False)[self.name].to_dataset()
+
+    def import_bed(self, sources, *, column: str, dtype: str, genome: str,
+                   workers=None, chunk_size=None, column_chunk_size=None, progress=False) -> None:
+        from ._native import import_bed
+
+        import_bed(self.store_path, self.name, _norm_sources(sources), column, dtype, genome,
+                   workers, chunk_size, column_chunk_size, progress)
+
+    def import_d4(self, sources, *, workers=None, chunk_size=None,
+                  column_chunk_size=None, progress=False) -> None:
+        from ._native import import_d4
+
+        import_d4(self.store_path, self.name, _norm_sources(sources),
+                  workers, chunk_size, column_chunk_size, progress)
+
+    def import_bigwig(self, sources, *, workers=None, chunk_size=None,
+                      column_chunk_size=None, progress=False) -> None:
+        from ._native import import_bigwig
+
+        import_bigwig(self.store_path, self.name, _norm_sources(sources),
+                      workers, chunk_size, column_chunk_size, progress)
