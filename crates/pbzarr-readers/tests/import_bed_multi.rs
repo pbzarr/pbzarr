@@ -190,7 +190,9 @@ fn multi_column_chunk_and_contig_boundaries() {
 #[test]
 fn uncovered_positions_read_back_as_zero() {
     if !htslib_available() {
-        eprintln!("skip import_bed_multi::uncovered_positions_read_back_as_zero: bgzip/tabix not on PATH");
+        eprintln!(
+            "skip import_bed_multi::uncovered_positions_read_back_as_zero: bgzip/tabix not on PATH"
+        );
         return;
     }
     let dir = TempDir::new().unwrap();
@@ -210,20 +212,47 @@ fn uncovered_positions_read_back_as_zero() {
         BedColumnSpec::named("cov", Dtype::I32),
         BedColumnSpec::named("flag", Dtype::Bool),
     ]);
-    from_bed_multi(&mut store, &bed, &schema, genome(&[("chr1", 40)]), Config::default()).unwrap();
+    from_bed_multi(
+        &mut store,
+        &bed,
+        &schema,
+        genome(&[("chr1", 40)]),
+        Config::default(),
+    )
+    .unwrap();
 
     let g = store.genome_for("cov").unwrap();
-    let reg = Region { contig: g.id("chr1").unwrap(), start: 0, end: 40 };
+    let reg = Region {
+        contig: g.id("chr1").unwrap(),
+        start: 0,
+        end: 40,
+    };
 
-    let cov = store.track("cov").unwrap().read_region::<i32>(&reg).unwrap()
-        .into_dimensionality::<Ix1>().unwrap();
+    let cov = store
+        .track("cov")
+        .unwrap()
+        .read_region::<i32>(&reg)
+        .unwrap()
+        .into_dimensionality::<Ix1>()
+        .unwrap();
     assert!(cov.iter().take(10).all(|&v| v == 5));
-    assert!(cov.iter().skip(10).take(10).all(|&v| v == 0), "gap reads as zero");
+    assert!(
+        cov.iter().skip(10).take(10).all(|&v| v == 0),
+        "gap reads as zero"
+    );
     assert!(cov.iter().skip(20).take(10).all(|&v| v == 7));
     assert!(cov.iter().skip(30).all(|&v| v == 0), "tail reads as zero");
 
-    let flag = store.track("flag").unwrap().read_region::<bool>(&reg).unwrap()
-        .into_dimensionality::<Ix1>().unwrap();
+    let flag = store
+        .track("flag")
+        .unwrap()
+        .read_region::<bool>(&reg)
+        .unwrap()
+        .into_dimensionality::<Ix1>()
+        .unwrap();
     assert!(flag.iter().take(10).all(|&v| v));
-    assert!(flag.iter().skip(10).all(|&v| !v), "uncovered + true-zero both read false");
+    assert!(
+        flag.iter().skip(10).all(|&v| !v),
+        "uncovered + true-zero both read false"
+    );
 }
