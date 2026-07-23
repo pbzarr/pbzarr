@@ -8,7 +8,7 @@ This repo is a Cargo workspace with all Rust crates under `crates/` (Ruff-style 
 
 ## Status
 
-The flat self-describing track layout (pbz v0.4) is implemented for the Rust core and the d4/bigWig readers, on branch `feat/flat-layout-rust-core`: `PbzStore`, per-track `Genome`, `Track::{read_region,write_region}`, the import pipeline, and `pbzarr_readers::{from_d4,from_bigwig}` all target the flat layout. The PyO3/Python side is follow-on work to bring up to date with the rewrite.
+The flat self-describing track layout (pbz v0.4) is implemented end to end (crate 0.5.1): `PbzStore`, per-track `Genome`, `Track::{read_region,write_region}`, the import pipeline, all readers (`pbzarr_readers::{from_d4,from_bigwig,from_bed,from_bed_multi}`), and batch stack (`pbzarr::stack`, combining single-sample stores into a cohort store). The PyO3/Python package targets the flat layout too (`PbzStore`, `Track`, `import_{d4,bigwig,bed,bed_multi}`, `stack`, region reads).
 
 An earlier contig-major layout (one array per contig per track, store-level union genome) and, before that, an abandoned "rank-N rewrite plan" both predate the current design. Git history has the path; don't treat either as current.
 
@@ -77,7 +77,8 @@ Track `zarr.json` attributes (fields under `perbase:` are the interpretation blo
 - **`TrackConfig::new(dtype)` builder.** Chain `.columns(vec)` for 2D, `.column_dim("sample")` to override the default `"column"`, `.chunk_size(n)`, `.column_chunk_size(n)`, `.shard_size(n)`, `.shard_column_size(n)`, `.fill_value(v)`, `.description(s)`, `.source(s)`. No public `scalar`/`cohort` constructors.
 - **`Genome::new(contigs) -> Result<Self>`**, **`from_fai(path)`** (hand-authoring path), **`offsets() -> Vec<i64>`** (the prefix-sum table, `k+1` entries), **`checksum() -> String`** (`"md5:" + hex`, over `checksum_payload()`), **`checksum_payload() -> String`** (the canonical `"{name}\t{length}\n"` join, sorted by name), **`with_name(name)`** (decorative, excluded from the checksum), plus `contigs()`, `len()`, `id(name)`, `get(id)`, `resolve(&RegionQuery)`. A `Genome` is owned by exactly one track, not the store.
 - **`Track::read_region<T>(region) -> ArrayD<T>`** and **`write_region<T>(region, ArrayD<T>)`** with runtime dtype check. `write_region` takes ownership of the buffer so zarrs can consume it without a clone. Rank matches the track (1 or 2); callers downcast via `.into_dimensionality::<Ix1>()?` / `Ix2`. Other accessors: `name()`, `genome()`, `dtype()`, `rank()`, `column_dim()`, `total_len()` (ΣL), `chunk_size()`, `columns_count()`.
-- **`pbzarr::import`** (core, format-agnostic): `Config`, `Report`, `run_pipeline<T, R: ValueReader<Item=T>>`. Format readers and their entry points live in the `pbzarr-readers` crate: **`pbzarr_readers::d4`** exposes `D4Source`, `D4Reader`, `from_d4(&mut store, track_name, sources, config)` (int32 tracks); **`pbzarr_readers::bigwig`** exposes `BigWigSource`, `BigWigReader`, `from_bigwig(&mut store, ...)` (float32 tracks); **`pbzarr_readers::bed`** exposes `BedSource`, `BedReader`, `column_index_by_name`, `from_bed::<T>(&mut store, track_name, sources, column, genome, config)` (int32/float32/bool tracks). Takes the genome explicitly (BED carries no contig lengths) and imports one column per call; multi-column is a caller-side loop. Per ADR 0003, `from_d4`/`from_bigwig` build the `Genome` from the source headers (checksum-matched across sources), take the column count from the file list (one source → scalar track, several → cohort whose `column_dim` comes from `Config::column_dim`, defaulting to `"sample"` but overridable to `"strand"`/`"context"`/etc.), derive labels from each source's `sample_label` (falling back to its file stem), and create the track themselves — they take `&mut store` and no longer require `create_track` to run first. The track's chunk/shard shape comes from `Config::{chunk_size, column_chunk_size, shard_size, shard_column_size}`, which the readers thread into the `TrackConfig` at creation. `from_bigwig` creates the track with a `0.0` fill (matching `BigWigReader`'s gap→`0.0` mapping).
+- **`pbzarr::import`** (core, format-agnostic): `Config`, `Report`, `run_pipeline<T, R: ValueReader<Item=T>>`. Format readers and their entry points live in the `pbzarr-readers` crate: **`pbzarr_readers::d4`** exposes `D4Source`, `D4Reader`, `from_d4(&mut store, track_name, sources, config)` (int32 tracks); **`pbzarr_readers::bigwig`** exposes `BigWigSource`, `BigWigReader`, `from_bigwig(&mut store, ...)` (float32 tracks); **`pbzarr_readers::bed`** exposes `BedSource`, `BedReader`, `column_index_by_name`, `from_bed::<T>(&mut store, track_name, sources, column, genome, config)` (int32/float32/bool tracks), plus `from_bed_multi(&mut store, bed_gz, schema, genome, config)` (with `BedSchema`, `BedColumnSpec`, `ColumnSelector`, `BedMultiReader`). Takes the genome explicitly (BED carries no contig lengths). `from_bed` imports one column per call; `from_bed_multi` imports every column named in the `BedSchema` into its own scalar track in a single decode pass. Per ADR 0003, `from_d4`/`from_bigwig` build the `Genome` from the source headers (checksum-matched across sources), take the column count from the file list (one source → scalar track, several → cohort whose `column_dim` comes from `Config::column_dim`, defaulting to `"sample"` but overridable to `"strand"`/`"context"`/etc.), derive labels from each source's `sample_label` (falling back to its file stem), and create the track themselves — they take `&mut store` and no longer require `create_track` to run first. The track's chunk/shard shape comes from `Config::{chunk_size, column_chunk_size, shard_size, shard_column_size}`, which the readers thread into the `TrackConfig` at creation. `from_bigwig` creates the track with a `0.0` fill (matching `BigWigReader`'s gap→`0.0` mapping).
+- **`pbzarr::stack`** combines N single-sample stores into one cohort store: `stack(sources: Vec<(PbzStore, String)>, out, StackConfig) -> Report` (`crates/pbzarr/src/stack.rs`). Each shared scalar track becomes a `(ΣL, N)` cohort track, read through `PbzTrackReader: ValueReader` and driven by `run_pipeline` one track at a time. Requires all sources scalar (rank 1), same dtype, same `genome_checksum`. This is the "combine" leg of the width spectrum; incremental sample append stays deferred. Exposed to Python as `pbzarr.stack`.
 - **`ValueReader::read_into(contig_name, start, end, dst: ArrayViewMut2)`** — name-based, no `ContigId` crossing.
 - **`Numeric` trait** has `const DTYPE: Dtype` and `const ZERO: Self`; supertrait bounds include `zarrs::array::Element + ElementOwned`.
 
@@ -85,7 +86,7 @@ The library does not own coordinate-system conversion (callers handle 1-based in
 
 ## Reader/writer architecture
 
-The generic pipeline lives in `pbzarr::import`; format readers live in the separate `pbzarr-readers` crate (not in a CLI; PyO3 binds `from_d4` and `from_bigwig` directly, exposed to Python as `PbzStore.import_d4` / `PbzStore.import_bigwig`).
+The generic pipeline lives in `pbzarr::import`; format readers live in the separate `pbzarr-readers` crate (not in a CLI). PyO3 binds `from_d4`, `from_bigwig`, `from_bed`, `from_bed_multi`, and `stack`, exposed to Python as `PbzStore.import_{d4,bigwig,bed,bed_multi}` and `pbzarr.stack`.
 
 - **`ValueReader` trait** at `pbzarr::io::reader` (`Send + Sync`). Workers fork their reader per-thread via `ValueReader::fork`.
 - **`D4Reader`** at `pbzarr_readers::d4` (int32) and **`BigWigReader`** at `pbzarr_readers::bigwig` (float32) — the two import formats.
@@ -137,7 +138,7 @@ pbzarr-rs/                    # workspace root
 ├── docs/adr/                 # ADRs 0001–0005, binding decisions for the flat layout
 ├── CONTEXT.md                 # domain glossary (Store, Track, Genome, genome_checksum, ...)
 ├── python/                   # Python package source (Ruff-style top-level dir)
-│   ├── pbzarr/               # __init__, _open, _store, _track, _region, accessor, _native.pyi
+│   ├── pbzarr/               # __init__, _open, _pbzstore, _store, _track, _read, _region, _stack, _native.pyi
 │   └── tests/
 └── crates/
     ├── pbzarr/               # core library (the only crate published to crates.io)
@@ -152,6 +153,7 @@ pbzarr-rs/                    # workspace root
     │   │   ├── region_query.rs   # RegionQuery + parser
     │   │   ├── store.rs          # PbzStore (flat, storage-agnostic)
     │   │   ├── track.rs          # TrackConfig, PerbaseTrackAttrs, Track
+│   │   │   ├── stack.rs          # stack(): combine single-sample stores into a cohort; PbzTrackReader
     │   │   ├── import/
     │   │   │   ├── mod.rs
     │   │   │   └── pipeline.rs   # run_pipeline + Config / Report (format-agnostic)
@@ -175,10 +177,15 @@ pbzarr-rs/                    # workspace root
     │   │   │   ├── mod.rs
     │   │   │   ├── reader.rs        # D4Reader
     │   │   │   └── import.rs        # D4Source + from_d4
-    │   │   └── bigwig/
+    │   │   ├── bigwig/
+    │   │   │   ├── mod.rs
+    │   │   │   ├── reader.rs        # BigWigReader (bigtools)
+    │   │   │   └── import.rs        # BigWigSource + from_bigwig
+    │   │   └── bed/
     │   │       ├── mod.rs
-    │   │       ├── reader.rs        # BigWigReader (bigtools)
-    │   │       └── import.rs        # BigWigSource + from_bigwig
+    │   │       ├── reader.rs        # BedReader
+    │   │       ├── import.rs        # BedSource + from_bed (one column per call)
+    │   │       └── multi.rs         # BedSchema + from_bed_multi (single-pass, one track per column)
     │   └── tests/
     │       ├── common/mod.rs        # in-process .bw fixture writer (dev-only tokio)
     │       ├── d4_reader.rs
@@ -187,7 +194,7 @@ pbzarr-rs/                    # workspace root
     │       └── import_bigwig.rs
     └── pbzarr-python/        # PyO3 bindings, the _native cdylib (not published)
         ├── Cargo.toml
-        └── src/lib.rs        # import_d4 / import_bigwig → exposed on PbzStore
+        └── src/lib.rs        # import_{d4,bigwig,bed,bed_multi} + stack + create_store → exposed on PbzStore
 ```
 
 ## Coding conventions
@@ -243,17 +250,16 @@ In the format:
 - **d4 dep is pinned** to `cademirch/d4-format@f836299` with feature `local_reader` (mmap-backed; pulls in `mapped_io`, no htslib). `D4Reader` uses `D4TrackReader::split` + `to_codec().decode_block(...)`. This rev fixes two earlier bugs: `SparseArrayReader::split` now clips records for partitions `[0..K]` fully inside one record, and `bit_array.rs` `decode_block` now uses `read_unaligned` so debug-mode pointer-alignment checks don't trip. `crates/pbzarr-readers/examples/bench_d4_readers.rs` keeps the mmap-vs-ssio microbench around for perf regression checks. Bumping the rev requires verifying the `split` + `decode_block` APIs haven't shifted.
 - **bigWig import is restricted to `float32` tracks** (bigWig's native value type). `BigWigReader` reads each region with `BigWigRead::values`, which returns a per-base `Vec<f32>` with `NaN` for uncovered positions; the reader maps those gaps to `0.0` ("no coverage" = 0 for coverage/percent tracks). `from_bigwig` therefore creates the track with a `0.0` fill value, so all-gap chunks equal the fill and zarrs elides them. Gaps and true zeros are consequently indistinguishable on a bigWig track.
 - **bigtools is a crates.io dep, not git** — `bigtools = { default-features = false, features = ["read"] }` (drops the `remote` HTTP, `cli`, and `write` paths). bigtools hard-deps `tokio`, so it compiles into the graph regardless, but the read path is fully synchronous and `BigWigReader` never touches a runtime. The bigWig *writer* (used only to synthesize test fixtures, in `tests/common`) does need a tokio runtime, so it lives in `[dev-dependencies]` (`bigtools` with `write` + `tokio` rt, current-thread + `channel_size = 0`). Python import tests synthesize `.bw` fixtures with `pybigtools` (PyPI dep in the `wheel` pixi feature).
-- **BED import is one column per call and requires a tabix index.** `from_bed::<T>` extracts a single value column (absolute file index `>= 3`) across N tabix-indexed, bgzipped, coordinate-sorted BEDs; `T` is `i32` / `f32` / `bool`. One source yields a scalar `(ΣL,)` track, several yield a cohort `(ΣL, n_samples)` track (mirroring `from_d4`/`from_bigwig`). The genome is passed explicitly (`.fai`/`Genome`); BED files declare no contig lengths and `.tbi` carries only names. Uncovered positions map to `T::ZERO` with a matching zero fill, so gaps and true zeros are indistinguishable (as with bigWig). Importing all columns of a multi-column file re-reads it once per column; a single-pass multi-column decode is deferred.
+- **BED import is one column per call and requires a tabix index.** `from_bed::<T>` extracts a single value column (absolute file index `>= 3`) across N tabix-indexed, bgzipped, coordinate-sorted BEDs; `T` is `i32` / `f32` / `bool`. One source yields a scalar `(ΣL,)` track, several yield a cohort `(ΣL, n_samples)` track (mirroring `from_d4`/`from_bigwig`). The genome is passed explicitly (`.fai`/`Genome`); BED files declare no contig lengths and `.tbi` carries only names. Uncovered positions map to `T::ZERO` with a matching zero fill, so gaps and true zeros are indistinguishable (as with bigWig). `from_bed_multi` / `PbzStore.import_bed_multi` imports all named columns in one decode pass, one scalar track per column (via `BedSchema`); the single-source `from_bed` still imports one column per call.
 
 ## Deferred
 
-- Bringing the PyO3 Python bindings and the Python package up to date with the flat layout rewrite.
 - Intra-shard read parallelism: fill one write-unit's buffer with a column-parallel (not subchunk-parallel: `D4Reader` serializes reads to one file behind a `Mutex`) read step, to keep cores busy when shards are large and write-units are few. Gated on the sharding-default benchmark sweep, which sets the shard size this trades against.
 - xarray accessor for read-side ergonomics.
 - Benchmarks: cohort compression, mask generation, cross-sample math, read throughput, sharding sweep.
 - Docs + release: README, FORMAT.md, CHANGELOG, tag.
 - `pbz` CLI binary.
-- Multi-column BED import in one pass (one track with columns, or several tracks), and dtype inference / auto-schema from the header. v0 selects one column per call.
+- Multi-column BED into a single wide cohort track (one 2D track, vs the several-scalar-tracks form `from_bed_multi` implements today), and dtype inference / auto-schema from the header.
 - Additional input formats: bedGraph, BAM/CRAM, VCF (d4, bigWig, and BED are implemented).
 - Sharding defaults (currently off; benchmark sweep will inform the default).
 - Multi-resolution tracks (would nest further under the track group; not yet designed).
