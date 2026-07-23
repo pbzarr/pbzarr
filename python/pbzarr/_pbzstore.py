@@ -8,16 +8,24 @@ import zarr
 
 from ._native import PbzError
 from ._store import create_store as _create_store
-from ._track import Track
+from ._track import _DEFAULT_CHUNKS, Track
 
 
 def _is_track(attrs: dict) -> bool:
     return any(c.get("name") == "perbase" for c in attrs.get("zarr_conventions", []))
 
 
+# Read backend rides the handle, expressed in zarr's vocabulary: chunks=None -> eager
+# numpy; chunks={} (or a dict / "auto") -> dask, aligned to the on-disk chunk grid.
+# The store carries a default that flows to the tracks it produces (a track may
+# override it via store.track(name, chunks=...)). Default is lazy/dask.
+_UNSET = object()
+
+
 class PbzStore:
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, chunks=_DEFAULT_CHUNKS):
         self.path = str(path)
+        self.chunks = chunks
         try:
             root = zarr.open_group(self.path, mode="r")
         except Exception as e:  # noqa: BLE001 - surface as PbzError
@@ -29,16 +37,20 @@ class PbzStore:
             raise PbzError(f"{self.path!r} is not a pbz store (no zarr_conventions marker)")
 
     @classmethod
-    def create(cls, path: str) -> "PbzStore":
+    def create(cls, path: str, *, chunks=_DEFAULT_CHUNKS) -> "PbzStore":
         _create_store(path)
-        return cls(path)
+        return cls(path, chunks=chunks)
+
+    @classmethod
+    def open(cls, path: str, *, chunks=_DEFAULT_CHUNKS) -> "PbzStore":
+        return cls(path, chunks=chunks)
 
     def tracks(self) -> list[str]:
         root = zarr.open_group(self.path, mode="r")
         return sorted(n for n, node in root.members() if _is_track(dict(node.attrs)))
 
-    def track(self, name: str) -> Track:
-        return Track(self.path, name)
+    def track(self, name: str, *, chunks=_UNSET) -> Track:
+        return Track(self.path, name, chunks=self.chunks if chunks is _UNSET else chunks)
 
     def tree(self):
         import xarray as xr

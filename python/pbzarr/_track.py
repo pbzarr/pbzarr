@@ -35,10 +35,24 @@ def _norm_sources(sources) -> list[tuple[str, str | None]]:
     return out
 
 
+# Read backend rides the handle: chunks=None -> eager numpy; chunks={} (or dict /
+# "auto") -> dask aligned to the on-disk chunk grid. Default is lazy/dask.
+_DEFAULT_CHUNKS: object = {}
+
+
 class Track:
-    def __init__(self, store_path: str, name: str):
+    def __init__(self, store_path: str, name: str, *, chunks=_DEFAULT_CHUNKS):
         self.store_path = str(store_path)
         self.name = name
+        self.chunks = chunks
+
+    @classmethod
+    def open(cls, path: str, *, chunks=_DEFAULT_CHUNKS) -> "Track":
+        """Open a track group by its own path (a standalone atom, no store handle)."""
+        from pathlib import Path
+
+        p = Path(path)
+        return cls(str(p.parent), p.name, chunks=chunks)
 
     def _values(self) -> "zarr.Array":
         return zarr.open_array(f"{self.store_path}/{self.name}/values", mode="r")
@@ -73,13 +87,12 @@ class Track:
         return _read.gather_regions(self.store_path, self.name, rqs, column)
 
     def region_reduced(self, query, *, reduce: str, column: str | None = None):
-        da = _read.gather_regions(self.store_path, self.name, _rq_list(query), column)
-        grouped = da.groupby("region")
-        try:
-            reducer = getattr(grouped, reduce)
-        except AttributeError as e:
-            raise ValueError(f"unsupported reduce {reduce!r}") from e
-        return reducer()
+        from ._reduce import reduce_regions
+
+        return reduce_regions(
+            self.store_path, self.name, _rq_list(query), reduce, column,
+            lazy=self.chunks is not None,
+        )
 
     def region_blocks(self, query, *, column: str | None = None) -> RegionBlocks:
         return _read.region_blocks(self.store_path, self.name, _rq_list(query), column)

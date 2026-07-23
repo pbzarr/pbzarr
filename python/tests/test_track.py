@@ -53,3 +53,31 @@ def test_import_bed_cohort_gather_reduce(tmp_path):
     assert means.sel(sample="s2").values.tolist() == [6.0, 6.0]
     rb = t.region_blocks([("chr1", 0, 5)])
     assert rb.blocks[0].shape == (5, 2)
+
+
+@htslib
+def test_region_reduced_backend_follows_handle(tmp_path):
+    import dask
+
+    from pbzarr import PbzStore
+
+    p = str(tmp_path / "c.pbz")
+    create_store(p)
+    s1 = write_bed_bgzip_tabix(tmp_path, "s1", ["chrom", "start", "end", "coverage"], [("chr1", 0, 40, ["2"])])
+    s2 = write_bed_bgzip_tabix(tmp_path, "s2", ["chrom", "start", "end", "coverage"], [("chr1", 0, 40, ["6"])])
+    sizes = write_sizes(tmp_path, "g", [("chr1", 40)])
+    Track(p, "coverage").import_bed([(str(s1), "s1"), (str(s2), "s2")], column="coverage", dtype="int32", genome=str(sizes))
+
+    # store default is lazy; tracks inherit it; per-track override works
+    store = PbzStore(p)
+    assert store.chunks == {}
+    assert store.track("coverage").chunks == {}
+    assert store.track("coverage", chunks=None).chunks is None
+    assert PbzStore(p, chunks=None).track("coverage").chunks is None
+
+    query = [("chr1", 0, 10), ("chr1", 20, 30)]
+    eager = Track(p, "coverage", chunks=None).region_reduced(query, reduce="mean")
+    lazy = Track(p, "coverage", chunks={}).region_reduced(query, reduce="mean")
+    assert not dask.is_dask_collection(eager.data)   # numpy-backed
+    assert dask.is_dask_collection(lazy.data)         # dask-backed
+    assert eager.sel(sample="s1").values.tolist() == lazy.compute().sel(sample="s1").values.tolist()
