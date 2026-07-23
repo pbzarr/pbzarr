@@ -4,6 +4,7 @@ from ._native import PbzError
 from ._open import open
 from ._pbzstore import PbzStore
 from ._read import RegionBlocks
+from ._stack import stack
 from ._store import create_store
 from ._track import Track
 
@@ -15,6 +16,7 @@ __all__ = [
     "Track",
     "RegionBlocks",
     "create_store",
+    "stack",
     "open",
     "__version__",
 ]
