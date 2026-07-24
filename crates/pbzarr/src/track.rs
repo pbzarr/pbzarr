@@ -1,18 +1,49 @@
 //! Track metadata + I/O.
 
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use ndarray::ArrayD;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zarrs::array::{Array, ArraySubset};
+use zarrs::filesystem::FilesystemStore;
+use zarrs::group::Group;
 use zarrs::storage::{ReadableWritableListableStorage, ReadableWritableListableStorageTraits};
 
 use crate::Result;
 use crate::error::PbzError;
-use crate::genome::{Genome, Region};
+use crate::genome::{Contig, Genome, Region};
 use crate::io::{Dtype, Numeric};
 use crate::{PBZ_FORMAT_VERSION, PERBASE_CONVENTION_NAME, PERBASE_CONVENTION_UUID};
+
+/// The node kind discriminator carried by `perbase:kind`: a store (`Collection`)
+/// or a single `Track`. Both node types carry the same `zarr_conventions`
+/// marker; `perbase:kind` is what tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Track,
+    Collection,
+}
+
+/// Classify a group's attributes as a track or a collection.
+///
+/// Reads `perbase:kind` when present. For stores written before that key
+/// existed (0.4/0.5), infers: a `perbase:version` (only tracks carried a
+/// `perbase:` block then) means a track; otherwise the bare-marker collection
+/// root.
+pub fn kind_of(attrs: &Map<String, Value>) -> Kind {
+    match attrs.get("perbase:kind").and_then(|v| v.as_str()) {
+        Some("collection") => Kind::Collection,
+        Some("track") => Kind::Track,
+        _ if attrs.contains_key("perbase:version") => Kind::Track,
+        _ => Kind::Collection,
+    }
+}
+
+fn default_kind_track() -> String {
+    "track".to_owned()
+}
 
 /// User-supplied configuration for a new track.
 #[derive(Debug, Clone)]
@@ -123,6 +154,8 @@ pub struct ConventionRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerbaseTrackAttrs {
     pub zarr_conventions: Vec<ConventionRef>,
+    #[serde(rename = "perbase:kind", default = "default_kind_track")]
+    pub kind: String,
     #[serde(rename = "perbase:version")]
     pub version: String,
     #[serde(rename = "perbase:genome_checksum")]
@@ -162,6 +195,7 @@ impl PerbaseTrackAttrs {
                 spec_url: None,
                 schema_url: None,
             }],
+            kind: "track".to_owned(),
             version: PBZ_FORMAT_VERSION.to_owned(),
             genome_checksum: genome.checksum(),
             genome_name: genome.name().map(|s| s.to_owned()),
@@ -191,6 +225,10 @@ impl PerbaseTrackAttrs {
 /// Track handle: addressing + I/O over one flat `values` array.
 pub struct Track {
     pub(crate) name: String,
+    /// Path prefix of this track's arrays within `storage`: `"/{name}"` when the
+    /// track lives inside a store, `""` when it was opened standalone (its group
+    /// is the storage root, so `values` sits at `/values`).
+    pub(crate) prefix: String,
     pub(crate) genome: Arc<Genome>,
     pub(crate) dtype: Dtype,
     pub(crate) rank: usize,
@@ -202,6 +240,67 @@ pub struct Track {
 }
 
 impl Track {
+    /// Open a bare track group as a standalone artifact (no enclosing store).
+    /// The group at `path` is itself the track; its `values`/`offsets`/`contigs`
+    /// sit at the storage root.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let fs = FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?;
+        let storage: ReadableWritableListableStorage = Arc::new(fs);
+        let mut track = Self::open_with_storage(storage)?;
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            track.name = stem.to_owned();
+        }
+        Ok(track)
+    }
+
+    /// Open a standalone track over an arbitrary storage backend whose root is
+    /// the track group.
+    pub fn open_with_storage(storage: ReadableWritableListableStorage) -> Result<Self> {
+        let group =
+            Group::open(storage.clone(), "/").map_err(|e| PbzError::Store(e.to_string()))?;
+        if !PerbaseTrackAttrs::conforms(group.attributes()) {
+            return Err(PbzError::Metadata(
+                "not a pbz track (missing zarr_conventions perbase marker)".into(),
+            ));
+        }
+        if kind_of(group.attributes()) != Kind::Track {
+            return Err(PbzError::Metadata(
+                "this is a pbz collection, not a track; open it as a store".into(),
+            ));
+        }
+        let attrs: PerbaseTrackAttrs =
+            serde_json::from_value(Value::Object(group.attributes().clone()))
+                .map_err(|e| PbzError::Metadata(e.to_string()))?;
+
+        let values =
+            Array::open(storage.clone(), "/values").map_err(|e| PbzError::Store(e.to_string()))?;
+        let dtype = Dtype::from_zarrs(values.data_type())?;
+        let rank = values.shape().len();
+        let column_dim = if rank == 2 {
+            values
+                .dimension_names()
+                .as_ref()
+                .and_then(|d| d.get(1))
+                .and_then(|n| n.clone())
+        } else {
+            None
+        };
+
+        let genome = rehydrate_genome(&storage, "", attrs.genome_name.as_deref())?;
+
+        Ok(Track {
+            name: String::new(),
+            prefix: String::new(),
+            genome: Arc::new(genome),
+            dtype,
+            rank,
+            column_dim,
+            storage,
+            values: RwLock::new(Some(Arc::new(values))),
+        })
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -264,7 +363,7 @@ impl Track {
         if let Some(arr) = w.as_ref() {
             return Ok(Arc::clone(arr));
         }
-        let path = format!("/{}/values", self.name);
+        let path = format!("{}/values", self.prefix);
         let arr = Array::open(Arc::clone(&self.storage), &path)
             .map_err(|e| PbzError::Store(format!("open {path}: {e}")))?;
         let arr = Arc::new(arr);
@@ -366,6 +465,55 @@ impl Track {
     }
 }
 
+/// Rebuild a `Genome` from a track's on-disk `contigs` and `offsets` arrays.
+/// `prefix` is `"/{name}"` for a track inside a store, `""` for a standalone
+/// track whose group is the storage root.
+pub(crate) fn rehydrate_genome(
+    storage: &ReadableWritableListableStorage,
+    prefix: &str,
+    genome_name: Option<&str>,
+) -> Result<Genome> {
+    let contigs_arr = Array::open(storage.clone(), &format!("{prefix}/contigs"))
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+    let k = contigs_arr.shape()[0] as usize;
+    let names: Vec<String> = if k == 0 {
+        Vec::new()
+    } else {
+        contigs_arr
+            .retrieve_chunk::<ArrayD<String>>(&[0])
+            .map_err(|e| PbzError::Store(e.to_string()))?
+            .into_raw_vec_and_offset()
+            .0
+    };
+    let offsets_arr = Array::open(storage.clone(), &format!("{prefix}/offsets"))
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+    let offsets: Vec<i64> = offsets_arr
+        .retrieve_chunk::<ArrayD<i64>>(&[0])
+        .map_err(|e| PbzError::Store(e.to_string()))?
+        .into_raw_vec_and_offset()
+        .0;
+    if offsets.len() != k + 1 {
+        return Err(PbzError::Metadata(format!(
+            "offsets len {} != contigs {} + 1",
+            offsets.len(),
+            k
+        )));
+    }
+    let contigs: Vec<Contig> = names
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| Contig {
+            name,
+            length: (offsets[i + 1] - offsets[i]) as u64,
+        })
+        .collect();
+    let mut genome = Genome::new(contigs)?;
+    if let Some(n) = genome_name {
+        genome = genome.with_name(n);
+    }
+    Ok(genome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +533,8 @@ mod tests {
         let val = serde_json::to_value(&attrs).unwrap();
         let obj = val.as_object().unwrap();
         assert!(PerbaseTrackAttrs::conforms(obj));
+        assert_eq!(obj["perbase:kind"], "track");
+        assert_eq!(kind_of(obj), Kind::Track);
         assert_eq!(obj["perbase:version"], "0.4");
         assert_eq!(obj["perbase:genome_name"], "hg38");
         assert_eq!(obj["perbase:ragged_index"], "offsets");

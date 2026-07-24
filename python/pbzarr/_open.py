@@ -1,21 +1,24 @@
-"""Thin wrapper around xr.open_datatree for pbz stores."""
+"""Polymorphic open for pbz artifacts."""
 from __future__ import annotations
-from typing import Any
-
-import xarray as xr
 
 
-def open(path: str, *, chunks: Any = None) -> xr.DataTree:
-    """Open a pbz store as an `xr.DataTree` (the xarray-flavored entry point).
+def open(path: str):
+    """Open a pbz artifact, returning a `PbzStore` or a `Track` per its
+    `perbase:kind` (mirrors Rust `PbzNode::open`).
 
-    Defaults to eager (matches `xr.open_datatree`'s convention). Pass
-    `chunks={}` (or any chunk dict) for a dask-backed DataTree where
-    dask chunks align with on-disk zarr chunks.
-
-    For the optimized read -> transform -> write pipeline, use `PbzStore`
-    which defaults to lazy. `pbzarr.open` exists for users who want plain
-    xarray semantics without the store handle.
+    For the raw-xarray `DataTree` view, use `store.tree()` on a store handle, or
+    `xr.open_datatree(path, engine="zarr")` directly.
     """
-    if chunks is None:
-        return xr.open_datatree(path, engine="zarr", consolidated=False)
-    return xr.open_datatree(path, engine="zarr", chunks=chunks, consolidated=False)
+    import zarr
+
+    from ._kind import is_perbase, kind_of
+    from ._native import PbzError
+    from ._pbzstore import PbzStore
+    from ._track import Track
+
+    attrs = dict(zarr.open_group(str(path), mode="r").attrs)
+    if not is_perbase(attrs):
+        raise PbzError(f"{path!r} is not a pbz artifact (no zarr_conventions marker)")
+    if kind_of(attrs) == "track":
+        return Track.open(path)
+    return PbzStore(path)

@@ -11,8 +11,8 @@ pub use error::{PbzError, Result};
 pub use genome::{Contig, ContigId, Genome, Region};
 pub use region_query::{RegionQuery, parse_region_query};
 pub use stack::{ProgressFactory, StackConfig, stack};
-pub use store::PbzStore;
-pub use track::{ConventionRef, PerbaseTrackAttrs, Track, TrackConfig};
+pub use store::{PbzNode, PbzStore};
+pub use track::{ConventionRef, Kind, PerbaseTrackAttrs, Track, TrackConfig, kind_of};
 
 /// The pbz format/convention version written to every track group.
 pub const PBZ_FORMAT_VERSION: &str = "0.4";

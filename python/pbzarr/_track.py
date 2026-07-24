@@ -51,6 +51,17 @@ class Track:
         """Open a track group by its own path (a standalone atom, no store handle)."""
         from pathlib import Path
 
+        from ._kind import is_perbase, kind_of
+        from ._native import PbzError
+
+        attrs = dict(zarr.open_group(str(path), mode="r").attrs)
+        if not is_perbase(attrs):
+            raise PbzError(f"{path!r} is not a pbz track (no zarr_conventions marker)")
+        if kind_of(attrs) == "collection":
+            raise PbzError(
+                f"{path!r} is a pbz collection, not a track; "
+                "use PbzStore(path) or pbzarr.open(path)"
+            )
         p = Path(path)
         return cls(str(p.parent), p.name, chunks=chunks)
 

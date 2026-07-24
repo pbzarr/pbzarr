@@ -6,13 +6,30 @@ from __future__ import annotations
 
 import zarr
 
+from ._kind import is_perbase, kind_of
 from ._native import PbzError
 from ._store import create_store as _create_store
 from ._track import _DEFAULT_CHUNKS, Track
 
 
 def _is_track(attrs: dict) -> bool:
-    return any(c.get("name") == "perbase" for c in attrs.get("zarr_conventions", []))
+    return is_perbase(attrs) and kind_of(attrs) == "track"
+
+
+def _track_meta(store_path: str, name: str) -> dict:
+    return dict(zarr.open_group(f"{store_path}/{name}", mode="r").attrs)
+
+
+def _wrap_values(zarr_arr, chunks):
+    """Back the values array per the store's read config: chunks=None -> eager
+    numpy; anything else -> dask aligned to the on-disk chunk grid."""
+    if chunks is None:
+        import numpy as np
+
+        return np.asarray(zarr_arr[...])
+    import dask.array as dask_array
+
+    return dask_array.from_array(zarr_arr, chunks=zarr_arr.chunks)
 
 
 # Read backend rides the handle, expressed in zarr's vocabulary: chunks=None -> eager
@@ -30,11 +47,14 @@ class PbzStore:
             root = zarr.open_group(self.path, mode="r")
         except Exception as e:  # noqa: BLE001 - surface as PbzError
             raise PbzError(f"cannot open pbz store {self.path!r}: {e}") from e
-        if not any(
-            c.get("name") == "perbase"
-            for c in dict(root.attrs).get("zarr_conventions", [])
-        ):
+        attrs = dict(root.attrs)
+        if not is_perbase(attrs):
             raise PbzError(f"{self.path!r} is not a pbz store (no zarr_conventions marker)")
+        if kind_of(attrs) == "track":
+            raise PbzError(
+                f"{self.path!r} is a pbz track, not a store; "
+                "use Track.open(path) or pbzarr.open(path)"
+            )
 
     @classmethod
     def create(cls, path: str, *, chunks=_DEFAULT_CHUNKS) -> "PbzStore":
@@ -56,6 +76,72 @@ class PbzStore:
         import xarray as xr
 
         return xr.open_datatree(self.path, engine="zarr", consolidated=False)
+
+    def dataset(self, tracks: list[str] | None = None):
+        """Assemble same-genome tracks into one `xr.Dataset` (the cross-track view).
+
+        Every track must share a `genome_checksum` (raises `ValueError`
+        otherwise). Variables share the flat `position` axis (no index); each
+        cohort track's column labels ride on its column dim; the shared
+        `contigs`/`offsets` and the genome identity travel as coords/attrs so
+        the Dataset stays self-describing. Backing (numpy vs dask) follows the
+        store's `chunks`.
+        """
+        import numpy as np
+        import xarray as xr
+
+        from ._read import open_track
+
+        names = self.tracks() if tracks is None else list(tracks)
+        if not names:
+            raise PbzError("dataset(): store has no tracks")
+
+        metas = {n: _track_meta(self.path, n) for n in names}
+        checksums = {n: metas[n].get("perbase:genome_checksum") for n in names}
+        if len(set(checksums.values())) > 1:
+            listing = "\n".join(f"  {n}: {checksums[n]}" for n in names)
+            raise ValueError(
+                "dataset(): tracks do not share a genome (genome_checksum mismatch):\n"
+                f"{listing}\n"
+                "pass an explicit tracks=[...] subset that shares one genome"
+            )
+
+        data_vars = {}
+        first = None
+        for n in names:
+            ta = open_track(self.path, n)
+            if first is None:
+                first = ta
+            data = _wrap_values(ta.values, self.chunks)
+            if ta.col_dim is None:
+                da = xr.DataArray(data, dims=["position"])
+            else:
+                da = xr.DataArray(
+                    data,
+                    dims=["position", ta.col_dim],
+                    coords={ta.col_dim: np.asarray(ta.labels)},
+                )
+                da.attrs["column_dim"] = ta.col_dim
+            da.attrs["dtype"] = str(ta.values.dtype)
+            fv = ta.values.fill_value
+            if fv is not None:
+                da.attrs["fill_value"] = fv.item() if hasattr(fv, "item") else fv
+            for key in ("perbase:description", "perbase:source"):
+                if metas[n].get(key) is not None:
+                    da.attrs[key.split(":", 1)[1]] = metas[n][key]
+            data_vars[n] = da
+
+        coords = {
+            "contigs": ("contig", np.asarray(first.contigs)),
+            "offsets": ("contig_boundary", np.asarray(first.offsets)),
+        }
+        ds = xr.Dataset(data_vars, coords=coords)
+        m0 = metas[names[0]]
+        ds.attrs["genome_checksum"] = m0.get("perbase:genome_checksum")
+        if m0.get("perbase:genome_name") is not None:
+            ds.attrs["genome_name"] = m0["perbase:genome_name"]
+        ds.attrs["coordinates"] = m0.get("perbase:coordinates", "0-based-half-open")
+        return ds
 
     def import_bed_multi(
         self,

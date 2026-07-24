@@ -16,10 +16,10 @@ use zarrs::array::codec::api::BytesToBytesCodecTraits;
 use zarrs::array::codec::{BloscCodec, BloscCompressionLevel, BloscCompressor, BloscShuffleMode};
 
 use crate::error::PbzError;
-use crate::genome::{Contig, Genome};
+use crate::genome::Genome;
 use crate::io::Dtype;
-use crate::track::{PerbaseTrackAttrs, Track, TrackConfig};
-use crate::{PERBASE_CONVENTION_NAME, PERBASE_CONVENTION_UUID, Result};
+use crate::track::{Kind, PerbaseTrackAttrs, Track, TrackConfig, kind_of, rehydrate_genome};
+use crate::{PBZ_FORMAT_VERSION, PERBASE_CONVENTION_NAME, PERBASE_CONVENTION_UUID, Result};
 
 /// A handle to an open PBZ store: a Zarr group containing track groups.
 pub struct PbzStore {
@@ -51,6 +51,12 @@ impl PbzStore {
                 "name": PERBASE_CONVENTION_NAME,
             }]),
         );
+        // Node-kind discriminator: this root is a collection (a container of
+        // tracks). A track group carries perbase:kind="track" instead.
+        root.attributes_mut()
+            .insert("perbase:kind".to_owned(), json!("collection"));
+        root.attributes_mut()
+            .insert("perbase:version".to_owned(), json!(PBZ_FORMAT_VERSION));
         root.store_metadata()
             .map_err(|e| PbzError::Store(e.to_string()))?;
 
@@ -81,6 +87,11 @@ impl PbzStore {
                 "not a pbz 0.4 store (missing zarr_conventions perbase marker); regenerate".into(),
             ));
         }
+        if kind_of(root.attributes()) == Kind::Track {
+            return Err(PbzError::Metadata(
+                "this is a pbz track, not a collection; open it with Track::open".into(),
+            ));
+        }
 
         let listing = storage
             .list_dir(&StorePrefix::root())
@@ -96,7 +107,11 @@ impl PbzStore {
                 Ok(g) => g,
                 Err(_) => continue,
             };
-            if !PerbaseTrackAttrs::conforms(group.attributes()) {
+            if !PerbaseTrackAttrs::conforms(group.attributes())
+                || kind_of(group.attributes()) != Kind::Track
+            {
+                // Not a track: either a non-pbz group or a nested collection
+                // (reserved, not recursed this round).
                 continue;
             }
             let attrs: PerbaseTrackAttrs =
@@ -117,12 +132,14 @@ impl PbzStore {
                 None
             };
 
-            let genome = rehydrate_genome(&storage, &name, attrs.genome_name.as_deref())?;
+            let genome =
+                rehydrate_genome(&storage, &format!("/{name}"), attrs.genome_name.as_deref())?;
 
             track_handles.insert(
                 name.clone(),
                 Track {
                     name: name.clone(),
+                    prefix: format!("/{name}"),
                     genome: Arc::new(genome),
                     dtype,
                     rank,
@@ -330,6 +347,7 @@ impl PbzStore {
             name.to_owned(),
             Track {
                 name: name.to_owned(),
+                prefix: format!("/{name}"),
                 genome: Arc::new(genome),
                 dtype,
                 rank,
@@ -342,51 +360,38 @@ impl PbzStore {
     }
 }
 
-/// Rebuild a track's `Genome` from its on-disk `contigs` and `offsets` arrays.
-fn rehydrate_genome(
-    storage: &ReadableWritableListableStorage,
-    track_name: &str,
-    genome_name: Option<&str>,
-) -> Result<Genome> {
-    let contigs_arr = Array::open(storage.clone(), &format!("/{track_name}/contigs"))
-        .map_err(|e| PbzError::Store(e.to_string()))?;
-    let k = contigs_arr.shape()[0] as usize;
-    let names: Vec<String> = if k == 0 {
-        Vec::new()
-    } else {
-        contigs_arr
-            .retrieve_chunk::<ndarray::ArrayD<String>>(&[0])
-            .map_err(|e| PbzError::Store(e.to_string()))?
-            .into_raw_vec_and_offset()
-            .0
-    };
-    let offsets_arr = Array::open(storage.clone(), &format!("/{track_name}/offsets"))
-        .map_err(|e| PbzError::Store(e.to_string()))?;
-    let offsets: Vec<i64> = offsets_arr
-        .retrieve_chunk::<ndarray::ArrayD<i64>>(&[0])
-        .map_err(|e| PbzError::Store(e.to_string()))?
-        .into_raw_vec_and_offset()
-        .0;
-    if offsets.len() != k + 1 {
-        return Err(PbzError::Metadata(format!(
-            "track '{track_name}': offsets len {} != contigs {} + 1",
-            offsets.len(),
-            k
-        )));
+/// A polymorphic open result: a pbz artifact on disk is either a single
+/// standalone `Track` or a `PbzStore` collection of tracks. `PbzNode::open`
+/// reads the root node's `perbase:kind` and reifies the matching one.
+pub enum PbzNode {
+    Track(Track),
+    Collection(PbzStore),
+}
+
+impl PbzNode {
+    /// Open a pbz artifact at `path`, dispatching on its node kind.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let fs = FilesystemStore::new(path).map_err(|e| PbzError::Store(e.to_string()))?;
+        let storage: ReadableWritableListableStorage = Arc::new(fs);
+        Self::open_with_storage(storage)
     }
-    let contigs: Vec<Contig> = names
-        .into_iter()
-        .enumerate()
-        .map(|(i, name)| Contig {
-            name,
-            length: (offsets[i + 1] - offsets[i]) as u64,
-        })
-        .collect();
-    let mut genome = Genome::new(contigs)?;
-    if let Some(n) = genome_name {
-        genome = genome.with_name(n);
+
+    /// Open a pbz artifact over an arbitrary storage backend whose root is the
+    /// artifact.
+    pub fn open_with_storage(storage: ReadableWritableListableStorage) -> Result<Self> {
+        let root = zarrs::group::Group::open(storage.clone(), "/")
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+        if !PerbaseTrackAttrs::conforms(root.attributes()) {
+            return Err(PbzError::Metadata(
+                "not a pbz artifact (missing zarr_conventions perbase marker)".into(),
+            ));
+        }
+        match kind_of(root.attributes()) {
+            Kind::Collection => Ok(PbzNode::Collection(PbzStore::open_with_storage(storage)?)),
+            Kind::Track => Ok(PbzNode::Track(Track::open_with_storage(storage)?)),
+        }
     }
-    Ok(genome)
 }
 
 /// Default compression: Blosc(zstd, level 5, byte shuffle), per the pbzarr spec.
