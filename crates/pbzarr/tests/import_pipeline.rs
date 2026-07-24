@@ -42,7 +42,7 @@ impl ValueReader for ConstReader {
 }
 
 #[test]
-fn pipeline_writes_constants_into_cohort_track() {
+fn pipeline_writes_constants_into_two_d_track() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("t.pbz");
     let genome = Genome::new(vec![Contig {

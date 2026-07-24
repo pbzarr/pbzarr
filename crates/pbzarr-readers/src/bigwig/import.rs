@@ -21,7 +21,7 @@ pub struct BigWigSource {
 ///
 /// Builds the track's `Genome` from the source headers, sizes the column axis
 /// from the file list, and creates the track before running the pipeline. One
-/// source yields a scalar track; several yield a cohort track whose column
+/// source yields a scalar track; several yield a 2D track whose column
 /// labels come from each source's `sample_label` (falling back to its file
 /// stem). All sources must share a genome (checked by checksum).
 ///

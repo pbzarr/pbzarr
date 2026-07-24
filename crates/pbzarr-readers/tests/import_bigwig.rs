@@ -144,9 +144,9 @@ fn sharded_scalar_import_matches_unsharded() {
     assert_eq!(plain_data, sharded_data);
 }
 
-/// Three distinct-valued bigWigs import into a 2D cohort track column-for-column.
+/// Three distinct-valued bigWigs import into a 2D track column-for-column.
 #[test]
-fn cohort_import_distinct_columns() {
+fn two_d_import_distinct_columns() {
     let dir = TempDir::new().unwrap();
     let sources: Vec<BigWigSource> = [0.0f32, 100.0, 200.0]
         .iter()

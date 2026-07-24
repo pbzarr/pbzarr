@@ -18,7 +18,7 @@ def stack(
 
     `sources` is a list of store paths, or `(path, label)` tuples; `label`
     defaults to the store's filename stem and becomes the sample's column label.
-    Each scalar track shared by all sources becomes a `(ΣL, N)` cohort track.
+    Each scalar track shared by all sources becomes a `(ΣL, N)` 2D track.
     `tracks` selects a subset (default: every track of the first source). All
     sources must share a genome. `progress=True` shows a per-track progress bar
     on a terminal (periodic log lines otherwise). Returns the created cohort

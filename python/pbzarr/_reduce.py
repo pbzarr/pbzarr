@@ -115,11 +115,11 @@ def _reduce_eager(ta: _TrackArrays, reduce: str, column, contig_ids, starts, end
     func = _FLOX_FUNC[reduce]
     n_intervals = len(contig_ids)
 
-    is_cohort = ta.col_dim is not None
+    is_2d = ta.col_dim is not None
     col_idx = None
     if column is not None:
-        if not is_cohort:
-            raise ValueError("column= is only valid on a cohort (2D) track")
+        if not is_2d:
+            raise ValueError("column= is only valid on a 2D track")
         col_idx = ta.labels.index(column)
 
     sorted_starts, sorted_ends, interval_ids = compute_boundaries(
@@ -133,9 +133,9 @@ def _reduce_eager(ta: _TrackArrays, reduce: str, column, contig_ids, starts, end
     label_slabs = []
     array_ns = np
     for slab_start, slab_end in slabs:
-        if is_cohort and col_idx is None:
+        if is_2d and col_idx is None:
             slab_values = np.asarray(ta.values[slab_start:slab_end, :])
-        elif is_cohort:
+        elif is_2d:
             slab_values = np.asarray(ta.values[slab_start:slab_end, col_idx])
         else:
             slab_values = np.asarray(ta.values[slab_start:slab_end])
@@ -150,7 +150,7 @@ def _reduce_eager(ta: _TrackArrays, reduce: str, column, contig_ids, starts, end
     all_values = array_ns.concatenate(value_slabs, axis=0)
     all_labels = array_ns.concatenate(label_slabs, axis=0)
 
-    reduced_dims = ("position", ta.col_dim) if (is_cohort and col_idx is None) else ("position",)
+    reduced_dims = ("position", ta.col_dim) if (is_2d and col_idx is None) else ("position",)
     values_da = xr.DataArray(all_values, dims=reduced_dims)
     by_da = xr.DataArray(all_labels, dims="position", name="region")
     result = flox.xarray.xarray_reduce(
@@ -185,7 +185,7 @@ def _col_index(ta: _TrackArrays, column):
     if column is None:
         return None
     if ta.col_dim is None:
-        raise ValueError("column= is only valid on a cohort (2D) track")
+        raise ValueError("column= is only valid on a 2D track")
     return ta.labels.index(column)
 
 
@@ -195,7 +195,7 @@ def _reduce_dask(ta: _TrackArrays, reduce: str, column, contig_ids, starts, ends
 
     func = _FLOX_FUNC[reduce]
     n_intervals = len(contig_ids)
-    is_cohort = ta.col_dim is not None
+    is_2d = ta.col_dim is not None
     col_idx = _col_index(ta, column)
 
     sorted_starts, sorted_ends, interval_ids = compute_boundaries(
@@ -208,9 +208,9 @@ def _reduce_dask(ta: _TrackArrays, reduce: str, column, contig_ids, starts, ends
 
     value_slabs = []
     for slab_start, slab_end in slabs:
-        if is_cohort and col_idx is None:
+        if is_2d and col_idx is None:
             value_slabs.append(values[slab_start:slab_end, :])
-        elif is_cohort:
+        elif is_2d:
             value_slabs.append(values[slab_start:slab_end, col_idx])
         else:
             value_slabs.append(values[slab_start:slab_end])
@@ -218,7 +218,7 @@ def _reduce_dask(ta: _TrackArrays, reduce: str, column, contig_ids, starts, ends
     all_values = da.concatenate(value_slabs, axis=0)
     all_labels = build_labels_dask(slabs, value_slabs, sorted_starts, sorted_ends, interval_ids)
 
-    reduced_dims = ("position", ta.col_dim) if (is_cohort and col_idx is None) else ("position",)
+    reduced_dims = ("position", ta.col_dim) if (is_2d and col_idx is None) else ("position",)
     values_da = xr.DataArray(all_values, dims=reduced_dims)
     by_da = xr.DataArray(all_labels, dims="position", name="region")
     result = flox.xarray.xarray_reduce(

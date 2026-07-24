@@ -47,7 +47,7 @@ pub struct Config {
     /// Column shard size for the track being imported. Consumed at track
     /// creation; ignored unless `shard_size` is set.
     pub shard_column_size: Option<usize>,
-    /// Column-axis dimension name for a cohort import (several sources). The
+    /// Column-axis dimension name for a 2D import (several sources). The
     /// axis is generic; the readers default it to `"sample"`, but set this to
     /// `"strand"`, `"context"`, etc. when the columns are not samples. Ignored
     /// for single-source (scalar) imports.
@@ -111,7 +111,7 @@ impl State {
 /// Drive a set of `ValueReader` instances into a `Track`, chunk by chunk.
 ///
 /// - For scalar (rank-1) tracks, `readers.len()` MUST be 1.
-/// - For cohort (rank-2) tracks, `readers.len()` MUST equal the track's column
+/// - For 2D (rank-2) tracks, `readers.len()` MUST equal the track's column
 ///   count (as declared in the on-disk store).
 ///
 /// Workers fork each reader once via `ValueReader::fork`; the original
@@ -138,7 +138,7 @@ where
         let expected = track.columns_count()?;
         if n_readers != expected {
             return Err(PbzError::Metadata(format!(
-                "cohort track {:?} expects {expected} readers; got {n_readers}",
+                "2D track {:?} expects {expected} readers; got {n_readers}",
                 track.name()
             )));
         }
@@ -295,7 +295,7 @@ where
         }
     }
 
-    // Collapse the column axis for scalar tracks; cohort tracks keep both.
+    // Collapse the column axis for scalar tracks; 2D tracks keep both.
     if track.rank() == 1 {
         let rank1 = buf.remove_axis(Axis(1)).into_dyn();
         track.write_flat::<T>(gs, ge, rank1)?;

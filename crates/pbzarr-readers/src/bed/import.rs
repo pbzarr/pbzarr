@@ -1,4 +1,4 @@
-//! Bulk-import one BED column across N samples into a cohort track.
+//! Bulk-import one BED column across N sources into a 2D track.
 
 use std::path::PathBuf;
 
@@ -15,7 +15,7 @@ pub struct BedSource {
 
 /// Import the value at file column `column` (absolute, 0-based, `>= 3`) from each
 /// source BED into a new track sized to `genome`. One source yields a scalar
-/// track; several yield a cohort track whose `column_dim` comes from
+/// track; several yield a 2D track whose `column_dim` comes from
 /// `Config::column_dim` (default `"sample"`) and whose labels come from each
 /// source's `sample_label` (falling back to the file stem). Every source must
 /// be tabix-indexed and share `genome`'s contig names. Uncovered positions

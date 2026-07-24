@@ -216,12 +216,12 @@ impl Track {
         self.dtype
     }
 
-    /// Rank of this track: 1 for scalar, 2 for cohort (has `column_dim`).
+    /// Rank of this track: 1 for scalar, 2 for a 2D column track (has `column_dim`).
     pub fn rank(&self) -> usize {
         self.rank
     }
 
-    /// The column dimension name if this is a cohort track.
+    /// The column dimension name if this is a 2D track.
     pub fn column_dim(&self) -> Option<&str> {
         self.column_dim.as_deref()
     }
@@ -244,7 +244,7 @@ impl Track {
         })
     }
 
-    /// Number of columns: 1 for scalar (rank-1) tracks; for cohort (rank-2)
+    /// Number of columns: 1 for scalar (rank-1) tracks; for 2D (rank-2)
     /// tracks, reads shape[1] from the `values` array.
     pub fn columns_count(&self) -> Result<usize> {
         if self.rank == 1 {
@@ -285,7 +285,7 @@ impl Track {
     }
 
     /// Read an arbitrary region. Returns an `ArrayD<T>` whose rank matches the
-    /// track: shape `[len]` for scalar tracks, `[len, n_cols]` for cohort tracks.
+    /// track: shape `[len]` for scalar tracks, `[len, n_cols]` for 2D tracks.
     ///
     /// Returns `Err` if `T::DTYPE` doesn't match the track's dtype.
     pub fn read_region<T: Numeric>(&self, region: &Region) -> Result<ArrayD<T>> {

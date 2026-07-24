@@ -49,7 +49,7 @@ fn write_synthetic_d4(tmp: &Path, chrom: &str, len: u32) -> std::path::PathBuf {
 }
 
 /// Like `write_synthetic_d4` but every value is offset by `base`, so distinct
-/// cohort columns carry distinct data.
+/// 2D columns carry distinct data.
 fn write_synthetic_d4_offset(tmp: &Path, tag: &str, chrom: &str, len: u32, base: i32) -> PathBuf {
     let sizes_path = tmp.join(format!("{tag}.sizes"));
     std::fs::write(&sizes_path, format!("{chrom}\t{len}\n")).unwrap();
@@ -142,11 +142,11 @@ fn sharded_scalar_import_matches_unsharded() {
     assert_eq!(plain_data, sharded_data);
 }
 
-/// Same equivalence for a 2D cohort track: three distinct-valued sources, a
+/// Same equivalence for a 2D track: three distinct-valued sources, a
 /// sharded layout spanning multiple inner chunks plus a partial edge shard,
 /// imported with >1 worker, must match the unsharded import column-for-column.
 #[test]
-fn sharded_cohort_import_matches_unsharded() {
+fn sharded_two_d_import_matches_unsharded() {
     if !have_d4tools() {
         eprintln!("skip: d4tools not on PATH");
         return;

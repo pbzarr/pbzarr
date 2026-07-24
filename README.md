@@ -17,81 +17,89 @@ A few things you get from this:
 
 pbzarr can be thought of as the spiritual successor of [d4](https://github.com/38/d4-format/tree/master). d4 improved on bigWig with compression, better throughput, multi-track files, and a cleaner API. pbzarr pushes on all of those, mostly by leaning on the work behind Zarr, Xarray, and Dask rather than reinventing it.
 
-For now pbzarr imports from existing formats (d4 and bigWig) rather than generating signal itself, but it does so fast, and once the data is in a pbz store the analysis speedups and disk savings make the conversion worth it. This is all still in active development, so expect rough edges and changes.
+For now pbzarr imports from existing formats (d4, bigWig, and BED) rather than generating signal itself, but it does so fast, and once the data is in a pbz store the analysis speedups and disk savings make the conversion worth it. This is all still in active development, so expect rough edges and changes.
 
 ## Quickstart (Python)
 
-The fastest way to build a store is straight from a d4 or bigWig file. The contig names and lengths are read from the source header, and the dtype is set by the format (d4 is `int32`, bigWig is `float32`), so there is nothing else to declare:
+Create an empty store, then materialize tracks by importing from a source file. The contig names and lengths come from the source header (d4 and bigWig), and the dtype is set by the format (d4 is `int32`, bigWig is `float32`), so there is nothing else to declare:
 
 ```python
 import pbzarr
 
-# Single sample: a 1D scalar track.
-store = pbzarr.PbzStore.from_d4("sample.pbz", "sample.d4", track="depth")
+store = pbzarr.PbzStore.create("cohort.pbz")
 
-# A cohort: pass {label: path}. The keys become the column labels, in order,
-# and the result is a 2D (position, sample) track. Every source must map to
-# the same reference; a mismatched contig set raises.
-store = pbzarr.PbzStore.from_d4(
-    "cohort.pbz",
-    {"A": "A.d4", "B": "B.d4", "C": "C.d4"},
-    track="depth",
+# One source -> a 1D scalar track.
+store.track("mean_depth").import_d4([("sample.d4",)])
+
+# Several sources -> a 2D (position, sample) track, labelled in order.
+store.track("depth").import_d4([("A.d4", "A"), ("B.d4", "B"), ("C.d4", "C")])
+
+# bigWig imports the same way, into a float32 track.
+store.track("signal").import_bigwig([("sample.bw",)])
+```
+
+BED import needs an explicit genome (`.fai` / chrom.sizes), since BED files carry no contig lengths. Import one named column per call, or every column in a single pass:
+
+```python
+# One named column across N bgzipped, tabix-indexed BEDs.
+store.track("score").import_bed(
+    [("a.bed.gz", "A"), ("b.bed.gz", "B")],
+    column="score", dtype="float32", genome="hg38.fai",
+)
+
+# Many columns at once, one scalar track per column.
+store.import_bed_multi(
+    "calls.bed.gz",
+    {"score": "float32", "qual": "int32", "pass": "bool"},
+    genome="hg38.fai",
+)
+```
+
+Combine many single-sample stores into one cohort store along the sample axis with `stack`. Each scalar track shared by all sources becomes a `(position, sample)` track; the labels default to each store's filename stem:
+
+```python
+cohort = pbzarr.stack(
+    [("s1.pbz", "s1"), ("s2.pbz", "s2"), ("s3.pbz", "s3")],
+    out="cohort.pbz",
     column_dim="sample",
 )
-
-# bigWig is the same call, into a float32 track.
-store = pbzarr.PbzStore.from_bigwig("signal.pbz", "sample.bw", track="signal")
 ```
 
-Or build the store by hand when you need full control over the layout:
+### Read
+
+Tracks are the read unit. A region query resolves 0-based, half-open coordinates to a slice and returns an `xr.DataArray`:
 
 ```python
-import numpy as np
-import zarr
+store = pbzarr.PbzStore("cohort.pbz")
+store.tracks()                                      # ['depth', 'signal', ...]
 
-store = pbzarr.PbzStore.create(
-    "out.pbz",
-    contigs=["chr1", "chr2"],
-    contig_lengths=[248_956_422, 242_193_529],
-    coordinate_space="GRCh38",
-)
+depth = store.track("depth")
+depth.region("chr1:1000-2000")                      # (position, sample) DataArray
+depth.region("chr1:1000-2000", column="A")          # one sample
+depth.region(["chr1:0-500", "chr2:10-20"])          # gather several regions
 
-# A 1D scalar track and a 2D cohort track.
-store.create_track("mask", dtype="bool")
-store.create_track("depth", dtype="int32", columns=["A", "B", "C"], column_dim="sample")
-
-# Bulk-import the cohort track from d4 (PyO3 -> Rust). Use import_bigwig for bigWig.
-store.import_d4("depth", sources=[("A.d4", "A"), ("B.d4", "B"), ("C.d4", "C")])
-
-# Or write arbitrary numpy data through zarr-python directly.
-g = zarr.open_group("out.pbz", mode="r+")
-g["chr1/mask"][:] = np.random.rand(248_956_422) > 0.5
+# Reduce many intervals into a (region x column) matrix, featureCounts-style.
+depth.region_reduced([("chr1", 0, 500), ("chr2", 10, 20)], reduce="mean")
 ```
 
-### Read with xarray
+Reads default to lazy/dask, aligned to the on-disk chunk grid; pass `chunks=None` for eager numpy (`store.track("depth", chunks=None)`), or open the whole store as a plain xarray `DataTree`:
 
 ```python
-store = pbzarr.PbzStore("out.pbz")
-store.tracks                                       # ['depth', 'mask']
-store.region("chr1:1000-2000", track="depth")      # xr.DataArray
-store.region("chr1:1000-2000", track="depth", column="A")  # one sample
-
-# Or open the whole store as an xarray DataTree via the .pbz accessor:
-dt = pbzarr.open("out.pbz")
-dt.pbz.region("chr1:1000-2000", track="depth")
+dt = pbzarr.open("cohort.pbz")            # eager
+dt = pbzarr.open("cohort.pbz", chunks={}) # dask-backed
 ```
 
-The `.pbz` accessor on `xr.DataTree` is registered when you `import pbzarr`. Regions use 0-based, half-open coordinates, so `chr1:1000-2000` is `[1000, 2000)`.
-
-> **Note:** Python `PbzStore.create` / `create_track` consolidate metadata after each call. Stores written by the Rust crate do not consolidate yet, so `pbzarr.open(...)` emits a benign `RuntimeWarning` for those; run `zarr.consolidate_metadata(path)` once to silence it.
+Since a pbz store is just a Zarr v3 store, anything that reads Zarr, including plain `zarr-python` and `xarray`, can read it directly.
 
 ## Format at a glance
 
-- **Layout:** contig-major Zarr v3 store with `<contig>/<track>` arrays. Position is the first axis; an optional column dim (default name `"column"`, often overridden to `"sample"`) is the second.
-- **Tracks:** 1D for scalar values (e.g., masks), 2D for cohort values (e.g., per-sample depths). Rank-faithful on disk.
+- **Layout:** a flat, self-describing track layout. The store root is a bare `zarr_conventions` marker group; each track is its own group sized to ΣL (the sum of its contig lengths), with no per-contig subdivision.
+- **Track group:** a `values` array (1D `(ΣL,)` for scalar tracks, 2D `(ΣL, n_columns)` for 2D tracks), an `offsets` prefix-sum index over `contigs`, the `contigs` name array, and, for 2D tracks, a column-label array named after the column dim.
+- **Genome is per-track.** Each track owns its own `contigs`/`offsets` and `genome_checksum`; the store holds no genome, so two tracks in one store may cover different genomes.
+- **Position is the first axis;** an optional column dim (default name `"column"`, often overridden to `"sample"`) is the second.
 - **Coordinates:** 0-based, half-open.
-- **Compression:** Blosc(zstd-5, byte-shuffle) on every data array.
-- **Coord arrays:** cohort tracks write per-contig 1D string arrays at `<contig>/<column_dim>` listing the column labels; xarray promotes them to coordinates automatically.
+- **Compression:** Blosc(zstd-5, byte-shuffle) on every `values` array.
+- **File extension:** `.pbz`.
 
 For the full design see [`docs/DESIGN.md`](docs/DESIGN.md).
 

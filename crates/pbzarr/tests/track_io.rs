@@ -53,7 +53,7 @@ fn write_and_read_region_translates_offset() {
 }
 
 #[test]
-fn cohort_track_roundtrips_columns() {
+fn two_d_track_roundtrips_columns() {
     use ndarray::Array2;
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");
@@ -91,7 +91,7 @@ fn cohort_track_roundtrips_columns() {
 }
 
 #[test]
-fn cohort_track_reopens_with_column_dim() {
+fn two_d_track_reopens_with_column_dim() {
     use ndarray::Array2;
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");
@@ -139,7 +139,7 @@ fn cohort_track_reopens_with_column_dim() {
 }
 
 #[test]
-fn sharded_cohort_track_roundtrips_across_shard_boundary() {
+fn sharded_two_d_track_roundtrips_across_shard_boundary() {
     use ndarray::Array2;
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");

@@ -35,7 +35,7 @@ foo.pbz/
 ├── zarr.json                  # root attrs: zarr_conventions=[{uuid,name:"perbase"}]
 ├── depth/
 │   ├── zarr.json               # perbase: version, genome_checksum, genome_name, ragged_index, ragged_contigs, coordinates
-│   ├── values                  # 2D (ΣL, n_columns), dims=[position, sample] — cohort track
+│   ├── values                  # 2D (ΣL, n_columns), dims=[position, sample] (2D track)
 │   ├── offsets                 # int64[k+1] prefix-sum ragged index over contigs
 │   ├── contigs                 # vlen-utf8[k], contig names in genome order
 │   └── sample                  # vlen-utf8[n_columns] column-label coord array (name = column_dim)
@@ -47,7 +47,7 @@ foo.pbz/
 ```
 
 - Tracks are zarr groups holding arrays, not bare arrays. Multi-resolution is still deferred; landing it would mean nesting further under the track group, not a layout break.
-- Rank-faithful `values`: 1D for scalar tracks, 2D (position × column) for cohort tracks. Cohort `values` is column-chunked (not just row-chunked) so cross-sample compression pays off; sharding is position-only at full column width and currently off (default deferred to a benchmark sweep).
+- Rank-faithful `values`: 1D for scalar tracks, 2D (position × column) for 2D tracks. A 2D track's `values` is column-chunked (not just row-chunked) so cross-sample compression pays off; sharding is position-only at full column width and currently off (default deferred to a benchmark sweep).
 - `offsets` is the prefix-sum flat-start index: `offsets[i]` is contig `i`'s flat start, `offsets[0] == 0`, `offsets[k] == ΣL`. A contig's length is recovered as `offsets[i+1] - offsets[i]`; there is no separate `contig_lengths` array.
 - Genome is per-track, not store-level: each track group owns its own `contigs` + `offsets` and its own `perbase:genome_checksum`. The store itself holds no genome and no cross-track contig union; two tracks in one store may cover different genomes.
 - No `contig_lengths` array and no store-level `contigs` array — both were contig-major-layout artifacts, replaced by the per-track `offsets`/`contigs` ragged index.
@@ -227,7 +227,8 @@ In the library:
 - Don't wrap `zarrs` types unnecessarily — provide escape hatches.
 - Don't put per-track metadata in a store-level map. Each track group carries its own `perbase:` block on its own `zarr.json`, written last as the completion marker (ADR 0004).
 - Don't cross `ContigId` namespaces between readers and the store. `ValueReader::read_into` takes a contig name + range for exactly this reason.
-- **Don't bake cohort framing into public API surface.** pbzarr is a per-base format; cohort analysis is one use case, not the only one (stranded signal, methylation contexts, mask categories — all are valid column-axis interpretations). Parameter, type, and dimension names exposed to users must be generic: use `column` / `column_dim` / `column_label`, never `sample` / `samples` / `n_samples`. The dim's *value* may be `"sample"` for a cohort track (set via `column_dim = "sample"`), but the *parameter name* in any function selecting on the column axis stays generic, and selection must resolve against the track's declared `column_dim` from metadata rather than hardcoding `"sample"` in `dims`.
+- **Don't bake cohort framing into public API surface.** pbzarr is a per-base format; cohort analysis is one use case, not the only one (stranded signal, methylation contexts, mask categories — all are valid column-axis interpretations). Parameter, type, and dimension names exposed to users must be generic: use `column` / `column_dim` / `column_label`, never `sample` / `samples` / `n_samples`. The dim's *value* may be `"sample"` (set via `column_dim = "sample"`) for a 2D track whose columns are samples, but the *parameter name* in any function selecting on the column axis stays generic, and selection must resolve against the track's declared `column_dim` from metadata rather than hardcoding `"sample"` in `dims`.
+- **Don't say "cohort" for a generic 2D track.** In prose, comments, docstrings, and identifiers, the generic two-axis track is a *2D track* (or *column track*); its second axis is the *column axis*. Reserve *cohort* for the genuine sample sense only: a set of per-sample files/stores, a store of many per-sample tracks, or a 2D track whose column axis is samples (e.g. the output of `stack`). So `stack` builds a *cohort store*, but a bigWig-strand or methylation-context track is a *2D track*, not a "cohort track".
 
 In the format:
 

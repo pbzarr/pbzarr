@@ -286,7 +286,7 @@ fn import_bed_multi(
 /// Combine single-sample stores into a fresh cohort store `out`.
 ///
 /// `sources` is a list of `(store_path, label)`; `label=None` defaults to the
-/// store's filename stem. Each shared scalar track becomes a `(ΣL, N)` cohort
+/// store's filename stem. Each shared scalar track becomes a `(ΣL, N)` 2D
 /// track. All sources must share a genome; `tracks=None` stacks every track of
 /// the first source (each must exist in all sources).
 #[pyfunction]

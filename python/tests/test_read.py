@@ -15,7 +15,7 @@ def test_read_scalar_region(tmp_path):
     assert str(da["contig"].values) == "chr2"
 
 
-def test_read_cohort_region_and_column(tmp_path):
+def test_read_two_d_region_and_column(tmp_path):
     store = rust_fixture_store(tmp_path)
     # 'depth' is 2D uint16, col_dim 'sample', labels A/B/C.
     da = _read.read_region(str(store), "depth", RegionQuery("chr1", 5, 15))

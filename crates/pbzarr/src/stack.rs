@@ -1,8 +1,8 @@
 //! Batch stack: combine N single-sample stores into one cohort store.
 //!
-//! Each shared scalar track becomes a `(ΣL, N)` cohort track. Implemented by
+//! Each shared scalar track becomes a `(ΣL, N)` track. Implemented by
 //! reading each source's scalar track through a [`PbzTrackReader`] and driving
-//! them into the cohort track with the existing [`run_pipeline`], one track at
+//! them into the combined track with the existing [`run_pipeline`], one track at
 //! a time. Growing an existing cohort (incremental sample append) is a separate
 //! concern and not handled here.
 
@@ -114,7 +114,7 @@ pub struct StackConfig {
     /// Tracks to stack. `None` stacks every track of the first source; each
     /// selected track must exist (scalar, same dtype, same genome) in all sources.
     pub tracks: Option<Vec<String>>,
-    /// Cohort column-axis name (default `"sample"`).
+    /// Column-axis name (default `"sample"`).
     pub column_dim: Option<String>,
     /// Sample-axis chunk width (default: full width `N`).
     pub column_chunk_size: Option<usize>,
@@ -139,7 +139,7 @@ impl Default for StackConfig {
 /// Combine `sources` (opened single-sample stores + labels) into a fresh cohort
 /// store `out`. Every stacked track must be scalar (rank 1), share a dtype, and
 /// share a genome (`genome_checksum`) across all sources. Each becomes a
-/// `(ΣL, N)` cohort track whose column labels are the source labels.
+/// `(ΣL, N)` track whose column labels are the source labels.
 pub fn stack(
     sources: Vec<(PbzStore, String)>,
     out: &mut PbzStore,

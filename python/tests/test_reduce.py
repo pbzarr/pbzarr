@@ -35,21 +35,21 @@ class _ChunkedNumpy:
         return self._arr[key]
 
 
-def _cohort_values():
+def _two_d_values():
     vals = np.empty((TOTAL, 2), dtype=np.float64)
     vals[:, 0] = np.arange(TOTAL)
     vals[:, 1] = 100 + np.arange(TOTAL)
     return vals
 
 
-def _ta(values, *, cohort=True):
+def _ta(values, *, two_d=True):
     return _TrackArrays(
         values=values,
         offsets=OFFSETS,
         contigs=CONTIGS,
-        dims=("position", "sample") if cohort else ("position",),
-        col_dim="sample" if cohort else None,
-        labels=["s1", "s2"] if cohort else None,
+        dims=("position", "sample") if two_d else ("position",),
+        col_dim="sample" if two_d else None,
+        labels=["s1", "s2"] if two_d else None,
     )
 
 
@@ -106,8 +106,8 @@ def test_coalesce_touched_chunks_merges_adjacent_and_skips_gaps():
 
 
 @pytest.mark.parametrize("reduce", ["mean", "sum", "min", "max"])
-def test_cohort_matrix_matches_numpy(reduce):
-    vals = _cohort_values()
+def test_two_d_matrix_matches_numpy(reduce):
+    vals = _two_d_values()
     ta = _ta(vals)
     intervals = [("chr1", 0, 4), ("chr2", 2, 5), ("chr1", 6, 10)]
     contig_ids, starts, ends = _normalize_intervals(intervals, CONTIGS)
@@ -118,7 +118,7 @@ def test_cohort_matrix_matches_numpy(reduce):
 
 
 def test_column_selection_reduces_to_1d():
-    vals = _cohort_values()
+    vals = _two_d_values()
     ta = _ta(vals)
     intervals = [("chr1", 0, 4), ("chr1", 6, 10)]
     contig_ids, starts, ends = _normalize_intervals(intervals, CONTIGS)
@@ -129,7 +129,7 @@ def test_column_selection_reduces_to_1d():
 
 def test_scalar_track_reduces_to_1d():
     vals = np.arange(TOTAL, dtype=np.float64)
-    ta = _ta(vals, cohort=False)
+    ta = _ta(vals, two_d=False)
     intervals = [("chr1", 1, 5), ("chr2", 0, 3)]
     contig_ids, starts, ends = _normalize_intervals(intervals, CONTIGS)
     out = _reduce_eager(ta, "sum", None, contig_ids, starts, ends)
@@ -138,7 +138,7 @@ def test_scalar_track_reduces_to_1d():
 
 
 def test_chunk_spanning_and_culling():
-    vals = _cohort_values()
+    vals = _two_d_values()
     ta = _ta(_ChunkedNumpy(vals, chunk0=5))
     # first interval straddles the chunk-0/1 boundary; second lives in the last chunk only
     intervals = [("chr1", 3, 8), ("chr2", 5, 8)]

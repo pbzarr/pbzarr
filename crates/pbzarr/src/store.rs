@@ -155,7 +155,7 @@ impl PbzStore {
     }
 
     /// Create a new flat track group `/<name>/` sized to `genome`'s total
-    /// length, with `values`, `offsets`, `contigs`, and (cohort) column-label
+    /// length, with `values`, `offsets`, `contigs`, and (for 2D tracks) column-label
     /// arrays. The `perbase:` interpretation block is written to the group
     /// `zarr.json` last, so a reader recognizes the track only once it is
     /// fully created.
