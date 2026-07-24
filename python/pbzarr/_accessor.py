@@ -146,13 +146,19 @@ class PbzAccessor:
         return int(n)
 
     def _reduce(self, obj, func, fill_value=np.nan):
-        """flox segmented reduction over the region label; lazy over a dask grouper."""
+        """flox segmented reduction over the region label; lazy over a dask grouper.
+
+        Drops the genome coords (`contigs`/`offsets`) so the per-region result has only
+        the `region` (and any column) dims and does not cross-product in `to_dataframe`.
+        """
         import flox.xarray
 
-        return flox.xarray.xarray_reduce(
+        result = flox.xarray.xarray_reduce(
             obj, self._ds["region"], func=func, dim="position",
             expected_groups=np.arange(self._n_regions()), fill_value=fill_value,
         )
+        drop = [c for c in ("contigs", "offsets") if c in result.coords]
+        return result.drop_vars(drop) if drop else result
 
     def reduce(self, func: str, *, fill_value=np.nan) -> xr.Dataset:
         """Per-region value reduction (mean/sum/min/max/...). Lazy on a dask view.
