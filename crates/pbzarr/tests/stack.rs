@@ -1,7 +1,11 @@
 //! Batch stack: N single-sample stores -> one cohort store.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use ndarray::{Array1, ArrayD, Ix2};
 use pbzarr::genome::Contig;
+use pbzarr::import::ProgressSink;
 use pbzarr::io::Dtype;
 use pbzarr::{Genome, PbzStore, StackConfig, TrackConfig, stack};
 use tempfile::TempDir;
@@ -106,6 +110,49 @@ fn stack_two_samples_into_cohort() {
     let sa = sa.into_dimensionality::<Ix2>().unwrap();
     assert!(sa.column(0).iter().all(|&v| v == 1.5));
     assert!(sa.column(1).iter().all(|&v| v == 3.5));
+}
+
+#[derive(Default)]
+struct CountingSink {
+    bytes: AtomicU64,
+    dones: AtomicU64,
+}
+
+impl ProgressSink for CountingSink {
+    fn tick(&self, bytes: u64) {
+        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+    fn done(&self) {
+        self.dones.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn stack_reports_progress_per_track() {
+    let dir = TempDir::new().unwrap();
+    let p1 = dir.path().join("s1.pbz");
+    let p2 = dir.path().join("s2.pbz");
+    make_sample(&p1, 3);
+    make_sample(&p2, 7);
+
+    let s1 = PbzStore::open(&p1).unwrap();
+    let s2 = PbzStore::open(&p2).unwrap();
+    let mut out = PbzStore::create(dir.path().join("cohort.pbz")).unwrap();
+
+    let sink = Arc::new(CountingSink::default());
+    let seen = Arc::clone(&sink);
+    let cfg = StackConfig {
+        progress: Some(Arc::new(move |_label: &str, _total: u64| {
+            Arc::clone(&seen) as Arc<dyn ProgressSink>
+        })),
+        ..StackConfig::default()
+    };
+    stack(vec![(s1, "s1".into()), (s2, "s2".into())], &mut out, cfg).unwrap();
+
+    // Two scalar tracks (depth i32, score f32), genome ΣL=150, 2 samples.
+    // depth: 150*2*4, score: 150*2*4 -> 2400 bytes total; done() once per track.
+    assert_eq!(sink.bytes.load(Ordering::Relaxed), 150 * 2 * 4 * 2);
+    assert_eq!(sink.dones.load(Ordering::Relaxed), 2);
 }
 
 #[test]

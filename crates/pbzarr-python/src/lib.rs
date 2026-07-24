@@ -290,7 +290,8 @@ fn import_bed_multi(
 /// track. All sources must share a genome; `tracks=None` stacks every track of
 /// the first source (each must exist in all sources).
 #[pyfunction]
-#[pyo3(signature = (sources, out, tracks=None, column_dim=None, column_chunk_size=None, workers=None))]
+#[pyo3(signature = (sources, out, tracks=None, column_dim=None, column_chunk_size=None, workers=None, progress=false))]
+#[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn stack(
     py: Python<'_>,
     sources: Vec<(String, Option<String>)>,
@@ -299,6 +300,7 @@ fn stack(
     column_dim: Option<String>,
     column_chunk_size: Option<usize>,
     workers: Option<usize>,
+    progress: bool,
 ) -> PyResult<()> {
     py.allow_threads(|| {
         if sources.is_empty() {
@@ -328,6 +330,11 @@ fn stack(
         };
         if let Some(w) = workers {
             config.workers = w;
+        }
+        if progress {
+            config.progress = Some(std::sync::Arc::new(|label: &str, total: u64| {
+                progress::make_sink(label, total)
+            }));
         }
         rs_stack(opened, &mut out_store, config).map_err(|e| PbzError::new_err(format!("{e}")))?;
         Ok(())

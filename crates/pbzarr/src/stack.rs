@@ -12,7 +12,7 @@ use std::sync::Arc;
 use ndarray::ArrayViewMut2;
 
 use crate::genome::{Genome, Region};
-use crate::import::{Config, Report, run_pipeline};
+use crate::import::{Config, ProgressSink, Report, run_pipeline};
 use crate::io::error::Result as IoResult;
 use crate::io::{Dtype, Numeric, ReaderError, ValueReader};
 use crate::{PbzError, PbzStore, Result, Track, TrackConfig};
@@ -102,6 +102,13 @@ impl<T: Numeric> ValueReader for PbzTrackReader<T> {
     }
 }
 
+/// Builds a per-track [`ProgressSink`] from the track name and the total bytes
+/// that track's stack will write (ΣL × N × dtype size). [`stack`] calls it once
+/// per stacked track, so each track gets a sink sized to its own work. The core
+/// crate stays free of a concrete progress backend (e.g. an indicatif bar); the
+/// caller supplies one via this factory.
+pub type ProgressFactory = dyn Fn(&str, u64) -> Arc<dyn ProgressSink> + Send + Sync;
+
 /// Configuration for [`stack`].
 pub struct StackConfig {
     /// Tracks to stack. `None` stacks every track of the first source; each
@@ -113,6 +120,8 @@ pub struct StackConfig {
     pub column_chunk_size: Option<usize>,
     /// Worker threads.
     pub workers: usize,
+    /// Optional factory for a per-track progress sink. `None` runs silently.
+    pub progress: Option<Arc<ProgressFactory>>,
 }
 
 impl Default for StackConfig {
@@ -122,6 +131,7 @@ impl Default for StackConfig {
             column_dim: None,
             column_chunk_size: None,
             workers: 4,
+            progress: None,
         }
     }
 }
@@ -217,8 +227,13 @@ pub fn stack(
             .chunk_size(pos_chunk);
         let cohort = out.create_track(tname, genome, cfg)?;
 
+        let sink = config.progress.as_ref().map(|make| {
+            let total = t0.total_len() * n as u64 * dtype.size_bytes() as u64;
+            make(tname, total)
+        });
         let pcfg = Config {
             workers: config.workers,
+            progress: sink,
             ..Config::default()
         };
         let report = dispatch(dtype, &stores, tname, cohort, &pcfg)?;

@@ -12,6 +12,7 @@ def stack(
     column_dim: str | None = None,
     column_chunk_size: int | None = None,
     workers: int | None = None,
+    progress: bool = False,
 ) -> PbzStore:
     """Combine single-sample stores into a fresh cohort store at `out`.
 
@@ -19,7 +20,9 @@ def stack(
     defaults to the store's filename stem and becomes the sample's column label.
     Each scalar track shared by all sources becomes a `(ΣL, N)` cohort track.
     `tracks` selects a subset (default: every track of the first source). All
-    sources must share a genome. Returns the created cohort `PbzStore`.
+    sources must share a genome. `progress=True` shows a per-track progress bar
+    on a terminal (periodic log lines otherwise). Returns the created cohort
+    `PbzStore`.
     """
     norm: list[tuple[str, str | None]] = []
     for s in sources:
@@ -37,5 +40,6 @@ def stack(
         column_dim,
         column_chunk_size,
         workers,
+        progress,
     )
     return PbzStore(str(out))

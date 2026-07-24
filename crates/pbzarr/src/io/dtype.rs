@@ -28,6 +28,17 @@ impl Dtype {
         }
     }
 
+    /// In-memory element size in bytes, matching the pipeline's per-chunk byte
+    /// accounting (positions × columns × this).
+    pub fn size_bytes(self) -> usize {
+        match self {
+            Dtype::U8 | Dtype::I8 | Dtype::Bool => 1,
+            Dtype::U16 | Dtype::I16 => 2,
+            Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
+            Dtype::F64 => 8,
+        }
+    }
+
     /// Parse a Zarr v3 dtype string into a `Dtype`.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, crate::error::PbzError> {
