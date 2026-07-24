@@ -113,6 +113,20 @@ def test_culling_reads_only_touched_chunks():
     assert set(source.reads) == {0, 4}
 
 
+def test_chunk_read_once_even_with_many_regions_in_it():
+    # many disjoint regions packed into chunks 0 and 1: each chunk read exactly once,
+    # because reads are driven by coalesced touched-chunk slabs, not by region count
+    intervals = [
+        ("chr1", 0, 2), ("chr1", 3, 5), ("chr1", 6, 8), ("chr1", 9, 10),
+        ("chr1", 10, 12), ("chr1", 13, 15), ("chr1", 16, 18), ("chr1", 18, 20),
+    ]
+    source = CountingArray(_values())
+    contig_ids, starts, ends = _normalize_intervals(intervals, CONTIGS)
+    _reduce_dask(_ta(da.from_array(source, chunks=(CHUNK, NCOL))), "mean", None, contig_ids, starts, ends).compute()
+    assert sorted(source.reads) == [0, 1]                       # only touched chunks
+    assert all(source.reads.count(c) == 1 for c in source.reads)  # each read exactly once
+
+
 def test_naive_reads_all_chunks_but_culled_reads_few():
     intervals = [("chr1", 2, 5), ("chr1", 42, 45)]
 
