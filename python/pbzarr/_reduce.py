@@ -114,8 +114,21 @@ def compute_boundaries(contig_ids, starts, ends, offsets):
     sorted_ends = flat_ends[sort_order]
     interval_ids = sort_order.astype(np.int32)
 
-    if np.any(sorted_starts[1:] < sorted_ends[:-1]):
-        raise ValueError("intervals must be disjoint (overlap is not supported)")
+    overlaps = sorted_starts[1:] < sorted_ends[:-1]
+
+    if np.any(overlaps):
+        i = np.flatnonzero(overlaps)[0]
+        a = interval_ids[i]
+        b = interval_ids[i + 1]
+
+        raise ValueError(
+            "Overlap:\n"
+            f"{contig_ids[a]=}, {starts[a]=}, {ends[a]=}, "
+            f"flat=[{sorted_starts[i]}, {sorted_ends[i]})\n"
+            f"{contig_ids[b]=}, {starts[b]=}, {ends[b]=}, "
+            f"flat=[{sorted_starts[i + 1]}, {sorted_ends[i + 1]})"
+        )
+
     return sorted_starts, sorted_ends, interval_ids
 
 
