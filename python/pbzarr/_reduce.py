@@ -265,7 +265,11 @@ def _reduce_dask(ta: _TrackArrays, reduce: str, column, contig_ids, starts, ends
             value_slabs.append(values[slab_start:slab_end])
 
     all_values = da.concatenate(value_slabs, axis=0)
-    all_labels = build_labels_dask(slabs, value_slabs, sorted_starts, sorted_ends, interval_ids)
+    # cohorts needs a numpy grouper; labels are cheap searchsorted output, so materialize
+    # them while the value array stays lazy/streamed.
+    all_labels = np.asarray(
+        build_labels_dask(slabs, value_slabs, sorted_starts, sorted_ends, interval_ids)
+    )
 
     reduced_dims = ("position", ta.col_dim) if (is_2d and col_idx is None) else ("position",)
     values_da = xr.DataArray(all_values, dims=reduced_dims)
@@ -273,6 +277,7 @@ def _reduce_dask(ta: _TrackArrays, reduce: str, column, contig_ids, starts, ends
     result = flox.xarray.xarray_reduce(
         values_da, by_da, func=func, dim="position",
         expected_groups=np.arange(n_intervals), fill_value=np.nan,
+        method="cohorts",
     )
     return _finish(result, ta, column, contig_ids, starts, ends)
 

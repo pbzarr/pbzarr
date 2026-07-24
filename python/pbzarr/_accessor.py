@@ -109,6 +109,20 @@ def _broadcast_per_region(per_region: xr.DataArray, region_da: xr.DataArray) -> 
 class PbzAccessor:
     def __init__(self, ds: xr.Dataset):
         self._ds = ds
+        self._region_by = None
+
+    def _region_grouper(self):
+        """Region labels as a numpy-backed DataArray, computed once and reused.
+
+        flox `method="cohorts"` inspects the group->chunk map up front and rejects a
+        dask grouper, so the labels must be numpy. They are cheap searchsorted output;
+        materializing this one (position,) array keeps the value variables lazy while
+        avoiding the map-reduce densification. `top()` drives several reductions off the
+        same labels, so cache it on the accessor.
+        """
+        if self._region_by is None:
+            self._region_by = self._ds["region"].compute()
+        return self._region_by
 
     def regions(self, intervals) -> xr.Dataset:
         """Cull to the touched chunks and label `region` (NaN gaps) + `flat_pos`."""
@@ -150,12 +164,19 @@ class PbzAccessor:
 
         Drops the genome coords (`contigs`/`offsets`) so the per-region result has only
         the `region` (and any column) dims and does not cross-product in `to_dataframe`.
+
+        `method="cohorts"`: regions are disjoint and sorted along the flat position axis,
+        so each block's labels are a small contiguous run of region ids. Cohorts sizes the
+        per-block partial to the groups actually in that block; the default `map-reduce`
+        densifies to all N regions per block (N × columns × 8B), which balloons to ~1 TB
+        on a genome-scale view with millions of regions.
         """
         import flox.xarray
 
         result = flox.xarray.xarray_reduce(
-            obj, self._ds["region"], func=func, dim="position",
+            obj, self._region_grouper(), func=func, dim="position",
             expected_groups=np.arange(self._n_regions()), fill_value=fill_value,
+            method="cohorts",
         )
         drop = [c for c in ("contigs", "offsets") if c in result.coords]
         return result.drop_vars(drop) if drop else result
