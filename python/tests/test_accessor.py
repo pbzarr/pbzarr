@@ -99,3 +99,14 @@ def test_top_tiebreak():
 def test_top_requires_region_view():
     with pytest.raises(ValueError, match="region view"):
         make_ds().pbz.top(1, by="coverage")
+
+
+def test_dataframe_interval_input_matches_tuples():
+    import pandas as pd
+
+    ds = make_ds()
+    tuples = [("chr1", 0, 4), ("chr2", 2, 5)]
+    df = pd.DataFrame({"#chrom": ["chr1", "chr2"], "start": [0, 2], "end": [4, 5]})
+    a = ds.pbz.regions(tuples).pbz.reduce("mean")
+    b = ds.pbz.regions(df).pbz.reduce("mean")
+    xr.testing.assert_allclose(a, b)

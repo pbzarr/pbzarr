@@ -29,17 +29,53 @@ _FLOX_FUNC = {
 }
 
 
+def _columnar_intervals(intervals):
+    """Return (contig_names, starts, ends) arrays for a columnar input, else None.
+
+    Columnar inputs avoid a Python object per interval: a pandas DataFrame with
+    contig/start/end columns, or a 3-tuple of equal-length array-likes
+    `(contigs, starts, ends)`. The per-tuple form (a list of `(c, s, e)`) is handled
+    by the scalar path.
+    """
+    if hasattr(intervals, "columns") and hasattr(intervals, "to_numpy"):  # DataFrame
+        cols = {str(c).lower().lstrip("#"): c for c in intervals.columns}
+        contig_col = next((cols[k] for k in ("contig", "chrom", "chromosome", "seqname") if k in cols), None)
+        if contig_col is None or "start" not in cols or "end" not in cols:
+            raise ValueError("interval DataFrame needs contig/chrom, start, and end columns")
+        return (intervals[contig_col].to_numpy(),
+                intervals[cols["start"]].to_numpy(),
+                intervals[cols["end"]].to_numpy())
+    if isinstance(intervals, tuple) and len(intervals) == 3 and not isinstance(intervals[0], str) \
+            and hasattr(intervals[0], "__len__"):
+        return intervals
+    return None
+
+
 def _normalize_intervals(intervals, contigs: list[str]):
     """Turn the interval query into parallel (contig_id, start, end) int arrays.
 
-    Accepts arrays/sequences of (contig, start, end), RegionQuery, or (contig,
-    start, end) tuples. Contig names resolve to ids against the track's contigs.
+    Accepts a pandas DataFrame or a 3-tuple of arrays `(contigs, starts, ends)` (the
+    scalable, vectorized path), or an iterable of `(contig, start, end)` / RegionQuery
+    (fine for small N). Contig names resolve to ids against the track's contigs.
     """
     contig_index = {name: i for i, name in enumerate(contigs)}
 
-    names: list[str] = []
-    starts: list[int] = []
-    ends: list[int] = []
+    columnar = _columnar_intervals(intervals)
+    if columnar is not None:
+        names, starts, ends = columnar
+        import pandas as pd
+
+        ids = pd.Series(np.asarray(names).astype(str)).map(contig_index)
+        if ids.isna().any():
+            missing = sorted(set(np.asarray(names).astype(str)) - set(contig_index))
+            raise KeyError(f"contig {missing[0]!r} not in track; contigs: {contigs}")
+        return (ids.to_numpy().astype(np.int64),
+                np.asarray(starts, dtype=np.int64),
+                np.asarray(ends, dtype=np.int64))
+
+    names_l: list[str] = []
+    starts_l: list[int] = []
+    ends_l: list[int] = []
     for item in intervals:
         if isinstance(item, RegionQuery):
             name, start, end = item.contig, item.start, item.end
@@ -47,15 +83,15 @@ def _normalize_intervals(intervals, contigs: list[str]):
             name, start, end = item[0], item[1], item[2]
         if start is None or end is None:
             raise ValueError(f"interval {item!r} needs explicit start and end")
-        names.append(str(name))
-        starts.append(int(start))
-        ends.append(int(end))
+        names_l.append(str(name))
+        starts_l.append(int(start))
+        ends_l.append(int(end))
 
     try:
-        contig_ids = np.array([contig_index[n] for n in names], dtype=np.int64)
+        contig_ids = np.array([contig_index[n] for n in names_l], dtype=np.int64)
     except KeyError as e:
         raise KeyError(f"contig {e.args[0]!r} not in track; contigs: {contigs}") from e
-    return contig_ids, np.asarray(starts, dtype=np.int64), np.asarray(ends, dtype=np.int64)
+    return contig_ids, np.asarray(starts_l, dtype=np.int64), np.asarray(ends_l, dtype=np.int64)
 
 
 def compute_boundaries(contig_ids, starts, ends, offsets):
