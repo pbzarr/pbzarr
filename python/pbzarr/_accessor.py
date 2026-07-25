@@ -76,32 +76,38 @@ def _slab_labels(a, b, chunk_width, sorted_starts, sorted_ends, interval_ids):
 def _broadcast_per_region(per_region: xr.DataArray, region_da: xr.DataArray) -> xr.DataArray:
     """Spread a per-region reduction back over positions, NaN at gaps, staying lazy.
 
-    Only the small per-region array is materialized; the position-length result is a
-    blockwise map over the (possibly dask) region-id coordinate.
+    A fancy-index gather (`src[region_ids]`) along the region axis, so when the region
+    id array is dask the whole thing stays a dask graph and never triggers a compute.
+    `top()` chains several of these; keeping them lazy fuses the passes into one graph
+    that computes at the caller's `.compute()` (under their scheduler), rather than the
+    eager per-pass computes that bypassed the worker cap and could not be parallelized
+    by a LocalCluster.
     """
     per_region = per_region.transpose("region", ...)
-    vals = np.asarray(per_region.values)               # (n_regions, *rest) -- small
-    rest_shape = vals.shape[1:]
     rest_dims = tuple(d for d in per_region.dims if d != "region")
+    region = region_da.data
 
-    def block(region_block):
-        safe = np.where(np.isnan(region_block), 0, region_block).astype(np.int64)
-        out = vals[safe]                               # (len, *rest)
-        out[np.isnan(region_block)] = np.nan
-        return out
-
-    data = region_da.data
-    if _is_dask(data):
+    if _is_dask(region):
         import dask.array as da
 
-        n_extra = len(rest_shape)
-        out = da.map_blocks(
-            block, data, dtype=np.float64,
-            new_axis=list(range(1, 1 + n_extra)),
-            chunks=(data.chunks[0],) + rest_shape,
-        )
+        src = per_region.data
+        if not _is_dask(src):
+            src = da.from_array(np.asarray(src), chunks=-1)
+        src = src.rechunk({0: -1})                     # small; keep region axis one chunk
+        safe = da.where(da.isnan(region), 0, region).astype(np.int64)
+        gathered = src[safe]                           # (position, *rest), lazy
+        gap = da.isnan(region)
+        if gathered.ndim > 1:
+            gap = gap.reshape((-1,) + (1,) * (gathered.ndim - 1))
+        out = da.where(gap, np.nan, gathered)
     else:
-        out = block(np.asarray(data))
+        vals = np.asarray(per_region.values)
+        safe = np.where(np.isnan(region), 0, region).astype(np.int64)
+        out = vals[safe]
+        gap = np.isnan(region)
+        if out.ndim > 1:
+            gap = gap.reshape((-1,) + (1,) * (out.ndim - 1))
+        out = np.where(gap, np.nan, out)
     return xr.DataArray(out, dims=("position",) + rest_dims)
 
 
