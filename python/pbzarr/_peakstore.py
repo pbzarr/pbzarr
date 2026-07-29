@@ -64,6 +64,138 @@ def build_peak_store(source, intervals, dest, *, tracks=None, chunk_size=None):
     return RegionView(source, intervals, tracks=tracks, chunk_size=chunk_size).to_zarr(dest)
 
 
+def build_peak_store_parallel(store, intervals, dest, *, tracks=None, chunk_size=None,
+                              client=None):
+    """Per-OUTPUT-chunk builder: chunk-aligned, race-free, parallel over dask processes.
+
+    `store` is a `PbzStore` or store path (source must be an on-disk pbz store — tasks
+    reopen its arrays by path in each worker). One task per (track, output-chunk): each
+    reads its regions' source span as a single coalesced slab, copies the in-peak rows
+    into a full-chunk buffer, and writes one whole chunk. With `client` (a dask
+    distributed Client) tasks run across processes; without, they run serially in-process
+    (still coalesced reads + chunk-aligned writes). Returns a `PeakStore`.
+    """
+    import zarr
+
+    from ._pbzstore import PbzStore
+    from ._read import open_track
+
+    store_path = store.path if isinstance(store, PbzStore) else str(store)
+    names = PbzStore(store_path).tracks() if tracks is None else list(tracks)
+
+    first = open_track(store_path, names[0])
+    contigs = list(first.contigs)
+    offsets = np.asarray(first.offsets)
+    contig_ids, starts, ends = _normalize_intervals(intervals, contigs)
+    sorted_starts, sorted_ends, order = compute_boundaries(contig_ids, starts, ends, offsets)
+    k = len(sorted_starts)
+    if k == 0:
+        raise ValueError("build: no intervals")
+    lengths = (sorted_ends - sorted_starts).astype(np.int64)
+    region_offsets = np.empty(k + 1, dtype=np.int64)
+    region_offsets[0] = 0
+    np.cumsum(lengths, out=region_offsets[1:])
+    total = int(region_offsets[-1])
+    cw = int(chunk_size or min(_DEFAULT_CHUNK, total))
+
+    src_contig = np.array([contigs[c] for c in contig_ids[order]], dtype=object)
+    src_start = np.asarray(starts, dtype=np.int64)[order]
+    src_stop = np.asarray(ends, dtype=np.int64)[order]
+    input_index = np.asarray(order, dtype=np.int64)
+
+    # create B structure + aux on the client (tasks only write `values` chunks)
+    root = zarr.open_group(str(dest), mode="w")
+    root.attrs["zarr_conventions"] = _MARKER
+    root.attrs["perbase:kind"] = "collection"
+    root.attrs["perbase:segmentation"] = "region"
+    tasks = []
+    for name in names:
+        ta = open_track(store_path, name)
+        is_2d = ta.col_dim is not None
+        ncol = len(ta.labels) if is_2d else None
+        gmeta = dict(zarr.open_group(f"{store_path}/{name}", mode="r").attrs)
+
+        g = root.create_group(name)
+        g.attrs["zarr_conventions"] = _MARKER
+        g.attrs["perbase:kind"] = "track"
+        g.attrs["perbase:version"] = "0.4"
+        g.attrs["perbase:segmentation"] = "region"
+        g.attrs["perbase:coordinates"] = "0-based-half-open"
+        gc = gmeta.get("perbase:genome_checksum")
+        if gc:
+            g.attrs["perbase:parent_genome_checksum"] = gc
+        if is_2d:
+            shape, chunks, dims = (total, ncol), (cw, ncol), ["position", ta.col_dim]
+        else:
+            shape, chunks, dims = (total,), (cw,), ["position"]
+        g.create_array("values", shape=shape, chunks=chunks, dtype=ta.values.dtype,
+                       dimension_names=dims)
+        _aux(g, "offsets", region_offsets, "region_boundary")
+        _aux(g, "region_contig", src_contig, "region")
+        _aux(g, "region_start", src_start, "region")
+        _aux(g, "region_stop", src_stop, "region")
+        _aux(g, "region_input_index", input_index, "region")
+        if is_2d:
+            _aux(g, ta.col_dim, np.array(ta.labels, dtype=object), ta.col_dim)
+            g.attrs["perbase:column_dim"] = ta.col_dim
+
+        src_path = f"{store_path}/{name}/values"
+        dst_path = f"{dest}/{name}/values"
+        n_chunks = (total + cw - 1) // cw
+        for c in range(n_chunks):
+            o0, o1 = c * cw, min((c + 1) * cw, total)
+            r0 = int(np.searchsorted(region_offsets, o0, side="right") - 1)
+            r1 = int(np.searchsorted(region_offsets, o1 - 1, side="right") - 1)
+            off_slice = region_offsets[r0:r1 + 2].copy()
+            ss_slice = sorted_starts[r0:r1 + 1].copy()
+            tasks.append((src_path, dst_path, is_2d, ncol, o0, o1, off_slice, ss_slice))
+
+    if client is not None:
+        futures = [client.submit(_write_output_chunk, *t, pure=False) for t in tasks]
+        client.gather(futures)
+    else:
+        for t in tasks:
+            _write_output_chunk(*t)
+    return PeakStore(str(dest))
+
+
+def _write_output_chunk(src_path, dst_path, is_2d, ncol, o0, o1, off_slice, ss_slice):
+    """Assemble one whole output chunk from a single coalesced source slab and write it.
+
+    Output rows are gap-free (regions tile the axis), so the buffer is fully covered.
+    The read spans min(src)..max(src) of this chunk's regions — one contiguous read that
+    also pulls the between-peak gaps (the ~1/density amplification), traded for decoding
+    each source chunk once instead of once per region.
+    """
+    import numpy as np
+    import zarr
+
+    src = zarr.open_array(src_path, mode="r")
+    dst = zarr.open_array(dst_path, mode="r+")
+    n = o1 - o0
+    segs = []  # (out_lo, out_hi, src_lo, src_hi)
+    for j in range(len(ss_slice)):
+        a = max(o0, int(off_slice[j]))
+        b = min(o1, int(off_slice[j + 1]))
+        if b <= a:
+            continue
+        s = int(ss_slice[j])
+        segs.append((a - o0, b - o0, s + (a - int(off_slice[j])), s + (b - int(off_slice[j]))))
+    lo = min(s[2] for s in segs)
+    hi = max(s[3] for s in segs)
+    block = np.asarray(src[lo:hi, :]) if is_2d else np.asarray(src[lo:hi])
+    buf = np.empty((n, ncol) if is_2d else (n,), dtype=block.dtype)
+    for ol, oh, sl, sh in segs:
+        if is_2d:
+            buf[ol:oh, :] = block[sl - lo:sh - lo, :]
+        else:
+            buf[ol:oh] = block[sl - lo:sh - lo]
+    if is_2d:
+        dst[o0:o1, :] = buf
+    else:
+        dst[o0:o1] = buf
+
+
 # ---------------------------------------------------------------- build (B) ---
 
 def _build_into(root, source, intervals, tracks, chunk_size):
