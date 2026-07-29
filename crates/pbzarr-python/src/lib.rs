@@ -10,7 +10,9 @@ use pbzarr::Genome;
 use pbzarr::PbzStore;
 use pbzarr::import::Config;
 use pbzarr::io::Dtype;
-use pbzarr::{StackConfig, stack as rs_stack};
+use pbzarr::{
+    RegionBuildConfig, StackConfig, build_region_store as rs_build_region_store, stack as rs_stack,
+};
 use pbzarr_readers::{
     BedColumnSpec, BedSchema, BedSource, BigWigSource, D4Source, column_index_by_name,
     from_bed as rs_from_bed, from_bed_multi as rs_from_bed_multi, from_bigwig as rs_from_bigwig,
@@ -341,6 +343,68 @@ fn stack(
     })
 }
 
+/// Gather disjoint regions of an on-disk source store into a region-mode
+/// ("peak") store at `out`. `contigs`/`starts`/`ends` are parallel arrays
+/// describing the intervals (0-based half-open, resolved against the source's
+/// reference genome); `tracks=None` gathers every source track. Backs
+/// `RegionView.to_pbz`.
+#[pyfunction]
+#[pyo3(signature = (source, contigs, starts, ends, out, tracks=None, chunk_size=None, shard_size=None, column_chunk_size=None, workers=None, progress=false))]
+#[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
+fn build_region_store(
+    py: Python<'_>,
+    source: String,
+    contigs: Vec<String>,
+    starts: Vec<u64>,
+    ends: Vec<u64>,
+    out: String,
+    tracks: Option<Vec<String>>,
+    chunk_size: Option<usize>,
+    shard_size: Option<usize>,
+    column_chunk_size: Option<usize>,
+    workers: Option<usize>,
+    progress: bool,
+) -> PyResult<()> {
+    py.allow_threads(|| {
+        if contigs.len() != starts.len() || contigs.len() != ends.len() {
+            return Err(PbzError::new_err(
+                "build_region_store: contigs/starts/ends length mismatch",
+            ));
+        }
+        let intervals: Vec<(String, u64, u64)> = contigs
+            .into_iter()
+            .zip(starts)
+            .zip(ends)
+            .map(|((c, s), e)| (c, s, e))
+            .collect();
+
+        let src = std::sync::Arc::new(
+            PbzStore::open(&source).map_err(|e| PbzError::new_err(format!("{e}")))?,
+        );
+        let mut out_store =
+            PbzStore::create(&out).map_err(|e| PbzError::new_err(format!("{e}")))?;
+
+        let mut config = RegionBuildConfig {
+            tracks,
+            chunk_size,
+            shard_size,
+            column_chunk_size,
+            ..RegionBuildConfig::default()
+        };
+        if let Some(w) = workers {
+            config.workers = w;
+        }
+        if progress {
+            config.progress = Some(std::sync::Arc::new(|label: &str, total: u64| {
+                progress::make_sink(label, total)
+            }));
+        }
+        rs_build_region_store(src, &intervals, &mut out_store, config)
+            .map_err(|e| PbzError::new_err(format!("{e}")))?;
+        Ok(())
+    })
+}
+
 /// Create a new empty flat pbz store (a bare `zarr_conventions` marker root).
 /// The imports open this store and add tracks to it.
 #[pyfunction]
@@ -381,6 +445,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(import_bed_multi, m)?)?;
     m.add_function(wrap_pyfunction!(create_store, m)?)?;
     m.add_function(wrap_pyfunction!(stack, m)?)?;
+    m.add_function(wrap_pyfunction!(build_region_store, m)?)?;
     m.add_function(wrap_pyfunction!(d4_contigs, m)?)?;
     m.add_function(wrap_pyfunction!(bigwig_contigs, m)?)?;
     Ok(())

@@ -53,5 +53,18 @@ def stack(
     workers: int | None = ...,
     progress: bool = ...,
 ) -> None: ...
+def build_region_store(
+    source: str,
+    contigs: Sequence[str],
+    starts: Sequence[int],
+    ends: Sequence[int],
+    out: str,
+    tracks: Sequence[str] | None = ...,
+    chunk_size: int | None = ...,
+    shard_size: int | None = ...,
+    column_chunk_size: int | None = ...,
+    workers: int | None = ...,
+    progress: bool = ...,
+) -> None: ...
 def d4_contigs(path: str) -> list[tuple[str, int]]: ...
 def bigwig_contigs(path: str) -> list[tuple[str, int]]: ...
