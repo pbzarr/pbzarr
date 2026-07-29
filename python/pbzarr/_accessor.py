@@ -111,6 +111,41 @@ def _broadcast_per_region(per_region: xr.DataArray, region_da: xr.DataArray) -> 
     return xr.DataArray(out, dims=("position",) + rest_dims)
 
 
+def _pack_lexicographic(keys, descs):
+    """Pack an ordered key list into one int64 whose argmax is the lexicographic winner.
+
+    Keys are treated as non-negative, integer-valued counts (what pbz value tracks are:
+    coverage, depth, feature counts). The primary key takes the high bits; a descending
+    key contributes its value, an ascending key its bitwise complement within the field,
+    so a single grouped argmax picks the winner across the whole key list and breaks ties
+    toward the earliest position for free. Fractional or out-of-range keys degrade to a
+    truncating tie-break; the general nan-max/min path stays on `reduce()`.
+    """
+    m = len(keys)
+    bits = 62 // m
+    span = np.int64(1) << bits
+    packed = None
+    for i, (key, desc) in enumerate(zip(keys, descs)):
+        v = key.fillna(0).astype("int64")
+        field = v if desc else (span - 1 - v)
+        term = field * (np.int64(1) << (bits * (m - 1 - i)))
+        packed = term if packed is None else packed + term
+    return packed
+
+
+def _position_index(region_da: xr.DataArray) -> xr.DataArray:
+    """A lazy 0..N position index aligned to the region-id array's chunking."""
+    data = region_da.data
+    n = int(region_da.sizes["position"])
+    if _is_dask(data):
+        import dask.array as da
+
+        idx = da.arange(n, chunks=data.chunks[0])
+    else:
+        idx = np.arange(n)
+    return xr.DataArray(idx, dims="position")
+
+
 @xr.register_dataset_accessor("pbz")
 class PbzAccessor:
     def __init__(self, ds: xr.Dataset):
@@ -159,6 +194,17 @@ class PbzAccessor:
         view.attrs[_N_REGIONS_ATTR] = int(len(contig_ids))
         return view
 
+    def region_view(self, intervals, *, tracks=None, chunk_size=None):
+        """POC: a lazy RegionView over `intervals`.
+
+        `rv.compute()` builds the region-mode (peak) store in memory;
+        `rv.to_zarr(path)` builds it on disk. Either returns a `PeakStore` you can
+        reduce cheaply (`.mean()`, `.top()`, ...) and reopen across sessions.
+        """
+        from ._peakstore import RegionView
+
+        return RegionView(self._ds, intervals, tracks=tracks, chunk_size=chunk_size)
+
     def _n_regions(self) -> int:
         n = self._ds.attrs.get(_N_REGIONS_ATTR)
         if n is None:
@@ -196,14 +242,23 @@ class PbzAccessor:
 
     def top(self, k: int = 1, *, by, descending=True, keep: str = "first",
             with_positions: bool = False) -> xr.Dataset:
-        """Top-k rows per region ordered by `by` (top-1 only for now).
+        """Top-1 rows per region ordered by `by`.
 
         Returns the winning rows (all data variables at the winning position per
         region). `by` is a name, DataArray, or callable(view), or an ordered list
-        thereof (primary key first). Ties break by later keys, then position per `keep`.
+        thereof (primary key first). Ties break by later keys, then earliest position.
+
+        One lazy pass: a single grouped `argmax` over a packed lexicographic key
+        (`_pack_lexicographic`) finds the winning position per region (per column) reading
+        only the decision keys, then one masked gather reads the data variables at those
+        positions. This replaces the earlier max-then-rematch narrowing, which re-read the
+        decision keys once per key plus a position pass. Everything stays a dask graph, so
+        it computes once under the caller's scheduler.
         """
         if k != 1:
             raise NotImplementedError("top() supports k=1 only for now")
+        if keep != "first":
+            raise NotImplementedError("top() supports keep='first' only for now")
         view = self._ds
         self._n_regions()  # validates this is a region view
         region_da = view["region"]
@@ -211,16 +266,14 @@ class PbzAccessor:
         keys = _resolve_keys(by, view)
         descs = list(descending) if isinstance(descending, (list, tuple)) else [descending] * len(keys)
 
-        cand = region_da.notnull()
-        for key, desc in zip(keys, descs):
-            ext = self._reduce(key.where(cand), "nanmax" if desc else "nanmin")
-            cand = cand & (key == _broadcast_per_region(ext, region_da))
-
-        fp = view["flat_pos"]
-        winner = self._reduce(fp.where(cand), "nanmin" if keep == "first" else "nanmax")
-        final = cand & (fp == _broadcast_per_region(winner, region_da))
+        packed = _pack_lexicographic(keys, descs)
+        win = self._reduce(packed, "nanargmax", fill_value=-1)          # (region[, col]) position index
+        win_at_pos = _broadcast_per_region(win, region_da)             # (position[, col]), lazy
+        final = (_position_index(region_da) == win_at_pos) & region_da.notnull()
 
         rows = self._reduce(view.where(final), "nanmax")
         if with_positions:
-            rows = rows.assign_coords(flat_pos=winner)
+            rows = rows.assign_coords(
+                flat_pos=self._reduce(view["flat_pos"].where(final), "nanmax")
+            )
         return rows
