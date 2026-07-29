@@ -21,6 +21,7 @@ fast interval-native builder are deferred; this is correctness + ergonomics.
 """
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
 import numpy as np
@@ -65,15 +66,25 @@ def build_peak_store(source, intervals, dest, *, tracks=None, chunk_size=None):
 
 
 def build_peak_store_parallel(store, intervals, dest, *, tracks=None, chunk_size=None,
-                              client=None):
-    """Per-OUTPUT-chunk builder: chunk-aligned, race-free, parallel over dask processes.
+                              shard_size=None, read_window=None, client=None):
+    """Per-OUTPUT-WRITE-UNIT builder: write-unit-aligned, race-free, parallel over processes.
 
-    `store` is a `PbzStore` or store path (source must be an on-disk pbz store — tasks
-    reopen its arrays by path in each worker). One task per (track, output-chunk): each
-    reads its regions' source span as a single coalesced slab, copies the in-peak rows
-    into a full-chunk buffer, and writes one whole chunk. With `client` (a dask
-    distributed Client) tasks run across processes; without, they run serially in-process
-    (still coalesced reads + chunk-aligned writes). Returns a `PeakStore`.
+    `store` is a `PbzStore` or store path (source must be an on-disk pbz store). One task per
+    (track, write-unit): each **streams** its regions' source span in chunk-aligned windows,
+    scatters the in-peak rows into a full-write-unit buffer, and writes it in one shot. Array
+    handles are memoized per worker process (`_open`), so a long-lived worker opens each array
+    once and reuses it across every task — no per-task reopen storm.
+
+    `chunk_size` is the inner chunk (compression/read granularity). `shard_size`, if given,
+    turns on sharding: many inner chunks bundle into one shard file (fewer files → less
+    Lustre metadata storm), and the **write unit becomes the shard** (whole-shard writes are
+    the only race-free / single-encode path); must be a multiple of `chunk_size`. `read_window`
+    is the source read granularity in rows (default: 8 × the source's on-disk chunk); larger
+    means fewer/larger reads and more concurrent chunk decode per read (good on Lustre) at the
+    cost of `read_window × n_cols × dtype` more memory per task — decoupled from both the
+    on-disk chunk and the write unit. Peak per-task memory ≈ write-unit buffer + one window.
+    With `client` tasks run across processes; without, serially in-process. Returns a
+    `PeakStore`.
     """
     import zarr
 
@@ -96,7 +107,14 @@ def build_peak_store_parallel(store, intervals, dest, *, tracks=None, chunk_size
     region_offsets[0] = 0
     np.cumsum(lengths, out=region_offsets[1:])
     total = int(region_offsets[-1])
-    cw = int(chunk_size or min(_DEFAULT_CHUNK, total))
+    inner = int(chunk_size or min(_DEFAULT_CHUNK, total))
+    if shard_size is not None:
+        wu = int(shard_size)
+        if wu % inner != 0:
+            raise ValueError(f"shard_size {wu} must be a multiple of chunk_size {inner}")
+    else:
+        wu = inner  # write unit == inner chunk when not sharding
+    cw = wu         # tasks step by the write unit
 
     src_contig = np.array([contigs[c] for c in contig_ids[order]], dtype=object)
     src_start = np.asarray(starts, dtype=np.int64)[order]
@@ -125,11 +143,14 @@ def build_peak_store_parallel(store, intervals, dest, *, tracks=None, chunk_size
         if gc:
             g.attrs["perbase:parent_genome_checksum"] = gc
         if is_2d:
-            shape, chunks, dims = (total, ncol), (cw, ncol), ["position", ta.col_dim]
+            shape, chunks, dims = (total, ncol), (inner, ncol), ["position", ta.col_dim]
+            shards = (wu, ncol) if shard_size is not None else None
         else:
-            shape, chunks, dims = (total,), (cw,), ["position"]
+            shape, chunks, dims = (total,), (inner,), ["position"]
+            shards = (wu,) if shard_size is not None else None
+        create_kw = {} if shards is None else {"shards": shards}
         g.create_array("values", shape=shape, chunks=chunks, dtype=ta.values.dtype,
-                       dimension_names=dims)
+                       dimension_names=dims, **create_kw)
         _aux(g, "offsets", region_offsets, "region_boundary")
         _aux(g, "region_contig", src_contig, "region")
         _aux(g, "region_start", src_start, "region")
@@ -141,6 +162,9 @@ def build_peak_store_parallel(store, intervals, dest, *, tracks=None, chunk_size
 
         src_path = f"{store_path}/{name}/values"
         dst_path = f"{dest}/{name}/values"
+        src_inner = int(ta.values.chunks[0])
+        window_rows = int(read_window) if read_window is not None else 8 * src_inner
+        window_rows = max(window_rows, src_inner)
         n_chunks = (total + cw - 1) // cw
         for c in range(n_chunks):
             o0, o1 = c * cw, min((c + 1) * cw, total)
@@ -148,9 +172,12 @@ def build_peak_store_parallel(store, intervals, dest, *, tracks=None, chunk_size
             r1 = int(np.searchsorted(region_offsets, o1 - 1, side="right") - 1)
             off_slice = region_offsets[r0:r1 + 2].copy()
             ss_slice = sorted_starts[r0:r1 + 1].copy()
-            tasks.append((src_path, dst_path, is_2d, ncol, o0, o1, off_slice, ss_slice))
+            tasks.append((src_path, dst_path, is_2d, ncol, o0, o1, off_slice, ss_slice,
+                          window_rows))
 
+    _clear_open_cache()  # drop any stale handles from a prior build at a reused path
     if client is not None:
+        client.run(_clear_open_cache)
         futures = [client.submit(_write_output_chunk, *t, pure=False) for t in tasks]
         client.gather(futures)
     else:
@@ -159,19 +186,37 @@ def build_peak_store_parallel(store, intervals, dest, *, tracks=None, chunk_size
     return PeakStore(str(dest))
 
 
-def _write_output_chunk(src_path, dst_path, is_2d, ncol, o0, o1, off_slice, ss_slice):
-    """Assemble one whole output chunk from a single coalesced source slab and write it.
+@functools.lru_cache(maxsize=None)
+def _open(path, mode):
+    """Memoized array handle. Worker processes are long-lived, so each opens a given
+    array once and reuses it across every task on that worker — no per-task reopen storm.
 
-    Output rows are gap-free (regions tile the axis), so the buffer is fully covered.
-    The read spans min(src)..max(src) of this chunk's regions — one contiguous read that
-    also pulls the between-peak gaps (the ~1/density amplification), traded for decoding
-    each source chunk once instead of once per region.
+    Cleared at the start of each build (`_clear_open_cache`), since a path may be recreated
+    across builds in one process and a cached handle would then point at stale/deleted bytes.
     """
-    import numpy as np
     import zarr
 
-    src = zarr.open_array(src_path, mode="r")
-    dst = zarr.open_array(dst_path, mode="r+")
+    return zarr.open_array(path, mode=mode)
+
+
+def _clear_open_cache():
+    _open.cache_clear()
+
+
+def _write_output_chunk(src_path, dst_path, is_2d, ncol, o0, o1, off_slice, ss_slice,
+                        window_rows):
+    """Assemble one whole output write-unit by streaming the source and scatter-writing it.
+
+    Output rows are gap-free (regions tile the axis), so the buffer is fully covered. The
+    source is read in chunk-aligned windows of `window_rows`; each window is decoded once,
+    the in-peak rows it covers are scattered into the buffer, then it is dropped — so peak
+    memory is one window plus the output buffer, not the whole min..max slab. Pure-gap
+    windows (no overlapping region) are skipped, capping read amplification.
+    """
+    import numpy as np
+
+    src = _open(src_path, "r")
+    dst = _open(dst_path, "r+")
     n = o1 - o0
     segs = []  # (out_lo, out_hi, src_lo, src_hi)
     for j in range(len(ss_slice)):
@@ -181,15 +226,26 @@ def _write_output_chunk(src_path, dst_path, is_2d, ncol, o0, o1, off_slice, ss_s
             continue
         s = int(ss_slice[j])
         segs.append((a - o0, b - o0, s + (a - int(off_slice[j])), s + (b - int(off_slice[j]))))
+
+    buf = np.empty((n, ncol) if is_2d else (n,), dtype=src.dtype)
     lo = min(s[2] for s in segs)
     hi = max(s[3] for s in segs)
-    block = np.asarray(src[lo:hi, :]) if is_2d else np.asarray(src[lo:hi])
-    buf = np.empty((n, ncol) if is_2d else (n,), dtype=block.dtype)
-    for ol, oh, sl, sh in segs:
-        if is_2d:
-            buf[ol:oh, :] = block[sl - lo:sh - lo, :]
-        else:
-            buf[ol:oh] = block[sl - lo:sh - lo]
+    for w0 in range(lo - (lo % window_rows), hi, window_rows):
+        w1 = min(w0 + window_rows, hi)
+        if not any(sl < w1 and w0 < sh for _, _, sl, sh in segs):
+            continue  # pure-gap window: nothing to gather
+        window = np.asarray(src[w0:w1, :]) if is_2d else np.asarray(src[w0:w1])
+        for ol, _oh, sl, sh in segs:
+            a = max(sl, w0)
+            b = min(sh, w1)
+            if b <= a:
+                continue
+            oa, ob = ol + (a - sl), ol + (b - sl)
+            if is_2d:
+                buf[oa:ob, :] = window[a - w0:b - w0, :]
+            else:
+                buf[oa:ob] = window[a - w0:b - w0]
+
     if is_2d:
         dst[o0:o1, :] = buf
     else:
