@@ -110,9 +110,14 @@ impl State {
 
 /// Drive a set of `ValueReader` instances into a `Track`, chunk by chunk.
 ///
-/// - For scalar (rank-1) tracks, `readers.len()` MUST be 1.
-/// - For 2D (rank-2) tracks, `readers.len()` MUST equal the track's column
-///   count (as declared in the on-disk store).
+/// Each reader fills a contiguous block of `reader.n_fields()` columns, in the
+/// order given; the readers' field counts must sum to the track's column count.
+///
+/// - For scalar (rank-1) tracks, the readers must supply exactly one column
+///   (the common case: one reader with `n_fields() == 1`).
+/// - For 2D (rank-2) tracks, `Σ reader.n_fields()` MUST equal the track's column
+///   count. This covers both the `stack` shape (N single-column readers) and the
+///   region shape (one reader spanning every column).
 ///
 /// Workers fork each reader once via `ValueReader::fork`; the original
 /// `readers` vec is consumed by the function.
@@ -132,19 +137,19 @@ where
         });
     }
 
-    let n_readers = readers.len();
+    let n_cols: usize = readers.iter().map(|r| r.n_fields()).sum();
 
     if track.rank() == 2 {
         let expected = track.columns_count()?;
-        if n_readers != expected {
+        if n_cols != expected {
             return Err(PbzError::Metadata(format!(
-                "2D track {:?} expects {expected} readers; got {n_readers}",
+                "2D track {:?} expects {expected} columns; readers supply {n_cols}",
                 track.name()
             )));
         }
-    } else if n_readers != 1 {
+    } else if n_cols != 1 {
         return Err(PbzError::Metadata(format!(
-            "scalar track {:?} expects 1 reader; got {n_readers}",
+            "scalar track {:?} expects 1 column; readers supply {n_cols}",
             track.name()
         )));
     }
@@ -206,7 +211,7 @@ where
                     if let Err(e) = process_task::<T, R>(
                         track,
                         &mut forked,
-                        n_readers,
+                        n_cols,
                         &genome,
                         &task,
                         progress.as_deref(),
@@ -248,7 +253,7 @@ where
 fn process_task<T, R>(
     track: &Track,
     forked: &mut [R],
-    n_readers: usize,
+    n_cols: usize,
     genome: &crate::genome::Genome,
     task: &ChunkTask,
     progress: Option<&dyn ProgressSink>,
@@ -261,9 +266,9 @@ where
     let (gs, ge) = (task.start, task.end);
     let chunk_len = (ge - gs) as usize;
 
-    // Scratch buffer: (chunk_len, n_readers). Pre-fill with `T::ZERO`; readers
+    // Scratch buffer: (chunk_len, n_cols). Pre-fill with `T::ZERO`; readers
     // overwrite every position they cover.
-    let mut buf = Array2::<T>::from_elem((chunk_len, n_readers), T::ZERO);
+    let mut buf = Array2::<T>::from_elem((chunk_len, n_cols), T::ZERO);
 
     // The task may straddle contig boundaries; fill each overlapping contig's
     // slice of the buffer by name. Contigs are in offset order, so stop once
@@ -282,16 +287,22 @@ where
         let ov_end = ge.min(c_end);
         let (buf_lo, buf_hi) = ((ov_start - gs) as usize, (ov_end - gs) as usize);
         let (local_lo, local_hi) = (ov_start - c_start, ov_end - c_start);
-        for (col_idx, reader) in forked.iter_mut().enumerate() {
-            let dst = buf.slice_mut(ndarray::s![buf_lo..buf_hi, col_idx..col_idx + 1]);
+        // Each reader owns a contiguous column block of width `n_fields()`; a
+        // single-column reader is the `stack`/import case, a full-width reader
+        // the region case.
+        let mut col_cursor = 0usize;
+        for (reader_idx, reader) in forked.iter_mut().enumerate() {
+            let w = reader.n_fields();
+            let dst = buf.slice_mut(ndarray::s![buf_lo..buf_hi, col_cursor..col_cursor + w]);
             reader
                 .read_into(&contig.name, local_lo, local_hi, dst)
                 .map_err(|e| {
                     PbzError::Metadata(format!(
-                        "reader {col_idx} failed on {} [{local_lo},{local_hi}): {e}",
+                        "reader {reader_idx} failed on {} [{local_lo},{local_hi}): {e}",
                         contig.name
                     ))
                 })?;
+            col_cursor += w;
         }
     }
 
@@ -303,7 +314,7 @@ where
         track.write_flat::<T>(gs, ge, buf.into_dyn())?;
     }
 
-    let chunk_bytes = (chunk_len * n_readers * mem::size_of::<T>()) as u64;
+    let chunk_bytes = (chunk_len * n_cols * mem::size_of::<T>()) as u64;
     state
         .bytes_written
         .fetch_add(chunk_bytes, Ordering::Relaxed);

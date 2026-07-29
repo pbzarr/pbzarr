@@ -158,18 +158,44 @@ pub struct PerbaseTrackAttrs {
     pub kind: String,
     #[serde(rename = "perbase:version")]
     pub version: String,
-    #[serde(rename = "perbase:genome_checksum")]
-    pub genome_checksum: String,
+    /// Present on contig-mode tracks; absent on region-mode tracks (whose
+    /// identity rides on the provenance coords + `parent_genome_checksum`).
+    #[serde(
+        rename = "perbase:genome_checksum",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub genome_checksum: Option<String>,
     #[serde(
         rename = "perbase:genome_name",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub genome_name: Option<String>,
+    /// `"region"` on a region-mode (peak) track; absent on a normal per-base track.
+    #[serde(
+        rename = "perbase:segmentation",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub segmentation: Option<String>,
+    /// The source track's `genome_checksum`, on region-mode tracks only.
+    #[serde(
+        rename = "perbase:parent_genome_checksum",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_genome_checksum: Option<String>,
     #[serde(rename = "perbase:ragged_index")]
     pub ragged_index: String,
-    #[serde(rename = "perbase:ragged_contigs")]
-    pub ragged_contigs: String,
+    /// The contig-name array (`"contigs"`) on contig-mode tracks; absent on
+    /// region-mode tracks, which carry `region_contig` provenance instead.
+    #[serde(
+        rename = "perbase:ragged_contigs",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ragged_contigs: Option<String>,
     #[serde(rename = "perbase:coordinates")]
     pub coordinates: String,
     #[serde(
@@ -197,10 +223,37 @@ impl PerbaseTrackAttrs {
             }],
             kind: "track".to_owned(),
             version: PBZ_FORMAT_VERSION.to_owned(),
-            genome_checksum: genome.checksum(),
+            genome_checksum: Some(genome.checksum()),
             genome_name: genome.name().map(|s| s.to_owned()),
+            segmentation: None,
+            parent_genome_checksum: None,
             ragged_index: "offsets".to_owned(),
-            ragged_contigs: "contigs".to_owned(),
+            ragged_contigs: Some("contigs".to_owned()),
+            coordinates: "0-based-half-open".to_owned(),
+            description: config.description.clone(),
+            source: config.source.clone(),
+        }
+    }
+
+    /// Attributes for a region-mode (peak) track: no `genome_checksum` /
+    /// `contigs`; carries the `"region"` segmentation marker and the source
+    /// track's checksum as `parent_genome_checksum`.
+    pub fn new_region(config: &TrackConfig, parent_checksum: &str) -> Self {
+        Self {
+            zarr_conventions: vec![ConventionRef {
+                uuid: PERBASE_CONVENTION_UUID.to_owned(),
+                name: PERBASE_CONVENTION_NAME.to_owned(),
+                spec_url: None,
+                schema_url: None,
+            }],
+            kind: "track".to_owned(),
+            version: PBZ_FORMAT_VERSION.to_owned(),
+            genome_checksum: None,
+            genome_name: None,
+            segmentation: Some("region".to_owned()),
+            parent_genome_checksum: Some(parent_checksum.to_owned()),
+            ragged_index: "offsets".to_owned(),
+            ragged_contigs: None,
             coordinates: "0-based-half-open".to_owned(),
             description: config.description.clone(),
             source: config.source.clone(),
@@ -350,6 +403,26 @@ impl Track {
             return Ok(1);
         }
         Ok(self.values_array()?.shape()[1] as usize)
+    }
+
+    /// Column labels of a 2D track, read from its `{column_dim}` coord array.
+    /// Returns an empty vec for scalar tracks.
+    pub fn column_labels(&self) -> Result<Vec<String>> {
+        let Some(dim) = self.column_dim.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let path = format!("{}/{dim}", self.prefix);
+        let arr =
+            Array::open(self.storage.clone(), &path).map_err(|e| PbzError::Store(e.to_string()))?;
+        let n = arr.shape()[0];
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(arr
+            .retrieve_chunk::<ArrayD<String>>(&[0])
+            .map_err(|e| PbzError::Store(e.to_string()))?
+            .into_raw_vec_and_offset()
+            .0)
     }
 
     /// The cached `values` array, opened lazily on first use.
@@ -546,6 +619,20 @@ mod tests {
 
         let back: PerbaseTrackAttrs = serde_json::from_value(val).unwrap();
         assert_eq!(back.version, "0.4");
-        assert_eq!(back.genome_checksum, g.checksum());
+        assert_eq!(back.genome_checksum, Some(g.checksum()));
+    }
+
+    #[test]
+    fn region_attrs_omit_genome_and_mark_segmentation() {
+        let cfg = TrackConfig::new(Dtype::I32);
+        let attrs = PerbaseTrackAttrs::new_region(&cfg, "md5:deadbeef");
+        let val = serde_json::to_value(&attrs).unwrap();
+        let obj = val.as_object().unwrap();
+        assert!(PerbaseTrackAttrs::conforms(obj));
+        assert_eq!(obj["perbase:segmentation"], "region");
+        assert_eq!(obj["perbase:parent_genome_checksum"], "md5:deadbeef");
+        // No contig-mode identity on a region track.
+        assert!(!obj.contains_key("perbase:genome_checksum"));
+        assert!(!obj.contains_key("perbase:ragged_contigs"));
     }
 }

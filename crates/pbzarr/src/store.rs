@@ -182,6 +182,45 @@ impl PbzStore {
         genome: Genome,
         config: TrackConfig,
     ) -> Result<&Track> {
+        self.create_track_inner(name, genome, config, Segmentation::Contig)
+    }
+
+    /// Create a region-mode (peak) track: same `values` + `offsets` as a normal
+    /// track, but the ragged index enumerates regions and provenance rides on
+    /// `region_contig` / `region_start` / `region_stop` / `region_input_index`
+    /// instead of a `contigs` name array. `genome` is the region genome (one
+    /// contig per region, length = region length), so `genome.offsets()` is the
+    /// per-region prefix sum. `seg` must be [`Segmentation::Region`].
+    pub fn create_region_track(
+        &mut self,
+        name: &str,
+        genome: Genome,
+        config: TrackConfig,
+        seg: Segmentation,
+    ) -> Result<&Track> {
+        self.create_track_inner(name, genome, config, seg)
+    }
+
+    /// Stamp `perbase:segmentation = "region"` on the store's collection root.
+    /// A region-mode store carries the marker on the root as well as on each
+    /// track group, so a reader can reject a non-region store up front.
+    pub fn mark_region_segmentation(&self) -> Result<()> {
+        let mut root = zarrs::group::Group::open(self.storage.clone(), "/")
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+        root.attributes_mut()
+            .insert("perbase:segmentation".to_owned(), json!("region"));
+        root.store_metadata()
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+        Ok(())
+    }
+
+    fn create_track_inner(
+        &mut self,
+        name: &str,
+        genome: Genome,
+        config: TrackConfig,
+        seg: Segmentation,
+    ) -> Result<&Track> {
         if self.track_handles.contains_key(name) {
             return Err(PbzError::Metadata(format!("track '{name}' already exists")));
         }
@@ -289,16 +328,21 @@ impl PbzStore {
             }
         };
 
-        // offsets (int64[k+1]) and contigs (vlen-utf8[k]).
+        // offsets (int64[k+1]): the flat prefix-sum, whether the ragged index
+        // enumerates contigs or regions.
         let offsets = genome.offsets();
         let k = genome.len() as u64;
+        let boundary_dim = match seg {
+            Segmentation::Contig => "contig_boundary",
+            Segmentation::Region { .. } => "region_boundary",
+        };
         let off_arr = zarrs::array::ArrayBuilder::new(
             vec![k + 1],
             vec![(k + 1).max(1)],
             data_type::int64(),
             0i64,
         )
-        .dimension_names(["contig_boundary"].into())
+        .dimension_names([boundary_dim].into())
         .build(self.storage.clone(), &format!("/{name}/offsets"))
         .map_err(|e| PbzError::Store(e.to_string()))?;
         off_arr
@@ -308,23 +352,55 @@ impl PbzStore {
             .store_chunk(&[0], Array1::from(offsets).into_dyn())
             .map_err(|e| PbzError::Store(e.to_string()))?;
 
-        let contigs_arr =
-            zarrs::array::ArrayBuilder::new(vec![k], vec![k.max(1)], data_type::string(), "")
-                .dimension_names(["contig"].into())
-                .build(self.storage.clone(), &format!("/{name}/contigs"))
-                .map_err(|e| PbzError::Store(e.to_string()))?;
-        contigs_arr
-            .store_metadata()
-            .map_err(|e| PbzError::Store(e.to_string()))?;
-        if k > 0 {
-            let names: Vec<String> = genome.contigs().iter().map(|c| c.name.clone()).collect();
-            contigs_arr
-                .store_chunk(&[0], Array1::from(names).into_dyn())
-                .map_err(|e| PbzError::Store(e.to_string()))?;
+        // Ragged index name arrays differ by segmentation: contig mode writes a
+        // single `contigs` name array; region mode writes structured provenance.
+        match &seg {
+            Segmentation::Contig => {
+                let names: Vec<String> = genome.contigs().iter().map(|c| c.name.clone()).collect();
+                write_vlen_utf8(&self.storage, name, "contigs", "contig", k, &names)?;
+            }
+            Segmentation::Region {
+                region_contig,
+                region_start,
+                region_stop,
+                region_input_index,
+                ..
+            } => {
+                write_vlen_utf8(
+                    &self.storage,
+                    name,
+                    "region_contig",
+                    "region",
+                    k,
+                    region_contig,
+                )?;
+                write_int64(
+                    &self.storage,
+                    name,
+                    "region_start",
+                    "region",
+                    k,
+                    region_start,
+                )?;
+                write_int64(&self.storage, name, "region_stop", "region", k, region_stop)?;
+                write_int64(
+                    &self.storage,
+                    name,
+                    "region_input_index",
+                    "region",
+                    k,
+                    region_input_index,
+                )?;
+            }
         }
 
         // Completion marker: write the perbase block on the group LAST.
-        let attrs = PerbaseTrackAttrs::new(&genome, &config);
+        let attrs = match &seg {
+            Segmentation::Contig => PerbaseTrackAttrs::new(&genome, &config),
+            Segmentation::Region {
+                parent_checksum, ..
+            } => PerbaseTrackAttrs::new_region(&config, parent_checksum),
+        };
         let mut group = zarrs::group::Group::open(self.storage.clone(), &format!("/{name}"))
             .map_err(|e| PbzError::Store(e.to_string()))?;
         // Extra attrs first, so the perbase block wins on any key collision.
@@ -358,6 +434,81 @@ impl PbzStore {
         );
         Ok(self.track_handles.get(name).expect("just inserted"))
     }
+}
+
+/// How a track's flat position axis is segmented, selecting which ragged-index
+/// name arrays and `perbase:` attributes are written.
+///
+/// [`Segmentation::Contig`] is the normal per-base track (a `contigs` name array
+/// plus `genome_checksum`). [`Segmentation::Region`] is a region-mode (peak)
+/// track: no `contigs` array and no own `genome_checksum`; instead structured
+/// provenance (all length `n_regions`, in region order) plus a
+/// `parent_genome_checksum` linking back to the source genome.
+pub enum Segmentation {
+    Contig,
+    Region {
+        region_contig: Vec<String>,
+        region_start: Vec<i64>,
+        region_stop: Vec<i64>,
+        region_input_index: Vec<i64>,
+        parent_checksum: String,
+    },
+}
+
+/// Write a length-`k` vlen-utf8 aux array `/{track}/{arr}` in one chunk.
+fn write_vlen_utf8(
+    storage: &ReadableWritableListableStorage,
+    track: &str,
+    arr: &str,
+    dim: &str,
+    k: u64,
+    data: &[String],
+) -> Result<()> {
+    if data.len() as u64 != k {
+        return Err(PbzError::Metadata(format!(
+            "{track}/{arr}: expected {k} entries, got {}",
+            data.len()
+        )));
+    }
+    let a = zarrs::array::ArrayBuilder::new(vec![k], vec![k.max(1)], data_type::string(), "")
+        .dimension_names([dim].into())
+        .build(storage.clone(), &format!("/{track}/{arr}"))
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+    a.store_metadata()
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+    if k > 0 {
+        a.store_chunk(&[0], Array1::from(data.to_vec()).into_dyn())
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Write a length-`k` int64 aux array `/{track}/{arr}` in one chunk.
+fn write_int64(
+    storage: &ReadableWritableListableStorage,
+    track: &str,
+    arr: &str,
+    dim: &str,
+    k: u64,
+    data: &[i64],
+) -> Result<()> {
+    if data.len() as u64 != k {
+        return Err(PbzError::Metadata(format!(
+            "{track}/{arr}: expected {k} entries, got {}",
+            data.len()
+        )));
+    }
+    let a = zarrs::array::ArrayBuilder::new(vec![k], vec![k.max(1)], data_type::int64(), 0i64)
+        .dimension_names([dim].into())
+        .build(storage.clone(), &format!("/{track}/{arr}"))
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+    a.store_metadata()
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+    if k > 0 {
+        a.store_chunk(&[0], Array1::from(data.to_vec()).into_dyn())
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// A polymorphic open result: a pbz artifact on disk is either a single
