@@ -59,6 +59,65 @@ class RegionView:
         _build_into(root, self._source, self._intervals, self._tracks, self._chunk_size)
         return PeakStore(root)
 
+    def to_pbz(self, path, *, source=None, shard_size=None, column_chunk_size=None,
+               workers=None, decode_workers=None, write_workers=None,
+               writer_queue_depth=2, progress=False):
+        """Build B on disk at `path` with the Rust region-store builder.
+
+        The fast, single-process, all-cores path (no dask cluster). Requires the
+        region-view's source to be an on-disk pbz store: `source` is that store's
+        path, defaulting to the one the source dataset was opened from
+        (`ds.pbz.region_view(...)` stamps it). Returns a `PeakStore(path)`.
+        """
+        from ._native import build_region_store
+
+        src_path = source
+        if src_path is None:
+            src_path = getattr(self._source, "attrs", {}).get("pbz_source_path")
+        if src_path is None:
+            raise ValueError(
+                "to_pbz needs an on-disk source store; pass source=<path> or build the "
+                "region view from a store dataset (store.dataset(...).pbz.region_view(...))"
+            )
+
+        contigs, starts, ends = _interval_arrays(self._intervals)
+        tracks = list(self._tracks) if self._tracks is not None else None
+        build_region_store(
+            str(src_path), contigs, starts, ends, str(path),
+            tracks=tracks, chunk_size=self._chunk_size, shard_size=shard_size,
+            column_chunk_size=column_chunk_size, workers=workers,
+            decode_workers=decode_workers, write_workers=write_workers,
+            writer_queue_depth=writer_queue_depth, progress=progress,
+        )
+        return PeakStore(str(path))
+
+
+def _interval_arrays(intervals):
+    """(contig_names, starts, ends) as plain Python lists for the Rust builder."""
+    from ._reduce import _columnar_intervals
+    from ._region import RegionQuery
+
+    columnar = _columnar_intervals(intervals)
+    if columnar is not None:
+        names, starts, ends = columnar
+        return (
+            [str(x) for x in np.asarray(names)],
+            [int(x) for x in np.asarray(starts)],
+            [int(x) for x in np.asarray(ends)],
+        )
+    names, starts, ends = [], [], []
+    for item in intervals:
+        if isinstance(item, RegionQuery):
+            n, s, e = item.contig, item.start, item.end
+        else:
+            n, s, e = item[0], item[1], item[2]
+        if s is None or e is None:
+            raise ValueError(f"interval {item!r} needs explicit start and end")
+        names.append(str(n))
+        starts.append(int(s))
+        ends.append(int(e))
+    return names, starts, ends
+
 
 def build_peak_store(source, intervals, dest, *, tracks=None, chunk_size=None):
     """Convenience: build a region-mode store on disk at `dest`. Returns a PeakStore."""

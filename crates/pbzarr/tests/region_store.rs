@@ -202,3 +202,157 @@ fn overlapping_intervals_rejected() {
     );
     assert!(err.is_err(), "overlapping intervals must be rejected");
 }
+
+#[test]
+fn source_chunk_builder_handles_parallel_writer_boundaries() {
+    let dir = TempDir::new().unwrap();
+    let g = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 64,
+    }])
+    .unwrap();
+
+    let mut src = PbzStore::create(dir.path().join("src_parallel.pbz")).unwrap();
+    src.create_track(
+        "cov",
+        g.clone(),
+        TrackConfig::new(Dtype::I32)
+            .columns(vec!["a".into(), "b".into(), "c".into()])
+            .column_dim("column")
+            .chunk_size(10),
+    )
+    .unwrap();
+    {
+        let t = src.track("cov").unwrap();
+        let data = Array2::from_shape_fn((64, 3), |(r, c)| (r as i32 * 100) + c as i32);
+        t.write_region::<i32>(
+            &Region {
+                contig: g.id("chr1").unwrap(),
+                start: 0,
+                end: 64,
+            },
+            data.into_dyn(),
+        )
+        .unwrap();
+    }
+
+    let intervals = vec![
+        ("chr1".to_owned(), 8, 13),
+        ("chr1".to_owned(), 19, 27),
+        ("chr1".to_owned(), 33, 45),
+    ];
+    let mut out = PbzStore::create(dir.path().join("out_parallel.pbz")).unwrap();
+
+    build_region_store(
+        Arc::new(src),
+        &intervals,
+        &mut out,
+        RegionBuildConfig {
+            chunk_size: Some(7),
+            workers: 6,
+            write_workers: Some(3),
+            decode_workers: Some(3),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let t = out.track("cov").unwrap();
+    let rg = t.genome();
+    let r0 = t
+        .read_region::<i32>(&Region {
+            contig: rg.id("0").unwrap(),
+            start: 0,
+            end: 5,
+        })
+        .unwrap()
+        .into_dimensionality::<Ix2>()
+        .unwrap();
+    assert_eq!(r0[[0, 0]], 800);
+    assert_eq!(r0[[4, 2]], 1202);
+
+    let r1 = t
+        .read_region::<i32>(&Region {
+            contig: rg.id("1").unwrap(),
+            start: 0,
+            end: 8,
+        })
+        .unwrap()
+        .into_dimensionality::<Ix2>()
+        .unwrap();
+    assert_eq!(r1[[0, 0]], 1900);
+    assert_eq!(r1[[7, 2]], 2602);
+
+    let r2 = t
+        .read_region::<i32>(&Region {
+            contig: rg.id("2").unwrap(),
+            start: 0,
+            end: 12,
+        })
+        .unwrap()
+        .into_dimensionality::<Ix2>()
+        .unwrap();
+    assert_eq!(r2[[0, 0]], 3300);
+    assert_eq!(r2[[11, 2]], 4402);
+}
+
+#[test]
+fn region_build_works_with_memory_store_outputs() {
+    use zarrs::storage::ReadableWritableListableStorage;
+    use zarrs::storage::store::MemoryStore;
+
+    let g = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 20,
+    }])
+    .unwrap();
+
+    let src_storage: ReadableWritableListableStorage = Arc::new(MemoryStore::new());
+    let mut src = PbzStore::create_with_storage(src_storage).unwrap();
+    src.create_track(
+        "depth",
+        g.clone(),
+        TrackConfig::new(Dtype::I32).chunk_size(6),
+    )
+    .unwrap();
+    src.track("depth")
+        .unwrap()
+        .write_region::<i32>(
+            &Region {
+                contig: g.id("chr1").unwrap(),
+                start: 0,
+                end: 20,
+            },
+            Array1::from_iter(0..20i32).into_dyn(),
+        )
+        .unwrap();
+
+    let out_storage: ReadableWritableListableStorage = Arc::new(MemoryStore::new());
+    let mut out = PbzStore::create_with_storage(out_storage).unwrap();
+    build_region_store(
+        Arc::new(src),
+        &[("chr1".to_owned(), 4, 13)],
+        &mut out,
+        RegionBuildConfig {
+            chunk_size: Some(5),
+            workers: 4,
+            write_workers: Some(2),
+            decode_workers: Some(2),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let t = out.track("depth").unwrap();
+    let rg = t.genome();
+    let got = t
+        .read_region::<i32>(&Region {
+            contig: rg.id("0").unwrap(),
+            start: 0,
+            end: 9,
+        })
+        .unwrap()
+        .into_dimensionality::<Ix1>()
+        .unwrap();
+    assert_eq!(got.to_vec(), (4..13).collect::<Vec<i32>>());
+}

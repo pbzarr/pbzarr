@@ -122,7 +122,7 @@ def compute_boundaries(contig_ids, starts, ends, offsets):
         b = interval_ids[i + 1]
 
         raise ValueError(
-            "Overlap:\n"
+            "intervals must be disjoint. Overlap:\n"
             f"{contig_ids[a]=}, {starts[a]=}, {ends[a]=}, "
             f"flat=[{sorted_starts[i]}, {sorted_ends[i]})\n"
             f"{contig_ids[b]=}, {starts[b]=}, {ends[b]=}, "

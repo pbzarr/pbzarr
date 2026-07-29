@@ -141,6 +141,9 @@ class PbzStore:
         if m0.get("perbase:genome_name") is not None:
             ds.attrs["genome_name"] = m0["perbase:genome_name"]
         ds.attrs["coordinates"] = m0.get("perbase:coordinates", "0-based-half-open")
+        # Let a downstream RegionView.to_pbz() find the on-disk source for the
+        # Rust region-store builder.
+        ds.attrs["pbz_source_path"] = self.path
         return ds
 
     def import_bed_multi(

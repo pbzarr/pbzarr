@@ -349,7 +349,7 @@ fn stack(
 /// reference genome); `tracks=None` gathers every source track. Backs
 /// `RegionView.to_pbz`.
 #[pyfunction]
-#[pyo3(signature = (source, contigs, starts, ends, out, tracks=None, chunk_size=None, shard_size=None, column_chunk_size=None, workers=None, progress=false))]
+#[pyo3(signature = (source, contigs, starts, ends, out, tracks=None, chunk_size=None, shard_size=None, column_chunk_size=None, workers=None, decode_workers=None, write_workers=None, writer_queue_depth=2, progress=false))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn build_region_store(
     py: Python<'_>,
@@ -363,6 +363,9 @@ fn build_region_store(
     shard_size: Option<usize>,
     column_chunk_size: Option<usize>,
     workers: Option<usize>,
+    decode_workers: Option<usize>,
+    write_workers: Option<usize>,
+    writer_queue_depth: usize,
     progress: bool,
 ) -> PyResult<()> {
     py.allow_threads(|| {
@@ -389,6 +392,9 @@ fn build_region_store(
             chunk_size,
             shard_size,
             column_chunk_size,
+            decode_workers,
+            write_workers,
+            writer_queue_depth,
             ..RegionBuildConfig::default()
         };
         if let Some(w) = workers {

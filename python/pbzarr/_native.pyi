@@ -64,6 +64,9 @@ def build_region_store(
     shard_size: int | None = ...,
     column_chunk_size: int | None = ...,
     workers: int | None = ...,
+    decode_workers: int | None = ...,
+    write_workers: int | None = ...,
+    writer_queue_depth: int = ...,
     progress: bool = ...,
 ) -> None: ...
 def d4_contigs(path: str) -> list[tuple[str, int]]: ...

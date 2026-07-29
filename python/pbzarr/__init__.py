@@ -3,6 +3,12 @@
 from . import _accessor  # noqa: F401 - registers the .pbz Dataset accessor
 from ._native import PbzError
 from ._open import open
+from ._peakstore import (
+    PeakStore,
+    RegionView,
+    build_peak_store,
+    build_peak_store_parallel,
+)
 from ._pbzstore import PbzStore
 from ._read import RegionBlocks
 from ._stack import stack
@@ -16,6 +22,10 @@ __all__ = [
     "PbzStore",
     "Track",
     "RegionBlocks",
+    "PeakStore",
+    "RegionView",
+    "build_peak_store",
+    "build_peak_store_parallel",
     "create_store",
     "stack",
     "open",

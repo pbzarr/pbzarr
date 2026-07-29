@@ -11,7 +11,7 @@ pub mod track;
 pub use error::{PbzError, Result};
 pub use genome::{Contig, ContigId, Genome, Region};
 pub use region_query::{RegionQuery, parse_region_query};
-pub use region_store::{RegionBuildConfig, RegionReader, build_region_store};
+pub use region_store::{RegionBuildConfig, build_region_store};
 pub use stack::{ProgressFactory, StackConfig, stack};
 pub use store::{PbzNode, PbzStore, Segmentation};
 pub use track::{ConventionRef, Kind, PerbaseTrackAttrs, Track, TrackConfig, kind_of};
