@@ -2,6 +2,7 @@
 /.pixi
 /profiles
 docs/superpowers
+.superpowers/
 docs/adr
 CONTEXT.md
 .claude

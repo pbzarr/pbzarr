@@ -51,7 +51,7 @@ def _resolve(ta: _TrackArrays, rq: RegionQuery) -> tuple[int, int, int]:
     base = int(ta.offsets[i])
     clen = int(ta.offsets[i + 1]) - base
     s = rq.start if rq.start is not None else 0
-    e = clen if rq.end is None else min(rq.end, clen)
+    e = clen if rq.stop is None else min(rq.stop, clen)
     e = max(s, e)
     return base, s, e
 
