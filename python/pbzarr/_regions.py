@@ -644,19 +644,52 @@ def _gather_block(source_blocks, pieces, output_shape) -> np.ndarray:
 
     first = np.asarray(source_blocks[0])
     output = np.empty(output_shape, dtype=first.dtype)
-    destination = 0
-    for piece in pieces:
-        source_block = int(piece["source_block"])
-        if source_block < 0 or source_block >= len(source_blocks):
-            raise ValueError("piece references an unknown source block")
-        source = np.asarray(source_blocks[source_block])
-        start = int(piece["source_start"])
-        stop = int(piece["source_stop"])
-        length = stop - start
-        output[destination : destination + length] = source[start:stop]
-        destination += length
-    if destination != output_shape[0]:
+    block_ids = pieces["source_block"]
+    if np.any(block_ids < 0) or np.any(block_ids >= len(source_blocks)):
+        raise ValueError("piece references an unknown source block")
+
+    starts = pieces["source_start"].astype(np.int64, copy=False)
+    lengths = (
+        pieces["source_stop"].astype(np.int64, copy=False) - starts
+    )
+    destinations = np.empty(len(pieces) + 1, dtype=np.int64)
+    destinations[0] = 0
+    np.cumsum(lengths, out=destinations[1:])
+    if int(destinations[-1]) != output_shape[0]:
         raise ValueError("piece lengths do not cover the gather output")
+    if len(pieces) == 0:
+        return output
+
+    run_starts = np.concatenate(
+        (
+            np.array([0], dtype=np.int64),
+            np.flatnonzero(block_ids[1:] != block_ids[:-1]) + 1,
+        )
+    )
+    run_stops = np.concatenate(
+        (run_starts[1:], np.array([len(pieces)], dtype=np.int64))
+    )
+    for piece_start, piece_stop in zip(run_starts, run_stops, strict=True):
+        piece_start = int(piece_start)
+        piece_stop = int(piece_stop)
+        source = np.asarray(source_blocks[int(block_ids[piece_start])])
+        output_start = int(destinations[piece_start])
+        output_stop = int(destinations[piece_stop])
+        run_size = output_stop - output_start
+        index_dtype = (
+            np.int32
+            if max(source.shape[0], run_size) <= _I32_MAX
+            else np.int64
+        )
+        relative_destinations = (
+            destinations[piece_start:piece_stop] - output_start
+        )
+        bases = (
+            starts[piece_start:piece_stop] - relative_destinations
+        ).astype(index_dtype, copy=False)
+        indices = np.arange(run_size, dtype=index_dtype)
+        indices += np.repeat(bases, lengths[piece_start:piece_stop])
+        output[output_start:output_stop] = np.take(source, indices, axis=0)
     return output
 
 
