@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Cade Mirchandani", email = "cademirch@gmail.com" }]
 dependencies = [
     "zarr>=3.0,<4",
-    "xarray>=2024.10",
+    "xarray>=2025.8",
     "numpy>=2.0,<3",
     "dask>=2024.8",
     # Required: multi-region reads are reduced with xarray groupby, which needs

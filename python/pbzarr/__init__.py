@@ -1,5 +1,6 @@
 """pbzarr — Python wheel for PBZ (Per-Base Zarr) flat-layout stores."""
 
+from . import _datatree_accessor as _datatree_accessor
 from ._native import PbzError
 from ._open import open
 from ._pbzstore import PbzStore
