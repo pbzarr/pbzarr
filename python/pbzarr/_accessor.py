@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import xarray as xr
 
-from ._regions import _resolve_region
+from ._regions import _resolve_region, regions_dataset
 
 
 @xr.register_dataset_accessor("pbz")
@@ -35,3 +35,11 @@ class PbzDatasetAccessor:
             region_start=normalized.start,
             region_stop=normalized.stop,
         )
+
+    def regions(self, intervals) -> xr.Dataset:
+        """Return stable genomic intervals packed along position.
+
+        Dask-backed values remain lazy. With ``chunks=None``, selected pieces
+        are gathered eagerly and the complete packed result must fit in RAM.
+        """
+        return regions_dataset(self._ds, intervals)
