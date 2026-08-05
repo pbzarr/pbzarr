@@ -39,7 +39,13 @@ def _open_selected_collection(
                 )
             except GroupNotFoundError as error:
                 raise PbzError(f"unknown track {name!r}") from error
-            dataset = _prepare_track_dataset(opened, chunks=chunks)
+            dataset = _prepare_track_dataset(
+                opened,
+                chunks=chunks,
+                source=source,
+                group=name,
+                storage_options=storage_options,
+            )
             stack.callback(dataset.close)
             datasets[f"/{name}"] = dataset
 
@@ -98,7 +104,11 @@ def _open_all_collection(
         datasets = {"/": opened.to_dataset(inherit=False)}
         for name, node in published.items():
             datasets[f"/{name}"] = _prepare_track_dataset(
-                node.to_dataset(inherit=False), chunks=chunks
+                node.to_dataset(inherit=False),
+                chunks=chunks,
+                source=source,
+                group=name,
+                storage_options=storage_options,
             )
         tree = xr.DataTree.from_dict(datasets)
         tree.set_close(opened.close)
@@ -122,7 +132,12 @@ def open(
         if tracks is not None:
             raise PbzError("tracks= is only valid for a PBZ collection")
         root = _open_zarr(source, storage_options=storage_options)
-        return _prepare_track_dataset(root, chunks=chunks)
+        return _prepare_track_dataset(
+            root,
+            chunks=chunks,
+            source=source,
+            storage_options=storage_options,
+        )
     if tracks is not None:
         names = _normalize_track_names(tracks)
         return _open_selected_collection(

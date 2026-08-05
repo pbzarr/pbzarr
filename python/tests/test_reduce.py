@@ -7,7 +7,11 @@ import pytest
 import xarray as xr
 
 import pbzarr  # noqa: F401
-from pbzarr._regions import _validate_packed_dataset, regions_dataset
+from pbzarr._regions import (
+    _reduce_packed_dataset,
+    _validate_packed_dataset,
+    regions_dataset,
+)
 
 
 def _packed_dataset(*, lazy: bool = False, multiple: bool = False) -> xr.Dataset:
@@ -58,7 +62,7 @@ def test_reduce_mean_returns_an_ordinary_region_dataset() -> None:
     packed = _packed_dataset()
     packed["depth"].encoding["_FillValue"] = -1.0
 
-    actual = packed.pbz.reduce("mean")
+    actual = _reduce_packed_dataset(packed, "mean")
 
     expected = xr.Dataset(
         data_vars={"depth": ("region", [2.0, 6.0, 5.0])},
@@ -130,7 +134,7 @@ def _assert_matches_groupby(
         name="region",
     )
 
-    actual = packed.pbz.reduce(reducer, **kwargs).compute()
+    actual = _reduce_packed_dataset(packed, reducer, **kwargs).compute()
 
     for name, values in packed.data_vars.items():
         eager = xr.DataArray(
@@ -182,16 +186,16 @@ def test_reduce_rejects_non_packed_and_corrupted_packed_datasets() -> None:
 
     for corrupted in corruptions:
         with pytest.raises(ValueError):
-            corrupted.pbz.reduce("mean")
+            _reduce_packed_dataset(corrupted, "mean")
 
 
 def test_reduce_has_an_exact_reducer_allowlist_and_owns_the_position_dim() -> None:
     packed = _packed_dataset()
 
     with pytest.raises(ValueError, match="unsupported reducer"):
-        packed.pbz.reduce("prod")
-    with pytest.raises(TypeError, match="selects the segmented position axis"):
-        packed.pbz.reduce("mean", dim="position")
+        _reduce_packed_dataset(packed, "prod")
+    with pytest.raises(TypeError, match="controls dim='position'"):
+        _reduce_packed_dataset(packed, "mean", dim="position")
 
 
 def test_reduce_passes_xarray_kwargs_and_preserves_reducer_attrs_policy() -> None:
@@ -199,8 +203,10 @@ def test_reduce_passes_xarray_kwargs_and_preserves_reducer_attrs_policy() -> Non
         depth=_packed_dataset()["depth"].assign_attrs(units="reads")
     )
 
-    with_nan = packed.pbz.reduce("mean", skipna=False, keep_attrs=False)
-    with_attrs = packed.pbz.reduce("mean", keep_attrs=True)
+    with_nan = _reduce_packed_dataset(
+        packed, "mean", skipna=False, keep_attrs=False
+    )
+    with_attrs = _reduce_packed_dataset(packed, "mean", keep_attrs=True)
 
     assert np.isnan(with_nan["depth"].data[1])
     assert with_nan["depth"].attrs == {}
@@ -249,7 +255,7 @@ def test_reduce_is_lazy_and_culls_to_a_bounded_cross_chunk_region() -> None:
         max_source_blocks=16,
     )
 
-    reduced = packed.pbz.reduce("mean")
+    reduced = _reduce_packed_dataset(packed, "mean")
 
     assert reads == []
     assert reduced["values"].chunks == ((1, 1),)
@@ -260,7 +266,7 @@ def test_reduce_is_lazy_and_culls_to_a_bounded_cross_chunk_region() -> None:
 
 
 def test_reduce_output_sorts_back_to_input_order() -> None:
-    reduced = _packed_dataset().pbz.reduce("mean")
+    reduced = _reduce_packed_dataset(_packed_dataset(), "mean")
 
     restored = reduced.sortby("region_input_index")
 
@@ -272,8 +278,12 @@ def test_reduce_output_sorts_back_to_input_order() -> None:
 def test_non_position_xarray_operations_compose_on_either_side_of_reduce() -> None:
     packed = _packed_dataset(multiple=True)
 
-    position_then_column = packed.pbz.reduce("mean")["signal"].max("context")
-    column_then_position = packed.max("context").pbz.reduce("mean")["signal"]
+    position_then_column = _reduce_packed_dataset(packed, "mean")["signal"].max(
+        "context"
+    )
+    column_then_position = _reduce_packed_dataset(
+        packed.max("context"), "mean"
+    )["signal"]
 
     np.testing.assert_allclose(position_then_column, [6.0, 6.0, 8.0])
     np.testing.assert_allclose(column_then_position, [6.0, 5.0, 8.25])

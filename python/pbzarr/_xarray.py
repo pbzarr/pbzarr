@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from collections.abc import Mapping, Sequence
 
@@ -13,6 +14,7 @@ from ._native import PbzError
 
 
 _NATIVE_CHUNKS = object()
+_PBZ_SOURCE_ATTR = "_pbz_source"
 
 _RESERVED_NAMES = frozenset(
     {
@@ -71,7 +73,14 @@ def _node_kind(attrs: Mapping) -> str:
     return "track" if "perbase:version" in attrs else "collection"
 
 
-def _prepare_track_dataset(opened: xr.Dataset, *, chunks) -> xr.Dataset:
+def _prepare_track_dataset(
+    opened: xr.Dataset,
+    *,
+    chunks,
+    source=None,
+    group: str | None = None,
+    storage_options: Mapping[str, object] | None = None,
+) -> xr.Dataset:
     try:
         dataset = _classify_track_coordinates(opened)
         _validate_track(dataset)
@@ -83,6 +92,13 @@ def _prepare_track_dataset(opened: xr.Dataset, *, chunks) -> xr.Dataset:
             values = _apply_default_chunks(values)
         elif chunks is not None:
             values = values.chunk(chunks)
+        reference = _source_reference(
+            source,
+            group=group,
+            storage_options=storage_options,
+        )
+        if reference is not None and values.chunks is not None:
+            setattr(values.data, _PBZ_SOURCE_ATTR, reference)
         dataset = dataset.assign(values=values.variable)
         dataset.encoding.pop("source", None)
         dataset.set_close(opened.close)
@@ -90,6 +106,25 @@ def _prepare_track_dataset(opened: xr.Dataset, *, chunks) -> xr.Dataset:
     except Exception:
         opened.close()
         raise
+
+
+def _source_reference(source, *, group, storage_options):
+    try:
+        location = os.fspath(source)
+    except TypeError:
+        return None
+    if isinstance(location, bytes):
+        location = os.fsdecode(location)
+    if "://" not in location:
+        location = os.path.abspath(location)
+    array_path = "values" if group is None else f"{group}/values"
+    return {
+        "source": location,
+        "array_path": array_path,
+        "storage_options": (
+            None if storage_options is None else dict(storage_options)
+        ),
+    }
 
 
 def _classify_track_coordinates(dataset: xr.Dataset) -> xr.Dataset:

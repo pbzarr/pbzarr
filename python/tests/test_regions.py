@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import hashlib
 
-import dask
+import cloudpickle
 import dask.array as da
-from dask.utils import funcname
 import numpy as np
 import pytest
 import xarray as xr
@@ -40,8 +39,8 @@ class _CountingStore(MemoryStore):
         )
 
 
-def _store_track(*, two_dimensional=False, sharded=False):
-    store = _CountingStore()
+def _store_track(*, two_dimensional=False, sharded=False, store=None):
+    store = _CountingStore() if store is None else store
     group = zarr.open_group(store, mode="w", zarr_format=3)
     contigs = np.asarray(["chr1", "empty", "chr2"])
     offsets = np.asarray([0, 4, 4, 10], dtype=np.int64)
@@ -94,7 +93,8 @@ def _store_track(*, two_dimensional=False, sharded=False):
             + hashlib.md5(payload.encode()).hexdigest(),
         }
     )
-    store.reads.clear()
+    if hasattr(store, "reads"):
+        store.reads.clear()
     return store, expected
 
 
@@ -498,32 +498,38 @@ def test_public_regions_returns_stable_packed_dataset_without_indexes():
     assert not any("values/c/2" in key for key in reads)
 
 
-def test_region_reduction_fuses_source_getters_into_its_batch_task():
+def test_reduce_regions_falls_back_after_an_xarray_value_transformation():
     store, _ = _store_track()
     dataset = pbzarr.open(store)
-    packed = dataset.pbz.regions(
-        [("chr1", 0, 2), ("chr2", 0, 3)]
+    transformed = dataset.assign(values=dataset["values"] + 1)
+
+    reduced = transformed.pbz.reduce_regions(
+        [("chr1", 0, 2), ("chr2", 0, 3)],
+        "mean",
     )
 
-    (standalone,) = dask.optimize(packed["values"].data)
-    standalone_tasks = standalone.__dask_graph__().to_dict().values()
-    assert sum(
-        funcname(task.func) == "getter"
-        for task in standalone_tasks
-        if hasattr(task, "func")
-    ) == 2
+    np.testing.assert_array_equal(reduced.compute()["values"], [1.5, 6.0])
 
-    reduced = packed.pbz.reduce("mean")
-    (optimized,) = dask.optimize(reduced["values"].data)
-    optimized_tasks = optimized.__dask_graph__().to_dict().values()
-    task_functions = [
-        funcname(task.func)
-        for task in optimized_tasks
-        if hasattr(task, "func")
-    ]
 
-    assert task_functions == ["_execute_subgraph"]
-    np.testing.assert_array_equal(reduced.compute()["values"], [0.5, 5.0])
+def test_reduce_regions_builds_compact_self_contained_pbz_tasks(tmp_path):
+    path = tmp_path / "track.pbz"
+    _, expected = _store_track(store=path)
+    dataset = pbzarr.open(path)
+
+    reduced = dataset.pbz.reduce_regions(
+        [("chr1", 0, 2), ("chr2", 0, 3)],
+        "mean",
+    )
+
+    graph = reduced["values"].data.__dask_graph__().to_dict()
+    tasks = [task for task in graph.values() if hasattr(task, "func")]
+    assert len(tasks) == 1
+    assert not tasks[0].dependencies
+    assert len(cloudpickle.dumps(graph)) < 32_000
+    np.testing.assert_array_equal(
+        reduced.compute()["values"],
+        [expected[0:2].mean(), expected[4:7].mean()],
+    )
 
 
 def test_regions_dataset_keeps_one_source_chunk_in_one_batch():

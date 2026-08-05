@@ -65,8 +65,7 @@ peaks = [
     ("chr2", 200000, 200150),
 ]
 
-peak_values = depth.pbz.regions(peaks)
-peak_means = peak_values.pbz.reduce("mean")
+peak_means = depth.pbz.reduce_regions(peaks, "mean")
 result = peak_means.compute()
 ```
 

@@ -4,18 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import threading
 
 import dask
 import dask.array as da
 from dask._task_spec import Task
+from dask.base import tokenize
 from dask import delayed
 from dask.highlevelgraph import HighLevelGraph, MaterializedLayer
 import numpy as np
 import xarray as xr
+import zarr
 
 from ._native import PbzError
 from ._region import RegionQuery, parse_region
-from ._xarray import _validate_track
+from ._xarray import _PBZ_SOURCE_ATTR, _validate_track
 
 
 _I64_MIN = -(2**63)
@@ -33,6 +36,8 @@ _PACKED_REGION_COORDS = (
     "region_input_index",
     "region_storage_index",
 )
+_OPEN_ARRAYS = {}
+_OPEN_ARRAYS_LOCK = threading.Lock()
 
 
 def _contains_task_function(value, function) -> bool:
@@ -63,8 +68,9 @@ def _fuse_region_reduction_tasks(values: da.Array) -> da.Array:
 
     fused = False
     for key, node in list(graph.items()):
-        if not isinstance(node, Task) or not _contains_task_function(
-            node, _gather_block
+        if not isinstance(node, Task) or not any(
+            _contains_task_function(node, function)
+            for function in (_gather_block, _read_gather_block)
         ):
             continue
         producer_keys = [
@@ -217,43 +223,62 @@ def _validate_packed_dataset(ds: xr.Dataset) -> np.ndarray:
     return offsets
 
 
-def _reduce_packed_dataset(
-    ds: xr.Dataset, reducer: str, **kwargs
-) -> xr.Dataset:
-    offsets = _validate_packed_dataset(ds)
+def _reduce_block(
+    block,
+    local_offsets,
+    dimensions,
+    attrs,
+    reducer,
+    kwargs,
+) -> np.ndarray:
+    local_values = xr.DataArray(np.asarray(block), dims=dimensions, attrs=attrs)
+    labels = np.repeat(
+        np.arange(len(local_offsets) - 1, dtype=np.int64),
+        np.diff(local_offsets),
+    )
+    groups = xr.DataArray(labels, dims=("position",), name="region")
+    method = getattr(local_values.groupby(groups), reducer)
+    return np.asarray(method(dim="position", **kwargs).data)
+
+
+def _reduction_template(
+    values: xr.DataArray, reducer: str, kwargs: dict
+) -> xr.DataArray:
+    shape = (2,) + (1,) * (values.ndim - 1)
+    dummy = xr.DataArray(
+        np.zeros(shape, dtype=values.dtype),
+        dims=values.dims,
+        attrs=values.attrs,
+    )
+    groups = xr.DataArray(
+        np.zeros(2, dtype=np.int64), dims=("position",), name="region"
+    )
+    method = getattr(dummy.groupby(groups), reducer)
+    return method(dim="position", **kwargs)
+
+
+def _validate_reducer(reducer: str, kwargs: dict) -> None:
     if not isinstance(reducer, str) or reducer not in _PACKED_REDUCERS:
         allowed = ", ".join(sorted(_PACKED_REDUCERS))
         raise ValueError(f"unsupported reducer {reducer!r}; choose one of: {allowed}")
     if "dim" in kwargs:
-        raise TypeError("reduce controls dim='position'; do not pass dim")
+        raise TypeError("reduce_regions controls dim='position'; do not pass dim")
 
-    def reduce_block(
-        block,
-        local_offsets,
-        dimensions,
-        attrs,
-    ) -> np.ndarray:
-        local_values = xr.DataArray(np.asarray(block), dims=dimensions, attrs=attrs)
-        labels = np.repeat(
-            np.arange(len(local_offsets) - 1, dtype=np.int64),
-            np.diff(local_offsets),
-        )
-        groups = xr.DataArray(labels, dims=("position",), name="region")
-        method = getattr(local_values.groupby(groups), reducer)
-        return np.asarray(method(dim="position", **kwargs).data)
 
-    def result_template(values: xr.DataArray) -> xr.DataArray:
-        shape = (2,) + (1,) * (values.ndim - 1)
-        dummy = xr.DataArray(
-            np.zeros(shape, dtype=values.dtype),
-            dims=values.dims,
-            attrs=values.attrs,
-        )
-        groups = xr.DataArray(
-            np.zeros(2, dtype=np.int64), dims=("position",), name="region"
-        )
-        method = getattr(dummy.groupby(groups), reducer)
-        return method(dim="position", **kwargs)
+def _local_offsets(offsets, start_region, stop_region, position_start):
+    local = offsets[start_region : stop_region + 1] - position_start
+    if int(local[-1]) <= _I32_MAX:
+        local = local.astype(np.int32)
+    local.setflags(write=False)
+    return local
+
+
+def _reduce_packed_dataset(
+    ds: xr.Dataset, reducer: str, **kwargs
+) -> xr.Dataset:
+    offsets = _validate_packed_dataset(ds)
+    _validate_reducer(reducer, kwargs)
+    dask_region_batches = {}
 
     def eager_batches(values: xr.DataArray, template: xr.DataArray):
         bytes_per_position = np.dtype(values.dtype).itemsize
@@ -278,29 +303,50 @@ def _reduce_packed_dataset(
             stop = int(offsets[stop_region])
             local_offsets = offsets[start_region : stop_region + 1] - start
             blocks.append(
-                reduce_block(
+                _reduce_block(
                     values.data[start:stop],
                     local_offsets,
                     values.dims,
                     values.attrs,
+                    reducer,
+                    kwargs,
                 )
             )
         return np.concatenate(blocks, axis=template.get_axis_num("region"))
 
     def dask_batches(values: xr.DataArray, template: xr.DataArray):
         source_blocks = values.data.to_delayed()
-        position_boundaries = np.empty(len(values.chunks[0]) + 1, dtype=np.int64)
-        position_boundaries[0] = 0
-        np.cumsum(values.chunks[0], out=position_boundaries[1:])
-        region_edges = np.searchsorted(offsets, position_boundaries)
+        batch_key = values.chunks[0]
+        batches = dask_region_batches.get(batch_key)
+        if batches is None:
+            position_boundaries = np.empty(
+                len(values.chunks[0]) + 1, dtype=np.int64
+            )
+            position_boundaries[0] = 0
+            np.cumsum(values.chunks[0], out=position_boundaries[1:])
+            region_edges = np.searchsorted(offsets, position_boundaries)
+            batches = tuple(
+                (
+                    int(region_edges[position_block]),
+                    int(region_edges[position_block + 1]),
+                    _local_offsets(
+                        offsets,
+                        int(region_edges[position_block]),
+                        int(region_edges[position_block + 1]),
+                        int(position_boundaries[position_block]),
+                    ),
+                )
+                for position_block in range(len(values.chunks[0]))
+            )
+            dask_region_batches[batch_key] = batches
         output_dims = template.dims
         region_axis = output_dims.index("region")
         rows = []
-        for position_block in range(len(values.chunks[0])):
-            start_region = int(region_edges[position_block])
-            stop_region = int(region_edges[position_block + 1])
-            start = int(position_boundaries[position_block])
-            local_offsets = offsets[start_region : stop_region + 1] - start
+        for position_block, (
+            start_region,
+            stop_region,
+            local_offsets,
+        ) in enumerate(batches):
             region_size = stop_region - start_region
             columns = []
             column_blocks = (
@@ -322,11 +368,13 @@ def _reduce_packed_dataset(
                         output_shape.append(int(values.chunks[1][column_block]))
                     else:
                         output_shape.append(template.sizes[dimension])
-                task = delayed(reduce_block)(
+                task = delayed(_reduce_block)(
                     source_blocks[source_key],
                     local_offsets,
                     values.dims,
                     values.attrs,
+                    reducer,
+                    kwargs,
                 )
                 columns.append(
                     da.from_delayed(
@@ -349,7 +397,7 @@ def _reduce_packed_dataset(
     data_variables = {}
     generated_coordinates = {}
     for name, values in ds.data_vars.items():
-        template = result_template(values)
+        template = _reduction_template(values, reducer, kwargs)
         if values.chunks is None:
             reduced = eager_batches(values, template)
         else:
@@ -509,7 +557,7 @@ def _plan_variable_regions(
         layout.n_regions,
         n_pieces,
         len(position_chunks),
-        int(boundaries[-1]),
+        max(position_chunks, default=0),
     )
     plan_dtype = np.dtype(np.int32 if largest_bound <= _I32_MAX else np.int64)
     batch_region_edges = region_edges.astype(plan_dtype, copy=False)
@@ -612,6 +660,69 @@ def _gather_block(source_blocks, pieces, output_shape) -> np.ndarray:
     return output
 
 
+def _compact_source_reference(values: xr.DataArray):
+    reference = getattr(values.data, _PBZ_SOURCE_ATTR, None)
+    if not isinstance(reference, dict) or values.chunks is None:
+        return None
+    required = ("source", "array_path", "storage_options")
+    if any(key not in reference for key in required):
+        return None
+    return {key: reference[key] for key in required}
+
+
+def _open_source_array(reference):
+    cache_key = tokenize(reference)
+    with _OPEN_ARRAYS_LOCK:
+        array = _OPEN_ARRAYS.get(cache_key)
+        if array is None:
+            kwargs = {}
+            if reference["storage_options"] is not None:
+                kwargs["storage_options"] = reference["storage_options"]
+            array = zarr.open_array(
+                reference["source"],
+                mode="r",
+                path=reference["array_path"],
+                **kwargs,
+            )
+            _OPEN_ARRAYS[cache_key] = array
+    return array
+
+
+def _read_gather_block(
+    reference,
+    source_slices,
+    pieces,
+    output_shape,
+) -> np.ndarray:
+    array = _open_source_array(reference)
+    blocks = tuple(
+        np.asarray(array[tuple(slice(start, stop) for start, stop in bounds)])
+        for bounds in source_slices
+    )
+    return _gather_block(blocks, pieces, output_shape)
+
+
+def reduce_regions_dataset(
+    ds: xr.Dataset,
+    intervals,
+    reducer: str,
+    /,
+    *,
+    target_bytes: int = _TARGET_BYTES,
+    max_source_blocks: int = _MAX_SOURCE_BLOCKS,
+    **kwargs,
+) -> xr.Dataset:
+    """Reduce genomic intervals, reopening unchanged PBZ arrays in each task."""
+    _validate_reducer(reducer, kwargs)
+    packed = regions_dataset(
+        ds,
+        intervals,
+        target_bytes=target_bytes,
+        max_source_blocks=max_source_blocks,
+    )
+    return _reduce_packed_dataset(packed, reducer, **kwargs)
+
+
 def regions_dataset(
     ds: xr.Dataset,
     intervals,
@@ -623,22 +734,44 @@ def regions_dataset(
 
     data_variables = {}
     column_coordinates = {}
+    plans = {}
+    gather_batches = {}
     for name, values in ds.data_vars.items():
-        batch_regions, batch_pieces, pieces = _plan_variable_regions(
-            values,
-            layout,
-            target_bytes=target_bytes,
-            max_source_blocks=max_source_blocks,
+        plan_key = (
+            values.shape,
+            values.chunks,
+            np.dtype(values.dtype).itemsize,
         )
+        plan = plans.get(plan_key)
+        if plan is None:
+            plan = _plan_variable_regions(
+                values,
+                layout,
+                target_bytes=target_bytes,
+                max_source_blocks=max_source_blocks,
+            )
+            plans[plan_key] = plan
+        batch_regions, batch_pieces, pieces = plan
         if values.chunks is None:
             gathered = _gather_eager(values, pieces, layout.total_positions)
         else:
+            batches = gather_batches.get(plan_key)
+            if batches is None:
+                batches = _prepare_gather_batches(
+                    values,
+                    layout,
+                    batch_regions,
+                    batch_pieces,
+                    pieces,
+                )
+                gather_batches[plan_key] = batches
             gathered = _gather_dask(
                 values,
                 layout,
                 batch_regions,
                 batch_pieces,
                 pieces,
+                batches=batches,
             )
         data_variables[name] = xr.Variable(
             values.dims,
@@ -680,15 +813,43 @@ def regions_dataset(
     return result
 
 
-def _gather_dask(
+def _prepare_gather_batches(
     values: xr.DataArray,
     layout: RegionLayout,
     batch_region_edges: np.ndarray,
     batch_piece_edges: np.ndarray,
     pieces: np.ndarray,
 ):
-    source_blocks = values.data.to_delayed()
-    rows = []
+    position_boundaries = np.concatenate(
+        ([0], np.cumsum(values.chunks[0], dtype=np.int64))
+    )
+    column_boundaries = (
+        np.concatenate(([0], np.cumsum(values.chunks[1], dtype=np.int64)))
+        if values.ndim == 2
+        else None
+    )
+
+    def source_slices(unique_source_blocks, column_block):
+        slices = []
+        for source_block in unique_source_blocks:
+            source_block = int(source_block)
+            bounds = [
+                (
+                    int(position_boundaries[source_block]),
+                    int(position_boundaries[source_block + 1]),
+                )
+            ]
+            if column_block is not None:
+                bounds.append(
+                    (
+                        int(column_boundaries[column_block]),
+                        int(column_boundaries[column_block + 1]),
+                    )
+                )
+            slices.append(tuple(bounds))
+        return tuple(slices)
+
+    batches = []
     for batch_index in range(len(batch_region_edges) - 1):
         region_start = int(batch_region_edges[batch_index])
         region_stop = int(batch_region_edges[batch_index + 1])
@@ -710,16 +871,68 @@ def _gather_dask(
             layout.packed_offsets[region_stop]
             - layout.packed_offsets[region_start]
         )
-        if values.ndim == 1:
-            selected = tuple(
-                source_blocks[(int(source_block),)]
-                for source_block in unique_source_blocks
+        source_slices_by_column = tuple(
+            source_slices(unique_source_blocks, column_block)
+            for column_block in (
+                range(len(values.chunks[1])) if values.ndim == 2 else (None,)
             )
-            task = delayed(_gather_block)(
-                selected,
+        )
+        batches.append(
+            (
+                unique_source_blocks,
                 local_pieces,
-                (position_size,),
+                position_size,
+                source_slices_by_column,
             )
+        )
+    return tuple(batches)
+
+
+def _gather_dask(
+    values: xr.DataArray,
+    layout: RegionLayout,
+    batch_region_edges: np.ndarray,
+    batch_piece_edges: np.ndarray,
+    pieces: np.ndarray,
+    *,
+    batches=None,
+):
+    if batches is None:
+        batches = _prepare_gather_batches(
+            values,
+            layout,
+            batch_region_edges,
+            batch_piece_edges,
+            pieces,
+        )
+    del layout, batch_region_edges, batch_piece_edges, pieces
+    reference = _compact_source_reference(values)
+    source_blocks = None if reference is not None else values.data.to_delayed()
+    rows = []
+    for (
+        unique_source_blocks,
+        local_pieces,
+        position_size,
+        source_slices_by_column,
+    ) in batches:
+        if values.ndim == 1:
+            if reference is None:
+                selected = tuple(
+                    source_blocks[(int(source_block),)]
+                    for source_block in unique_source_blocks
+                )
+                task = delayed(_gather_block)(
+                    selected,
+                    local_pieces,
+                    (position_size,),
+                )
+            else:
+                task = delayed(_read_gather_block)(
+                    reference,
+                    source_slices_by_column[0],
+                    local_pieces,
+                    (position_size,),
+                )
             rows.append(
                 da.from_delayed(
                     task,
@@ -731,15 +944,23 @@ def _gather_dask(
 
         columns = []
         for column_block, column_size in enumerate(values.chunks[1]):
-            selected = tuple(
-                source_blocks[(int(source_block), column_block)]
-                for source_block in unique_source_blocks
-            )
-            task = delayed(_gather_block)(
-                selected,
-                local_pieces,
-                (position_size, int(column_size)),
-            )
+            if reference is None:
+                selected = tuple(
+                    source_blocks[(int(source_block), column_block)]
+                    for source_block in unique_source_blocks
+                )
+                task = delayed(_gather_block)(
+                    selected,
+                    local_pieces,
+                    (position_size, int(column_size)),
+                )
+            else:
+                task = delayed(_read_gather_block)(
+                    reference,
+                    source_slices_by_column[column_block],
+                    local_pieces,
+                    (position_size, int(column_size)),
+                )
             columns.append(
                 da.from_delayed(
                     task,
