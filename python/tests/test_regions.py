@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 
+import dask
 import dask.array as da
+from dask.utils import funcname
 import numpy as np
 import pytest
 import xarray as xr
@@ -494,6 +496,34 @@ def test_public_regions_returns_stable_packed_dataset_without_indexes():
     assert any("values/c/0" in key for key in reads)
     assert any("values/c/1" in key for key in reads)
     assert not any("values/c/2" in key for key in reads)
+
+
+def test_region_reduction_fuses_source_getters_into_its_batch_task():
+    store, _ = _store_track()
+    dataset = pbzarr.open(store)
+    packed = dataset.pbz.regions(
+        [("chr1", 0, 2), ("chr2", 0, 3)]
+    )
+
+    (standalone,) = dask.optimize(packed["values"].data)
+    standalone_tasks = standalone.__dask_graph__().to_dict().values()
+    assert sum(
+        funcname(task.func) == "getter"
+        for task in standalone_tasks
+        if hasattr(task, "func")
+    ) == 2
+
+    reduced = packed.pbz.reduce("mean")
+    (optimized,) = dask.optimize(reduced["values"].data)
+    optimized_tasks = optimized.__dask_graph__().to_dict().values()
+    task_functions = [
+        funcname(task.func)
+        for task in optimized_tasks
+        if hasattr(task, "func")
+    ]
+
+    assert task_functions == ["_execute_subgraph"]
+    np.testing.assert_array_equal(reduced.compute()["values"], [0.5, 5.0])
 
 
 def test_regions_dataset_keeps_one_source_chunk_in_one_batch():

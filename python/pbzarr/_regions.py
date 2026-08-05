@@ -5,8 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 
+import dask
 import dask.array as da
+from dask._task_spec import Task
 from dask import delayed
+from dask.highlevelgraph import HighLevelGraph, MaterializedLayer
 import numpy as np
 import xarray as xr
 
@@ -30,6 +33,72 @@ _PACKED_REGION_COORDS = (
     "region_input_index",
     "region_storage_index",
 )
+
+
+def _contains_task_function(value, function) -> bool:
+    if isinstance(value, Task):
+        if value.func is function:
+            return True
+        return any(
+            _contains_task_function(item, function)
+            for item in (*value.args, *value.kwargs.values())
+        )
+    if isinstance(value, dict):
+        return any(
+            _contains_task_function(item, function) for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_task_function(item, function) for item in value)
+    return False
+
+
+def _fuse_region_reduction_tasks(values: da.Array) -> da.Array:
+    """Fuse each single-consumer PBZ gather into its reduction task."""
+    (optimized,) = dask.optimize(values)
+    graph = optimized.__dask_graph__().to_dict()
+    dependents: dict[object, set[object]] = {}
+    for consumer_key, node in graph.items():
+        for dependency in getattr(node, "dependencies", ()):
+            dependents.setdefault(dependency, set()).add(consumer_key)
+
+    fused = False
+    for key, node in list(graph.items()):
+        if not isinstance(node, Task) or not _contains_task_function(
+            node, _gather_block
+        ):
+            continue
+        producer_keys = [
+            dependency
+            for dependency in node.dependencies
+            if isinstance(graph.get(dependency), Task)
+        ]
+        if (
+            not producer_keys
+            or len(producer_keys) > _MAX_SOURCE_BLOCKS
+            or any(dependents.get(producer) != {key} for producer in producer_keys)
+        ):
+            continue
+        producers = [graph[producer] for producer in producer_keys]
+        graph[key] = Task.fuse(*producers, node, key=key)
+        for producer in producer_keys:
+            del graph[producer]
+        fused = True
+
+    if not fused:
+        return optimized
+    layer_name = f"pbz-region-reduction-{optimized.name}"
+    high_level_graph = HighLevelGraph(
+        {layer_name: MaterializedLayer(graph)},
+        {layer_name: set()},
+    )
+    meta = np.empty((0,) * optimized.ndim, dtype=optimized.dtype)
+    return da.Array(
+        high_level_graph,
+        optimized.name,
+        optimized.chunks,
+        dtype=optimized.dtype,
+        meta=meta,
+    )
 
 
 @dataclass(frozen=True)
@@ -274,7 +343,8 @@ def _reduce_packed_dataset(
                         columns, axis=output_dims.index(values.dims[1])
                     )
                 )
-        return da.concatenate(rows, axis=region_axis)
+        reduced = da.concatenate(rows, axis=region_axis)
+        return _fuse_region_reduction_tasks(reduced)
 
     data_variables = {}
     generated_coordinates = {}
