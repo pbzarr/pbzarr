@@ -393,7 +393,8 @@ def _plan_variable_regions(
     region_edges[0] = 0
     edge_count = 1
     batch_bytes = 0
-    batch_pieces = 0
+    batch_source_blocks = 0
+    batch_last_block = -1
     batch_start = 0
     for region_index in range(layout.n_regions):
         next_bytes = (
@@ -403,18 +404,30 @@ def _plan_variable_regions(
             )
             * bytes_per_position
         )
-        next_pieces = int(piece_counts[region_index])
-        if region_index > batch_start and (
+        first_block = int(first_blocks[region_index])
+        last_block = int(last_blocks[region_index])
+        if batch_source_blocks == 0 or first_block > batch_last_block:
+            next_source_blocks = last_block - first_block + 1
+        else:
+            next_source_blocks = max(0, last_block - batch_last_block)
+        can_split = (
+            region_index > batch_start
+            and first_block > int(last_blocks[region_index - 1])
+        )
+        if can_split and (
             batch_bytes + next_bytes > target_bytes
-            or batch_pieces + next_pieces > max_source_blocks
+            or batch_source_blocks + next_source_blocks > max_source_blocks
         ):
             region_edges[edge_count] = region_index
             edge_count += 1
             batch_start = region_index
             batch_bytes = 0
-            batch_pieces = 0
+            batch_source_blocks = 0
+            batch_last_block = -1
+            next_source_blocks = last_block - first_block + 1
         batch_bytes += next_bytes
-        batch_pieces += next_pieces
+        batch_source_blocks += next_source_blocks
+        batch_last_block = last_block
     region_edges[edge_count] = layout.n_regions
     edge_count += 1
     region_edges = region_edges[:edge_count]
@@ -449,8 +462,29 @@ def _plan_variable_regions(
     max_batch_positions = (
         target_bytes // bytes_per_position if bytes_per_position else _I64_MAX
     )
+    piece_block_starts = np.empty(n_pieces, dtype=bool)
+    piece_block_starts[0] = True
+    piece_block_starts[1:] = piece_blocks[1:] != piece_blocks[:-1]
+    batch_source_block_counts = np.add.reduceat(
+        piece_block_starts.astype(np.int64, copy=False),
+        piece_edges[:-1],
+    )
     within_limits = (batch_positions <= max_batch_positions) & (
-        np.diff(piece_edges) <= max_source_blocks
+        batch_source_block_counts <= max_source_blocks
+    )
+    legal_region_boundaries = np.empty(layout.n_regions + 1, dtype=bool)
+    legal_region_boundaries[0] = True
+    legal_region_boundaries[-1] = True
+    legal_region_boundaries[1:-1] = first_blocks[1:] > last_blocks[:-1]
+    unsplittable = np.fromiter(
+        (
+            not np.any(legal_region_boundaries[start + 1 : stop])
+            for start, stop in zip(
+                region_edges[:-1], region_edges[1:], strict=True
+            )
+        ),
+        dtype=bool,
+        count=len(region_edges) - 1,
     )
     valid = (
         batch_region_edges[0] == 0
@@ -468,12 +502,13 @@ def _plan_variable_regions(
             source_stops
             <= boundaries[piece_blocks + 1] - boundaries[piece_blocks]
         )
+        and np.all(piece_block_starts[piece_edges[:-1]])
         and np.array_equal(
             np.add.reduceat(piece_lengths, region_piece_edges[:-1]),
             np.diff(layout.packed_offsets),
         )
         and int(piece_lengths.sum()) == layout.total_positions
-        and np.all(within_limits | (np.diff(region_edges) == 1))
+        and np.all(within_limits | unsplittable)
     )
     if not valid:
         raise AssertionError("invalid packed region plan")
@@ -484,19 +519,21 @@ def _plan_variable_regions(
 
 
 def _gather_block(source_blocks, pieces, output_shape) -> np.ndarray:
-    if len(source_blocks) != len(pieces):
-        raise ValueError("source blocks and pieces must have equal lengths")
     if not source_blocks:
         raise ValueError("a gather block must contain at least one piece")
 
     first = np.asarray(source_blocks[0])
     output = np.empty(output_shape, dtype=first.dtype)
     destination = 0
-    for source, piece in zip(source_blocks, pieces, strict=True):
+    for piece in pieces:
+        source_block = int(piece["source_block"])
+        if source_block < 0 or source_block >= len(source_blocks):
+            raise ValueError("piece references an unknown source block")
+        source = np.asarray(source_blocks[source_block])
         start = int(piece["source_start"])
         stop = int(piece["source_stop"])
         length = stop - start
-        output[destination : destination + length] = np.asarray(source)[start:stop]
+        output[destination : destination + length] = source[start:stop]
         destination += length
     if destination != output_shape[0]:
         raise ValueError("piece lengths do not cover the gather output")
@@ -586,18 +623,29 @@ def _gather_dask(
         piece_start = int(batch_piece_edges[batch_index])
         piece_stop = int(batch_piece_edges[batch_index + 1])
         batch_view = pieces[piece_start:piece_stop]
+        source_block_ids = batch_view["source_block"]
+        source_block_starts = np.empty(len(batch_view), dtype=bool)
+        source_block_starts[0] = True
+        source_block_starts[1:] = source_block_ids[1:] != source_block_ids[:-1]
+        unique_source_blocks = source_block_ids[source_block_starts]
+        local_pieces = batch_view.copy()
+        local_pieces["source_block"] = (
+            np.cumsum(source_block_starts, dtype=local_pieces.dtype["source_block"])
+            - 1
+        )
+        local_pieces.setflags(write=False)
         position_size = int(
             layout.packed_offsets[region_stop]
             - layout.packed_offsets[region_start]
         )
         if values.ndim == 1:
             selected = tuple(
-                source_blocks[(int(piece["source_block"]),)]
-                for piece in batch_view
+                source_blocks[(int(source_block),)]
+                for source_block in unique_source_blocks
             )
             task = delayed(_gather_block)(
                 selected,
-                batch_view,
+                local_pieces,
                 (position_size,),
             )
             rows.append(
@@ -612,14 +660,12 @@ def _gather_dask(
         columns = []
         for column_block, column_size in enumerate(values.chunks[1]):
             selected = tuple(
-                source_blocks[
-                    (int(piece["source_block"]), column_block)
-                ]
-                for piece in batch_view
+                source_blocks[(int(source_block), column_block)]
+                for source_block in unique_source_blocks
             )
             task = delayed(_gather_block)(
                 selected,
-                batch_view,
+                local_pieces,
                 (position_size, int(column_size)),
             )
             columns.append(
@@ -653,6 +699,9 @@ def _gather_eager(
                 values.isel(position=slice(source_start, source_stop)).values
             )
         )
+    local_pieces["source_block"] = np.arange(
+        len(local_pieces), dtype=local_pieces.dtype["source_block"]
+    )
     local_pieces["source_start"] = 0
     local_pieces["source_stop"] = lengths
     return _gather_block(

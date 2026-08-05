@@ -80,7 +80,7 @@ def test_plan_variable_regions_emits_exact_read_only_pieces_for_unequal_chunks()
     )
 
 
-def test_plan_variable_regions_counts_every_region_piece_against_batch_limits():
+def test_plan_variable_regions_keeps_one_source_chunk_in_one_batch():
     values = xr.DataArray(
         da.arange(20, dtype=np.int16, chunks=(20,)), dims=("position",)
     )
@@ -93,12 +93,60 @@ def test_plan_variable_regions_counts_every_region_piece_against_batch_limits():
         max_source_blocks=2,
     )
 
-    np.testing.assert_array_equal(batch_regions, [0, 2, 4])
-    np.testing.assert_array_equal(batch_pieces, [0, 2, 4])
+    np.testing.assert_array_equal(batch_regions, [0, 4])
+    np.testing.assert_array_equal(batch_pieces, [0, 4])
     assert pieces["source_block"].tolist() == [0, 0, 0, 0]
 
 
-def test_plan_variable_regions_keeps_one_oversized_region_whole():
+def test_ten_thousand_regions_in_four_source_chunks_make_one_gather_task():
+    source_size = 40_000
+    source_chunk_size = 10_000
+    starts = np.arange(0, source_size, 4, dtype=np.int64)
+    n_regions = starts.size
+    layout = _layout(starts, starts + 1)
+    values = xr.DataArray(
+        da.arange(
+            source_size,
+            chunks=(source_chunk_size,),
+            dtype=np.int64,
+        ),
+        dims=("position",),
+    )
+
+    batch_regions, batch_pieces, pieces = _plan_variable_regions(
+        values,
+        layout,
+        target_bytes=1_000_000,
+        max_source_blocks=4,
+    )
+
+    assert len(batch_regions) - 1 == 1
+    assert len(batch_pieces) - 1 == 1
+    assert np.unique(pieces["source_block"]).tolist() == [0, 1, 2, 3]
+
+    gathered = _gather_dask(
+        values,
+        layout,
+        batch_regions,
+        batch_pieces,
+        pieces,
+    )
+
+    graph = gathered.__dask_graph__().to_dict()
+    gather_tasks = [
+        task
+        for task in graph.values()
+        if getattr(task, "func", None) is _gather_block
+    ]
+
+    assert len(gather_tasks) == 1
+    gather_task = gather_tasks[0]
+    assert len(gather_task.dependencies) == 4
+    assert gathered.chunks == ((n_regions,),)
+    np.testing.assert_array_equal(gathered.compute(), starts)
+
+
+def test_plan_variable_regions_keeps_an_oversized_source_component_whole():
     values = xr.DataArray(
         da.arange(20, dtype=np.int16, chunks=(4, 4, 4, 4, 4)),
         dims=("position",),
@@ -112,8 +160,8 @@ def test_plan_variable_regions_keeps_one_oversized_region_whole():
         max_source_blocks=2,
     )
 
-    np.testing.assert_array_equal(batch_regions, [0, 1, 2])
-    np.testing.assert_array_equal(batch_pieces, [0, 5, 6])
+    np.testing.assert_array_equal(batch_regions, [0, 2])
+    np.testing.assert_array_equal(batch_pieces, [0, 6])
     assert pieces.tolist() == [
         (0, 1, 4),
         (1, 0, 4),
@@ -255,7 +303,7 @@ def test_two_million_regions_plan_in_typed_linear_storage_without_values():
         7 * n_regions + 1
     ) * np.dtype(np.int64).itemsize
 
-    expected_batches = (n_regions + 15) // 16
+    expected_batches = 125
     for values in variables:
         batch_regions, batch_pieces, pieces = _plan_variable_regions(
             values,

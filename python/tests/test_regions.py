@@ -496,7 +496,7 @@ def test_public_regions_returns_stable_packed_dataset_without_indexes():
     assert not any("values/c/2" in key for key in reads)
 
 
-def test_regions_dataset_reuses_one_source_key_across_split_batches():
+def test_regions_dataset_keeps_one_source_chunk_in_one_batch():
     source = da.from_array(
         np.arange(10, dtype=np.int16), chunks=(10,), name="shared-source"
     )
@@ -516,7 +516,8 @@ def test_regions_dataset_reuses_one_source_key_across_split_batches():
     gather_dependents = [
         key for key, required in dependencies.items() if source_key in required
     ]
-    assert len(gather_dependents) == 2
+    assert len(gather_dependents) == 1
+    assert result["values"].chunks == ((2,),)
     np.testing.assert_array_equal(result["values"].compute(), [0, 2])
 
 
