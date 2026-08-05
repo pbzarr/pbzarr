@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import xarray as xr
 
-from ._regions import _resolve_region, regions_dataset
+from ._regions import _reduce_packed_dataset, _resolve_region, regions_dataset
 
 
 @xr.register_dataset_accessor("pbz")
@@ -43,3 +43,9 @@ class PbzDatasetAccessor:
         are gathered eagerly and the complete packed result must fit in RAM.
         """
         return regions_dataset(self._ds, intervals)
+
+    def reduce(self, reducer: str, /, **kwargs) -> xr.Dataset:
+        """Reduce every complete packed region along its position axis."""
+        if "dim" in kwargs:
+            raise TypeError("pbz.reduce selects the segmented position axis")
+        return _reduce_packed_dataset(self._ds, reducer, **kwargs)

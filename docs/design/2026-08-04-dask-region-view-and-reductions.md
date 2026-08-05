@@ -281,6 +281,21 @@ packed offsets and representation attrs are removed. Xarray owns result dtype, N
 `skipna`, `ddof`, quantile dimensions, attrs, and derived encoding behavior. PBZ
 does not copy `_FillValue` conditionally.
 
+Non-position operations are ordinary xarray operations and may run on either side
+of PBZ reduction:
+
+```python
+position_then_column = packed.pbz.reduce("mean")["signal"].max("context")
+column_then_position = packed.max("context").pbz.reduce("mean")["signal"]
+```
+
+The order is meaningful for nonlinear composition: the first expression takes the
+largest column mean in each region, while the second averages the per-position
+column maxima. Keep the complete packed Dataset through `pbz.reduce`; selecting a
+single packed data variable can make xarray drop the disconnected region
+provenance that validation requires. Select one variable freely from the ordinary
+reduced result.
+
 An unindexed position axis cannot expose every length-preserving reversal or
 permutation. Such transformations invalidate PBZ semantics even if validation
 cannot detect them. Structurally detectable slicing/sorting is rejected.

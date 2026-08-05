@@ -20,6 +20,16 @@ _I64_MAX = 2**63 - 1
 _I32_MAX = 2**31 - 1
 _TARGET_BYTES = 128 * 1024**2
 _MAX_SOURCE_BLOCKS = 16
+_PACKED_REDUCERS = frozenset(
+    {"mean", "sum", "min", "max", "count", "std", "var", "median", "quantile"}
+)
+_PACKED_REGION_COORDS = (
+    "region_contig",
+    "region_start",
+    "region_stop",
+    "region_input_index",
+    "region_storage_index",
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +49,269 @@ class RegionLayout:
     @property
     def total_positions(self) -> int:
         return int(self.packed_offsets[-1])
+
+
+def _validate_packed_dataset(ds: xr.Dataset) -> np.ndarray:
+    """Validate the packed contract and return read-only offsets."""
+    if ds.attrs.get("pbz:representation") != "packed-regions":
+        raise ValueError(
+            "reduce requires a Dataset with pbz:representation='packed-regions'"
+        )
+    if not ds.data_vars:
+        raise ValueError("packed regions must contain at least one data variable")
+    if "position" not in ds.sizes or "region" not in ds.sizes:
+        raise ValueError("packed regions must have position and region dimensions")
+    if "position" in ds.indexes or "region" in ds.indexes:
+        raise ValueError("packed position and region dimensions must be unindexed")
+
+    required = {"offsets", *_PACKED_REGION_COORDS}
+    missing = sorted(required.difference(ds.coords))
+    if missing:
+        raise ValueError(
+            "packed regions are missing required coordinates: "
+            + ", ".join(missing)
+        )
+    if ds["offsets"].dims != ("region_boundary",):
+        raise ValueError("offsets must have only the region_boundary dimension")
+    for name in _PACKED_REGION_COORDS:
+        if ds[name].dims != ("region",):
+            raise ValueError(f"{name} must have only the region dimension")
+
+    offsets_data = np.asarray(ds["offsets"].data)
+    if offsets_data.dtype.kind not in "iu":
+        raise ValueError("offsets must contain integers")
+    if not np.can_cast(offsets_data.dtype, np.dtype(np.int64), casting="safe"):
+        raise ValueError("offsets must fit in signed 64-bit integers")
+    offsets = offsets_data.astype(np.int64, copy=True)
+    n_regions = ds.sizes["region"]
+    if offsets.size != n_regions + 1:
+        raise ValueError("offsets must have one more element than region")
+    if offsets[0] != 0:
+        raise ValueError("offsets must start at zero")
+    if offsets[-1] != ds.sizes["position"]:
+        raise ValueError("offsets must end at the packed position size")
+    if np.any(np.diff(offsets) <= 0):
+        raise ValueError("offsets must be strictly increasing")
+
+    integer_coordinates = (
+        "region_start",
+        "region_stop",
+        "region_input_index",
+        "region_storage_index",
+    )
+    normalized = {}
+    for name in integer_coordinates:
+        data = np.asarray(ds[name].data)
+        if data.dtype.kind not in "iu" or not np.can_cast(
+            data.dtype, np.dtype(np.int64), casting="safe"
+        ):
+            raise ValueError(f"{name} must contain integers that fit in int64")
+        normalized[name] = data.astype(np.int64, copy=False)
+
+    starts = normalized["region_start"]
+    stops = normalized["region_stop"]
+    if np.any(stops <= starts):
+        raise ValueError("packed regions must have positive lengths")
+    if not np.array_equal(stops - starts, np.diff(offsets)):
+        raise ValueError("region lengths must match packed offsets")
+    storage_order = np.arange(n_regions, dtype=np.int64)
+    if not np.array_equal(normalized["region_storage_index"], storage_order):
+        raise ValueError("region_storage_index must equal packed storage order")
+    if not np.array_equal(
+        np.sort(normalized["region_input_index"]), storage_order
+    ):
+        raise ValueError("region_input_index must be a permutation of region indices")
+
+    contigs = np.asarray(ds["region_contig"].data)
+    if contigs.dtype.kind not in "OU" or any(
+        not isinstance(value, str) or not value for value in contigs.tolist()
+    ):
+        raise ValueError("region_contig must contain non-empty strings")
+
+    for name, values in ds.data_vars.items():
+        if values.ndim not in {1, 2} or values.dims[0] != "position":
+            raise ValueError(f"{name} must be a scalar or 2D position-first variable")
+        if values.sizes["position"] != offsets[-1]:
+            raise ValueError(f"{name} does not cover the packed position axis")
+        if any("position" in coordinate.dims for coordinate in values.coords.values()):
+            raise ValueError(
+                f"{name} cannot have position-dependent coordinates"
+            )
+        if values.chunks is not None:
+            boundaries = np.cumsum(values.chunks[0], dtype=np.int64)
+            if not np.all(np.isin(boundaries, offsets)):
+                raise ValueError(
+                    f"{name} position chunks must end at complete-region boundaries"
+                )
+
+    offsets.setflags(write=False)
+    return offsets
+
+
+def _reduce_packed_dataset(
+    ds: xr.Dataset, reducer: str, **kwargs
+) -> xr.Dataset:
+    offsets = _validate_packed_dataset(ds)
+    if not isinstance(reducer, str) or reducer not in _PACKED_REDUCERS:
+        allowed = ", ".join(sorted(_PACKED_REDUCERS))
+        raise ValueError(f"unsupported reducer {reducer!r}; choose one of: {allowed}")
+    if "dim" in kwargs:
+        raise TypeError("reduce controls dim='position'; do not pass dim")
+
+    def reduce_block(
+        block,
+        local_offsets,
+        dimensions,
+        attrs,
+    ) -> np.ndarray:
+        local_values = xr.DataArray(np.asarray(block), dims=dimensions, attrs=attrs)
+        labels = np.repeat(
+            np.arange(len(local_offsets) - 1, dtype=np.int64),
+            np.diff(local_offsets),
+        )
+        groups = xr.DataArray(labels, dims=("position",), name="region")
+        method = getattr(local_values.groupby(groups), reducer)
+        return np.asarray(method(dim="position", **kwargs).data)
+
+    def result_template(values: xr.DataArray) -> xr.DataArray:
+        shape = (2,) + (1,) * (values.ndim - 1)
+        dummy = xr.DataArray(
+            np.zeros(shape, dtype=values.dtype),
+            dims=values.dims,
+            attrs=values.attrs,
+        )
+        groups = xr.DataArray(
+            np.zeros(2, dtype=np.int64), dims=("position",), name="region"
+        )
+        method = getattr(dummy.groupby(groups), reducer)
+        return method(dim="position", **kwargs)
+
+    def eager_batches(values: xr.DataArray, template: xr.DataArray):
+        bytes_per_position = np.dtype(values.dtype).itemsize
+        for size in values.shape[1:]:
+            bytes_per_position *= size
+        region_edges = [0]
+        batch_bytes = 0
+        batch_start = 0
+        for region_index, length in enumerate(np.diff(offsets)):
+            region_bytes = int(length) * bytes_per_position
+            if region_index > batch_start and batch_bytes + region_bytes > _TARGET_BYTES:
+                region_edges.append(region_index)
+                batch_start = region_index
+                batch_bytes = 0
+            batch_bytes += region_bytes
+        region_edges.append(len(offsets) - 1)
+        blocks = []
+        for start_region, stop_region in zip(
+            region_edges[:-1], region_edges[1:], strict=True
+        ):
+            start = int(offsets[start_region])
+            stop = int(offsets[stop_region])
+            local_offsets = offsets[start_region : stop_region + 1] - start
+            blocks.append(
+                reduce_block(
+                    values.data[start:stop],
+                    local_offsets,
+                    values.dims,
+                    values.attrs,
+                )
+            )
+        return np.concatenate(blocks, axis=template.get_axis_num("region"))
+
+    def dask_batches(values: xr.DataArray, template: xr.DataArray):
+        source_blocks = values.data.to_delayed()
+        position_boundaries = np.empty(len(values.chunks[0]) + 1, dtype=np.int64)
+        position_boundaries[0] = 0
+        np.cumsum(values.chunks[0], out=position_boundaries[1:])
+        region_edges = np.searchsorted(offsets, position_boundaries)
+        output_dims = template.dims
+        region_axis = output_dims.index("region")
+        rows = []
+        for position_block in range(len(values.chunks[0])):
+            start_region = int(region_edges[position_block])
+            stop_region = int(region_edges[position_block + 1])
+            start = int(position_boundaries[position_block])
+            local_offsets = offsets[start_region : stop_region + 1] - start
+            region_size = stop_region - start_region
+            columns = []
+            column_blocks = (
+                range(len(values.chunks[1]))
+                if values.ndim == 2
+                else range(1)
+            )
+            for column_block in column_blocks:
+                source_key = (
+                    (position_block, column_block)
+                    if values.ndim == 2
+                    else (position_block,)
+                )
+                output_shape = []
+                for dimension in output_dims:
+                    if dimension == "region":
+                        output_shape.append(region_size)
+                    elif values.ndim == 2 and dimension == values.dims[1]:
+                        output_shape.append(int(values.chunks[1][column_block]))
+                    else:
+                        output_shape.append(template.sizes[dimension])
+                task = delayed(reduce_block)(
+                    source_blocks[source_key],
+                    local_offsets,
+                    values.dims,
+                    values.attrs,
+                )
+                columns.append(
+                    da.from_delayed(
+                        task,
+                        shape=tuple(output_shape),
+                        dtype=template.dtype,
+                    )
+                )
+            if len(columns) == 1:
+                rows.append(columns[0])
+            else:
+                rows.append(
+                    da.concatenate(
+                        columns, axis=output_dims.index(values.dims[1])
+                    )
+                )
+        return da.concatenate(rows, axis=region_axis)
+
+    data_variables = {}
+    generated_coordinates = {}
+    for name, values in ds.data_vars.items():
+        template = result_template(values)
+        if values.chunks is None:
+            reduced = eager_batches(values, template)
+        else:
+            reduced = dask_batches(values, template)
+        data_variables[name] = xr.Variable(
+            template.dims,
+            reduced,
+            attrs=template.attrs,
+        )
+        for coordinate_name, coordinate in template.coords.items():
+            if coordinate_name != "region":
+                generated_coordinates[coordinate_name] = coordinate.variable
+
+    coordinates = {}
+    for name, coordinate in ds.coords.items():
+        if name == "offsets" or "position" in coordinate.dims:
+            continue
+        if "region_boundary" in coordinate.dims:
+            continue
+        coordinates[name] = coordinate.variable
+    coordinates.update(generated_coordinates)
+    result = xr.Dataset(
+        data_vars=data_variables,
+        coords=xr.Coordinates(coordinates, indexes={}),
+        attrs={
+            key: value
+            for key, value in ds.attrs.items()
+            if not key.startswith("pbz:")
+        },
+    )
+    result.set_close(ds.close)
+    return result
 
 
 def _plan_variable_regions(

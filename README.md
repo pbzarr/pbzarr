@@ -85,6 +85,37 @@ The `.pbz` accessor on `xr.DataTree` is registered when you `import pbzarr`. Reg
 
 > **Note:** Python `PbzStore.create` / `create_track` consolidate metadata after each call. Stores written by the Rust crate do not consolidate yet, so `pbzarr.open(...)` emits a benign `RuntimeWarning` for those; run `zarr.consolidate_metadata(path)` once to silence it.
 
+### Reduce many regions
+
+Pack intervals first, then reduce each complete interval with a named xarray
+groupby method:
+
+```python
+packed = dt.pbz.regions(intervals, tracks=["depth"])
+summary = packed.pbz.reduce("mean")
+```
+
+`reduce` accepts `mean`, `sum`, `min`, `max`, `count`, `std`, `var`, `median`, and
+`quantile`. Keyword arguments such as `skipna`, `ddof`, and `q` pass through to
+xarray. Operations on another axis compose through xarray before or after the PBZ
+reduction, and nonlinear operations can produce different answers in the two
+orders.
+
+Reduction is lazy for Dask-backed data, but the reduced result can still be large.
+Two million regions × six variables × 76 columns contains 912 million values; at
+float64 that is about 6.80 GiB before xarray/Dask overhead. Prefer a bounded region
+selection, a one-variable result, or streaming to Zarr instead of computing the
+whole Dataset eagerly:
+
+```python
+summary.isel(region=slice(0, 10_000)).compute()
+summary[["depth"]].compute()
+summary.to_zarr("summary.zarr")
+```
+
+Dask parallelizes the reduction; it does not turn the output into a smaller table
+format.
+
 ## Format at a glance
 
 - **Layout:** contig-major Zarr v3 store with `<contig>/<track>` arrays. Position is the first axis; an optional column dim (default name `"column"`, often overridden to `"sample"`) is the second.
