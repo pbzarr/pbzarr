@@ -52,7 +52,6 @@ pybigtools = ">=0.3,<0.4"
 build-wheel = "maturin build --release"
 install-wheel = "maturin develop --release"
 test-py = "pytest python/tests -v"
-validate-py-to-rust = "pytest python/tests/test_python_to_rust_roundtrip.py -v"
 
 # --- example feature: notebooks under python/examples ---
 [feature.example.dependencies]

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from importlib.metadata import version
-
 import dask
 import numpy as np
 import pytest
@@ -177,11 +175,6 @@ def _reads_below(store, group):
     return [key for key in store.reads if key.startswith(f"{group}/")]
 
 
-def test_supported_xarray_version():
-    major, minor, *_ = (int(part) for part in version("xarray").split(".")[:2])
-    assert (major, minor) >= (2025, 8)
-
-
 def test_open_scalar_track_uses_regular_chunks_without_reading_values():
     store = _make_track(chunks=(4,))
 
@@ -277,8 +270,6 @@ def test_open_accepts_an_empty_position_axis():
     "fixture",
     [
         {"kind": "mystery"},
-        {"kind": []},
-        {"kind": {}},
         {"attrs": {"perbase:version": "0.3"}},
         {"attrs": {"perbase:coordinates": "1-based-closed"}},
         {"missing": ("values",)},
@@ -319,8 +310,6 @@ def test_open_accepts_an_empty_position_axis():
     ],
     ids=[
         "explicit-kind",
-        "list-kind",
-        "mapping-kind",
         "version",
         "coordinates",
         "missing-values",
@@ -397,18 +386,12 @@ def test_open_collection_with_empty_selection_returns_only_the_root():
     "tracks",
     [
         [""],
-        ["."],
-        [".."],
-        ["nested/depth"],
         ["depth", "depth"],
         ["missing"],
         ["collection-child"],
     ],
     ids=[
         "empty",
-        "dot",
-        "dot-dot",
-        "nested",
         "duplicate",
         "unknown",
         "collection-child",

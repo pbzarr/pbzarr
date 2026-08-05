@@ -5,135 +5,138 @@
 
 # pbzarr
 
-pbzarr stores per-base genomic data (read depths, methylation, boolean masks, and other per-position values) in Zarr v3. It builds on the recent work in the Python array ecosystem: [Zarr](https://zarr.dev), [Xarray](https://xarray.dev), and [Dask](https://www.dask.org). pbzarr has a Rust and Python API for reading and writing pbz stores, and since a pbz store is just a Zarr store, anything that reads Zarr can read pbzarr.
+## Synopsis
 
-A store holds one or more tracks. A track is usually a single quantitative signal or metric measured across the whole genome, one value per base. pbzarr keeps that idea but generalizes it: a track is an N-dimensional array indexed by genomic position along its first axis. A 1D track is the familiar one-value-per-base signal; add a second axis and you store many values per base, which is what makes it natural to keep multiple metrics or a whole cohort of samples in a single track.
+pbzarr stores per-base genomic data in Zarr v3. A `.pbz` collection can hold depth, signal, masks, and other tracks for one sample or many samples.
 
-A few things you get from this:
+pbzarr supports:
 
-- Many values per base live in one array, so Zarr compresses the redundancy across that second axis, not just the runs within a single column.
-- Analysis stays vectorized. Sums, means, and masks run across the whole array at once instead of looping over separate files in Python.
-- Xarray and Dask work directly on the store, so there's no separate conversion step before you can label, slice, or parallelize.
+- fast reads over genomic regions
+- one value or many labeled values at each base
+- compression across samples or other columns
+- parallel calculations with xarray and Dask
+- d4, bigWig, and BED imports
 
-pbzarr can be thought of as the spiritual successor of [d4](https://github.com/38/d4-format/tree/master). d4 improved on bigWig with compression, better throughput, multi-track files, and a cleaner API. pbzarr pushes on all of those, mostly by leaning on the work behind Zarr, Xarray, and Dask rather than reinventing it.
+The project provides Rust and Python libraries. A command-line tool is planned.
 
-For now pbzarr imports from existing formats (d4 and bigWig) rather than generating signal itself, but it does so fast, and once the data is in a pbz store the analysis speedups and disk savings make the conversion worth it. This is all still in active development, so expect rough edges and changes.
+## Motivation
 
-## Quickstart (Python)
+Per-base data often lives in one file per sample. Analysis then spends time opening files and joining results in Python.
 
-The fastest way to build a store is straight from a d4 or bigWig file. The contig names and lengths are read from the source header, and the dtype is set by the format (d4 is `int32`, bigWig is `float32`), so there is nothing else to declare:
+pbzarr stores related values in one array. This improves compression and lets array tools calculate across positions and samples at once.
+
+## Python examples
+
+### Import d4 files
 
 ```python
 import pbzarr
 
-# Single sample: a 1D scalar track.
-store = pbzarr.PbzStore.from_d4("sample.pbz", "sample.d4", track="depth")
-
-# A cohort: pass {label: path}. The keys become the column labels, in order,
-# and the result is a 2D (position, sample) track. Every source must map to
-# the same reference; a mismatched contig set raises.
-store = pbzarr.PbzStore.from_d4(
-    "cohort.pbz",
-    {"A": "A.d4", "B": "B.d4", "C": "C.d4"},
-    track="depth",
+pbzarr.create_store("depth.pbz")
+pbzarr.import_d4(
+    "depth.pbz",
+    "depth",
+    [("brain.d4", "brain"), ("liver.d4", "liver")],
     column_dim="sample",
 )
-
-# bigWig is the same call, into a float32 track.
-store = pbzarr.PbzStore.from_bigwig("signal.pbz", "sample.bw", track="signal")
 ```
 
-Or build the store by hand when you need full control over the layout:
+This creates a `depth` track with one row per genomic position and one column per sample.
+
+### Read a region
 
 ```python
-import numpy as np
-import zarr
+depth = pbzarr.open("depth.pbz/depth")
 
-store = pbzarr.PbzStore.create(
-    "out.pbz",
-    contigs=["chr1", "chr2"],
-    contig_lengths=[248_956_422, 242_193_529],
-    coordinate_space="GRCh38",
+window = depth.pbz.region("chr1:100000-101000")
+brain = depth.pbz.region("chr1:100000-101000", column="brain")
+
+values = window.compute()
+```
+
+pbz uses zero-based, half-open coordinates.
+
+### Calculate statistics over regions
+
+```python
+peaks = [
+    ("chr1", 100000, 100200),
+    ("chr1", 150000, 150300),
+    ("chr2", 200000, 200150),
+]
+
+peak_values = depth.pbz.regions(peaks)
+peak_means = peak_values.pbz.reduce("mean")
+result = peak_means.compute()
+```
+
+The result has one mean for each peak and sample. Other reductions include `sum`, `min`, `max`, `count`, `std`, `var`, `median`, and `quantile`.
+
+Dask keeps reads and calculations lazy until `compute()`. The computed result must still fit in memory.
+
+### Open a collection
+
+Opening a track returns an `xarray.Dataset`. Opening a collection returns an `xarray.DataTree` whose children are tracks.
+
+```python
+study = pbzarr.open("study.pbz")
+
+depth = study["depth"].to_dataset()
+mask = study["mask"].to_dataset()
+```
+
+Each track records its own genome. Tracks with matching genomes can be used together.
+
+### Import other files
+
+```python
+pbzarr.create_store("signals.pbz")
+pbzarr.import_bigwig("signals.pbz", "signal", "sample.bw")
+
+pbzarr.create_store("scores.pbz")
+pbzarr.import_bed(
+    "scores.pbz",
+    "score",
+    "sites.bed.gz",
+    column="score",
+    dtype="float32",
+    genome="genome.fai",
 )
-
-# A 1D scalar track and a 2D cohort track.
-store.create_track("mask", dtype="bool")
-store.create_track("depth", dtype="int32", columns=["A", "B", "C"], column_dim="sample")
-
-# Bulk-import the cohort track from d4 (PyO3 -> Rust). Use import_bigwig for bigWig.
-store.import_d4("depth", sources=[("A.d4", "A"), ("B.d4", "B"), ("C.d4", "C")])
-
-# Or write arbitrary numpy data through zarr-python directly.
-g = zarr.open_group("out.pbz", mode="r+")
-g["chr1/mask"][:] = np.random.rand(248_956_422) > 0.5
 ```
 
-### Read with xarray
+BED imports need a `.fai` or chromosome-sizes file because BED does not record chromosome lengths.
 
-```python
-store = pbzarr.PbzStore("out.pbz")
-store.tracks                                       # ['depth', 'mask']
-store.region("chr1:1000-2000", track="depth")      # xr.DataArray
-store.region("chr1:1000-2000", track="depth", column="A")  # one sample
+## Format
 
-# Or open the whole store as an xarray DataTree via the .pbz accessor:
-dt = pbzarr.open("out.pbz")
-dt.pbz.region("chr1:1000-2000", track="depth")
+A `.pbz` collection is a Zarr v3 directory. Each child directory is a track.
+
+```text
+study.pbz/
+├── zarr.json
+├── depth/
+│   ├── zarr.json
+│   ├── values
+│   ├── offsets
+│   ├── contigs
+│   └── sample
+└── mask/
+    ├── zarr.json
+    ├── values
+    ├── offsets
+    └── contigs
 ```
 
-The `.pbz` accessor on `xr.DataTree` is registered when you `import pbzarr`. Regions use 0-based, half-open coordinates, so `chr1:1000-2000` is `[1000, 2000)`.
+`values` holds the data. `contigs` and `offsets` map each chromosome to its rows in `values`. A track with columns also stores their labels.
 
-> **Note:** Python `PbzStore.create` / `create_track` consolidate metadata after each call. Stores written by the Rust crate do not consolidate yet, so `pbzarr.open(...)` emits a benign `RuntimeWarning` for those; run `zarr.consolidate_metadata(path)` once to silence it.
+See the [design document](docs/DESIGN.md) for the full file rules and Rust API.
 
-### Reduce many regions
+## Status
 
-Pack intervals first, then reduce each complete interval with a named xarray
-groupby method:
-
-```python
-packed = dt.pbz.regions(intervals, tracks=["depth"])
-summary = packed.pbz.reduce("mean")
-```
-
-`reduce` accepts `mean`, `sum`, `min`, `max`, `count`, `std`, `var`, `median`, and
-`quantile`. Keyword arguments such as `skipna`, `ddof`, and `q` pass through to
-xarray. Operations on another axis compose through xarray before or after the PBZ
-reduction, and nonlinear operations can produce different answers in the two
-orders.
-
-Reduction is lazy for Dask-backed data, but the reduced result can still be large.
-Two million regions × six variables × 76 columns contains 912 million values; at
-float64 that is about 6.80 GiB before xarray/Dask overhead. Prefer a bounded region
-selection, a one-variable result, or streaming to Zarr instead of computing the
-whole Dataset eagerly:
-
-```python
-summary.isel(region=slice(0, 10_000)).compute()
-summary[["depth"]].compute()
-summary.to_zarr("summary.zarr")
-```
-
-Dask parallelizes the reduction; it does not turn the output into a smaller table
-format.
-
-## Format at a glance
-
-- **Layout:** contig-major Zarr v3 store with `<contig>/<track>` arrays. Position is the first axis; an optional column dim (default name `"column"`, often overridden to `"sample"`) is the second.
-- **Tracks:** 1D for scalar values (e.g., masks), 2D for cohort values (e.g., per-sample depths). Rank-faithful on disk.
-- **Coordinates:** 0-based, half-open.
-- **Compression:** Blosc(zstd-5, byte-shuffle) on every data array.
-- **Coord arrays:** cohort tracks write per-contig 1D string arrays at `<contig>/<column_dim>` listing the column labels; xarray promotes them to coordinates automatically.
-
-For the full design see [`docs/DESIGN.md`](docs/DESIGN.md).
+pbzarr is under active development and has not reached version 1.0. The API and file rules may change. Remote writes and variable chunk sizes are planned.
 
 ## Links
 
-- Rust API docs: [docs.rs/pbzarr](https://docs.rs/pbzarr)
-- Design doc: [`docs/DESIGN.md`](docs/DESIGN.md)
-- Motivating issues: [d4-format#82](https://github.com/38/d4-format/issues/82), [d4-format#64](https://github.com/38/d4-format/issues/64), [clam#25](https://github.com/cademirch/clam/issues/25)
-
-## Development note
-
-The per-base Zarr format that pbzarr standardizes was first prototyped by hand in [clam](https://github.com/cademirch/clam), where the initial concepts (the contig-major layout, cohort-shaped tracks, and the zarr/ndarray I/O path) were fleshed out before AI tooling was introduced. pbzarr lifts those concepts into a dedicated, spec-driven library.
-
-From that point, development of pbzarr was heavily assisted by Claude (Anthropic), accelerating the library implementation, d4 import, tests, and documentation. The architecture, domain knowledge, and direction remain the author's own; Claude was used as an accelerant, not an author.
+- [Rust API](https://docs.rs/pbzarr)
+- [Design](docs/DESIGN.md)
+- [d4](https://github.com/38/d4-format)
+- [Motivating issues](https://github.com/38/d4-format/issues/82): mask generation, [cross-sample compression](https://github.com/38/d4-format/issues/64), and [per-base sample statistics](https://github.com/cademirch/clam/issues/25)

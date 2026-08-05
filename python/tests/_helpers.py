@@ -4,10 +4,6 @@ from pathlib import Path
 
 import pytest
 
-# Repo root: python/tests/_helpers.py -> tests -> python -> repo
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
 def _have(bin_: str) -> bool:
     return shutil.which(bin_) is not None
 
@@ -36,18 +32,4 @@ def write_sizes(dirp: Path, name: str, contigs: list[tuple[str, int]]) -> Path:
     """Write a 2-column chrom.sizes (accepted by Genome::from_fai)."""
     p = dirp / f"{name}.sizes"
     p.write_text("".join(f"{c}\t{n}\n" for c, n in contigs))
-    return p
-
-
-def rust_fixture_store(dirp: Path) -> Path:
-    """Build the flat fixture store via the Rust example (mask 1D bool + depth 2D uint16).
-
-    Runs cargo from the repo root so the workspace resolves regardless of pytest's cwd.
-    """
-    p = dirp / "fix.pbz"
-    subprocess.run(
-        ["cargo", "run", "-q", "-p", "pbzarr", "--example", "fixture_smoke_store", "--", str(p)],
-        check=True,
-        cwd=str(REPO_ROOT),
-    )
     return p

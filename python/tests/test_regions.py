@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import fields
 import hashlib
 
 import dask.array as da
@@ -11,7 +10,7 @@ import zarr
 from zarr.storage import MemoryStore
 
 import pbzarr
-from pbzarr._region import RegionQuery, parse_region
+from pbzarr._region import RegionQuery
 from pbzarr._regions import (
     RegionLayout,
     _normalize_one,
@@ -329,14 +328,6 @@ def test_resolve_regions_allows_adjacent_unsorted_intervals():
 )
 def test_normalize_one_accepts_only_canonical_single_query_forms(query, expected):
     assert _normalize_one(query) == expected
-
-
-def test_region_query_uses_stop_as_its_only_endpoint_name():
-    parsed = parse_region("chr2:1-4")
-
-    assert parsed == RegionQuery("chr2", 1, 4)
-    assert [field.name for field in fields(parsed)] == ["contig", "start", "stop"]
-    assert not hasattr(parsed, "end")
 
 
 @pytest.mark.parametrize(
@@ -680,6 +671,20 @@ def test_public_region_slice_rejects_non_track_dataset_shapes(dataset):
         dataset.pbz.region("chr1:0-2")
 
 
-def test_region_query_and_parser_are_public():
-    assert pbzarr.RegionQuery is RegionQuery
-    assert pbzarr.parse_region("chr1:0-2") == RegionQuery("chr1", 0, 2)
+def test_public_namespace_is_the_xarray_api():
+    public_names = {
+        name for name in vars(pbzarr) if not name.startswith("_")
+    }
+    expected = {
+        "PbzError",
+        "open",
+        "RegionQuery",
+        "parse_region",
+        "create_store",
+        "import_d4",
+        "import_bigwig",
+        "import_bed",
+        "import_bed_multi",
+        "stack",
+    }
+    assert set(pbzarr.__all__) == public_names == expected

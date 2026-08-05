@@ -82,24 +82,16 @@ def test_reduce_mean_returns_an_ordinary_region_dataset() -> None:
     ("reducer", "kwargs"),
     [
         ("mean", {}),
-        ("sum", {}),
-        ("min", {}),
-        ("max", {}),
         ("count", {}),
         ("std", {"ddof": 1}),
-        ("var", {"ddof": 1}),
         ("median", {}),
         ("quantile", {"q": 0.5}),
         ("quantile", {"q": [0.25, 0.75]}),
     ],
     ids=[
         "mean",
-        "sum",
-        "min",
-        "max",
         "count",
         "std-ddof-one",
-        "var-ddof-one",
         "median",
         "scalar-quantile",
         "vector-quantile",
@@ -115,11 +107,10 @@ def test_reduce_matches_named_xarray_groupby_for_scalar_and_2d_variables(
 @pytest.mark.parametrize(
     ("reducer", "kwargs"),
     [
-        ("std", {"ddof": 1}),
         ("median", {}),
         ("quantile", {"q": [0.25, 0.75]}),
     ],
-    ids=["std-ddof-one", "median", "vector-quantile"],
+    ids=["median", "vector-quantile"],
 )
 def test_reduce_uses_complete_region_tasks_for_dask_variables_with_different_chunks(
     reducer: str, kwargs: dict

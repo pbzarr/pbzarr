@@ -4,10 +4,7 @@ from . import _accessor as _accessor
 from . import _datatree_accessor as _datatree_accessor
 from ._native import PbzError
 from ._open import open
-from ._pbzstore import PbzStore
-from ._read import RegionBlocks
 from ._region import RegionQuery, parse_region
-from ._track import Track
 from ._write import (
     create_store,
     import_bed,
@@ -17,13 +14,8 @@ from ._write import (
     stack,
 )
 
-__version__ = "0.4.0"
-
 __all__ = [
     "PbzError",
-    "PbzStore",
-    "Track",
-    "RegionBlocks",
     "RegionQuery",
     "parse_region",
     "create_store",
@@ -33,5 +25,4 @@ __all__ = [
     "import_bed_multi",
     "stack",
     "open",
-    "__version__",
 ]
