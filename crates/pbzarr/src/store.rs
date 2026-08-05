@@ -3,14 +3,16 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use ndarray::Array1;
 use serde_json::{Value, json};
 use zarrs::array::Array;
 use zarrs::array::FillValue;
 use zarrs::array::data_type;
 use zarrs::filesystem::FilesystemStore;
-use zarrs::storage::{ListableStorageTraits, ReadableWritableListableStorage, StorePrefix};
+use zarrs::storage::{
+    ListableStorageTraits, ReadableWritableListableStorage, StoreKey, StorePrefix,
+};
 
 use zarrs::array::codec::api::BytesToBytesCodecTraits;
 use zarrs::array::codec::{BloscCodec, BloscCompressionLevel, BloscCompressor, BloscShuffleMode};
@@ -18,7 +20,7 @@ use zarrs::array::codec::{BloscCodec, BloscCompressionLevel, BloscCompressor, Bl
 use crate::error::PbzError;
 use crate::genome::{Contig, Genome};
 use crate::io::Dtype;
-use crate::track::{PerbaseTrackAttrs, Track, TrackConfig};
+use crate::track::{PendingTrack, PerbaseTrackAttrs, Track, TrackConfig};
 use crate::{PERBASE_CONVENTION_NAME, PERBASE_CONVENTION_UUID, Result};
 
 /// A handle to an open PBZ store: a Zarr group containing track groups.
@@ -165,10 +167,67 @@ impl PbzStore {
         genome: Genome,
         config: TrackConfig,
     ) -> Result<&Track> {
-        if self.track_handles.contains_key(name) {
-            return Err(PbzError::Metadata(format!("track '{name}' already exists")));
+        let name = name.to_owned();
+        self.create_tracks_with(vec![(name.clone(), genome, config)], |_| Ok(()))?;
+        self.track_handles
+            .get(&name)
+            .ok_or_else(|| PbzError::Store(format!("track {name:?} missing after publication")))
+    }
+
+    /// Create one or more unpublished tracks, populate them through `populate`,
+    /// and publish each track only after the closure succeeds.
+    pub fn create_tracks_with<T>(
+        &mut self,
+        specs: Vec<(String, Genome, TrackConfig)>,
+        populate: impl FnOnce(&[&Track]) -> Result<T>,
+    ) -> Result<T> {
+        if specs.is_empty() {
+            return Err(PbzError::Metadata("no tracks to create".into()));
         }
 
+        let mut names = HashSet::with_capacity(specs.len());
+        for (name, _, _) in &specs {
+            if !names.insert(name.clone()) || self.track_handles.contains_key(name) {
+                return Err(PbzError::Metadata(format!("track '{name}' already exists")));
+            }
+            let group_key = StoreKey::new(format!("{name}/zarr.json"))
+                .map_err(|e| PbzError::Metadata(e.to_string()))?;
+            if self
+                .storage
+                .get(&group_key)
+                .map_err(|e| PbzError::Store(e.to_string()))?
+                .is_some()
+            {
+                return Err(PbzError::Metadata(format!(
+                    "track '{name}' has an existing physical group"
+                )));
+            }
+        }
+
+        let mut pending = Vec::with_capacity(specs.len());
+        for (name, genome, config) in specs {
+            pending.push(self.create_pending_track(&name, genome, config)?);
+        }
+
+        let tracks: Vec<&Track> = pending.iter().map(|pending| &pending.track).collect();
+        let result = populate(&tracks)?;
+        drop(tracks);
+
+        for pending_track in pending {
+            let name = pending_track.track.name.clone();
+            let track = pending_track.finalize()?;
+            self.track_handles.insert(name, track);
+        }
+
+        Ok(result)
+    }
+
+    fn create_pending_track(
+        &self,
+        name: &str,
+        genome: Genome,
+        config: TrackConfig,
+    ) -> Result<PendingTrack> {
         let total_len: u64 = genome.contigs().iter().map(|c| c.length).sum();
         let zarrs_dt = dtype_to_zarrs(config.dtype);
         let fill = resolve_fill_value(config.dtype, config.fill_value.as_ref())?;
@@ -306,39 +365,17 @@ impl PbzStore {
                 .map_err(|e| PbzError::Store(e.to_string()))?;
         }
 
-        // Completion marker: write the perbase block on the group LAST.
-        let attrs = PerbaseTrackAttrs::new(&genome, &config);
-        let mut group = zarrs::group::Group::open(self.storage.clone(), &format!("/{name}"))
-            .map_err(|e| PbzError::Store(e.to_string()))?;
-        // Extra attrs first, so the perbase block wins on any key collision.
-        for (kk, vv) in &config.extra {
-            group.attributes_mut().insert(kk.clone(), vv.clone());
-        }
-        let attr_val =
-            serde_json::to_value(&attrs).map_err(|e| PbzError::Metadata(e.to_string()))?;
-        if let Some(obj) = attr_val.as_object() {
-            for (kk, vv) in obj {
-                group.attributes_mut().insert(kk.clone(), vv.clone());
-            }
-        }
-        group
-            .store_metadata()
-            .map_err(|e| PbzError::Store(e.to_string()))?;
-
         let dtype = config.dtype;
-        self.track_handles.insert(
-            name.to_owned(),
-            Track {
-                name: name.to_owned(),
-                genome: Arc::new(genome),
-                dtype,
-                rank,
-                column_dim: col_dim,
-                storage: Arc::clone(&self.storage),
-                values: RwLock::new(None),
-            },
-        );
-        Ok(self.track_handles.get(name).expect("just inserted"))
+        let track = Track {
+            name: name.to_owned(),
+            genome: Arc::new(genome),
+            dtype,
+            rank,
+            column_dim: col_dim,
+            storage: Arc::clone(&self.storage),
+            values: RwLock::new(None),
+        };
+        PendingTrack::new(track, &config)
     }
 }
 

@@ -49,12 +49,16 @@ def _open_zarr(source, *, group=None, storage_options=None) -> xr.Dataset:
     )
 
 
-def _node_kind(attrs: Mapping) -> str:
+def _has_perbase_marker(attrs: Mapping) -> bool:
     conventions = attrs.get("zarr_conventions", ())
-    if not isinstance(conventions, list) or not any(
+    return isinstance(conventions, list) and any(
         isinstance(convention, Mapping) and convention.get("name") == "perbase"
         for convention in conventions
-    ):
+    )
+
+
+def _node_kind(attrs: Mapping) -> str:
+    if not _has_perbase_marker(attrs):
         raise PbzError("invalid PBZ node: missing perbase convention marker")
 
     if "perbase:kind" in attrs:

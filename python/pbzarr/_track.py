@@ -25,16 +25,6 @@ def _is_single(query) -> bool:
     return isinstance(query, (str, tuple))
 
 
-def _norm_sources(sources) -> list[tuple[str, str | None]]:
-    out: list[tuple[str, str | None]] = []
-    for s in sources:
-        if isinstance(s, (tuple, list)):
-            out.append((str(s[0]), s[1] if len(s) > 1 else None))
-        else:
-            out.append((str(s), None))
-    return out
-
-
 class Track:
     def __init__(self, store_path: str, name: str):
         self.store_path = str(store_path)
@@ -88,24 +78,3 @@ class Track:
         import xarray as xr
 
         return xr.open_datatree(self.store_path, engine="zarr", consolidated=False)[self.name].to_dataset()
-
-    def import_bed(self, sources, *, column: str, dtype: str, genome: str,
-                   workers=None, chunk_size=None, column_chunk_size=None, progress=False) -> None:
-        from ._native import import_bed
-
-        import_bed(self.store_path, self.name, _norm_sources(sources), column, dtype, genome,
-                   workers, chunk_size, column_chunk_size, progress)
-
-    def import_d4(self, sources, *, workers=None, chunk_size=None,
-                  column_chunk_size=None, progress=False) -> None:
-        from ._native import import_d4
-
-        import_d4(self.store_path, self.name, _norm_sources(sources),
-                  workers, chunk_size, column_chunk_size, progress)
-
-    def import_bigwig(self, sources, *, workers=None, chunk_size=None,
-                      column_chunk_size=None, progress=False) -> None:
-        from ._native import import_bigwig
-
-        import_bigwig(self.store_path, self.name, _norm_sources(sources),
-                      workers, chunk_size, column_chunk_size, progress)

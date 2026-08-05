@@ -5,9 +5,15 @@ from ._native import PbzError
 from ._open import open
 from ._pbzstore import PbzStore
 from ._read import RegionBlocks
-from ._stack import stack
-from ._store import create_store
 from ._track import Track
+from ._write import (
+    create_store,
+    import_bed,
+    import_bed_multi,
+    import_bigwig,
+    import_d4,
+    stack,
+)
 
 __version__ = "0.4.0"
 
@@ -17,6 +23,10 @@ __all__ = [
     "Track",
     "RegionBlocks",
     "create_store",
+    "import_d4",
+    "import_bigwig",
+    "import_bed",
+    "import_bed_multi",
     "stack",
     "open",
     "__version__",

@@ -1,4 +1,4 @@
-//! Bulk-import one BED column across N samples into a cohort track.
+//! Bulk-import one BED column across one or more sources into a track.
 
 use std::path::PathBuf;
 
@@ -10,15 +10,15 @@ use super::reader::BedReader;
 
 pub struct BedSource {
     pub path: PathBuf,
-    pub sample_label: Option<String>,
+    pub column_label: Option<String>,
 }
 
 /// Import the value at file column `column` (absolute, 0-based, `>= 3`) from each
-/// source BED into a new track sized to `genome`. One source yields a scalar
-/// track; several yield a cohort track whose `column_dim` comes from
-/// `Config::column_dim` (default `"sample"`) and whose labels come from each
-/// source's `sample_label` (falling back to the file stem). Every source must
-/// be tabix-indexed and share `genome`'s contig names. Uncovered positions
+/// source BED into a new track sized to `genome`. One source with no configured
+/// column dimension yields a scalar track; otherwise the sources form a 2D
+/// track whose `column_dim` defaults to `"sample"` and whose labels come from
+/// each source's `column_label` (falling back to the file stem). Every source
+/// must be tabix-indexed and share `genome`'s contig names. Uncovered positions
 /// become `T::ZERO`.
 pub fn from_bed<T>(
     store: &mut PbzStore,
@@ -45,9 +45,10 @@ where
         .collect::<Result<_>>()?;
 
     let track_config = track_config::<T>(sources, &config);
-    let track = store.create_track(track_name, genome, track_config)?;
-
-    run_pipeline::<T, _>(track, readers, &config)
+    store.create_tracks_with(
+        vec![(track_name.to_owned(), genome, track_config)],
+        move |tracks| run_pipeline::<T, _>(tracks[0], readers, &config),
+    )
 }
 
 fn track_config<T: Numeric>(sources: &[BedSource], config: &Config) -> TrackConfig {
@@ -61,7 +62,7 @@ fn track_config<T: Numeric>(sources: &[BedSource], config: &Config) -> TrackConf
     if let Some(scs) = config.shard_column_size {
         cfg = cfg.shard_column_size(scs);
     }
-    if sources.len() > 1 {
+    if sources.len() > 1 || config.column_dim.is_some() {
         let labels: Vec<String> = sources.iter().map(column_label).collect();
         let dim = config.column_dim.as_deref().unwrap_or("sample");
         cfg = cfg.columns(labels).column_dim(dim);
@@ -82,7 +83,7 @@ pub(super) fn zero_fill(dtype: Dtype) -> serde_json::Value {
 }
 
 fn column_label(source: &BedSource) -> String {
-    source.sample_label.clone().unwrap_or_else(|| {
+    source.column_label.clone().unwrap_or_else(|| {
         source
             .path
             .file_stem()

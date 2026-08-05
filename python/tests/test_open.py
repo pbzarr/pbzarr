@@ -439,6 +439,21 @@ def test_open_all_children_rejects_nested_descendants_before_values():
     assert not _value_reads(store)
 
 
+def test_open_all_children_skips_unpublished_direct_tracks():
+    store = _make_collection({"depth": {"chunks": (4,)}})
+    root = zarr.open_group(store, mode="a", zarr_format=3)
+    pending = root.create_group("pending")
+    _populate_track(pending, chunks=(4,))
+    pending.attrs.clear()
+    store.reads.clear()
+    store.listings.clear()
+
+    tree = pbzarr.open(store)
+
+    assert set(tree.children) == {"depth"}
+    assert not _value_reads(store)
+
+
 def test_open_all_children_prepares_each_track_without_indexes():
     store = _make_collection(
         {

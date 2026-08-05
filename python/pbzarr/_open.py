@@ -12,6 +12,7 @@ from zarr.errors import GroupNotFoundError
 from ._native import PbzError
 from ._xarray import (
     _NATIVE_CHUNKS,
+    _has_perbase_marker,
     _node_kind,
     _normalize_track_names,
     _open_zarr,
@@ -85,12 +86,17 @@ def _open_all_collection(
             raise PbzError("PBZ node is a track, not a collection")
         if any(node.path.count("/") > 1 for node in opened.descendants):
             raise PbzError("PBZ collections may contain only direct track children")
-        for node in opened.children.values():
+        published = {
+            name: node
+            for name, node in opened.children.items()
+            if _has_perbase_marker(node.attrs)
+        }
+        for node in published.values():
             if _node_kind(node.attrs) != "track":
                 raise PbzError("PBZ collection children must be tracks")
 
         datasets = {"/": opened.to_dataset(inherit=False)}
-        for name, node in opened.children.items():
+        for name, node in published.items():
             datasets[f"/{name}"] = _prepare_track_dataset(
                 node.to_dataset(inherit=False), chunks=chunks
             )

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ndarray::{Array1, ArrayD};
 use pbzarr::genome::Contig;
 use pbzarr::io::Dtype;
-use pbzarr::{Genome, PbzStore, TrackConfig};
+use pbzarr::{Genome, PbzError, PbzStore, TrackConfig};
 use tempfile::TempDir;
 use zarrs::storage::ReadableWritableListableStorage;
 use zarrs::storage::store::MemoryStore;
@@ -108,4 +108,76 @@ fn roundtrips_over_memory_store() {
         .unwrap();
     let got: ArrayD<i32> = track.read_region(&region).unwrap();
     assert_eq!(got.into_raw_vec_and_offset().0, vec![42i32; 10]);
+}
+
+#[test]
+fn failed_population_leaves_tracks_unpublished_and_blocks_same_name_retry() {
+    let storage: ReadableWritableListableStorage = Arc::new(MemoryStore::new());
+    let mut store = PbzStore::create_with_storage(storage.clone()).unwrap();
+
+    let result = store.create_tracks_with(
+        vec![
+            (
+                "depth".to_owned(),
+                tiny_genome(),
+                TrackConfig::new(Dtype::I32),
+            ),
+            (
+                "mask".to_owned(),
+                tiny_genome(),
+                TrackConfig::new(Dtype::U8),
+            ),
+        ],
+        |_tracks| Err::<(), _>(PbzError::Store("population failed".into())),
+    );
+
+    assert!(result.is_err());
+    assert!(store.track("depth").is_none());
+    assert!(store.track("mask").is_none());
+    let reopened = PbzStore::open_with_storage(storage).unwrap();
+    assert!(reopened.track("depth").is_none());
+    assert!(reopened.track("mask").is_none());
+
+    let retry = store.create_track("depth", tiny_genome(), TrackConfig::new(Dtype::I32));
+    assert!(retry.is_err(), "incomplete physical group must block retry");
+}
+
+#[test]
+fn successful_population_publishes_only_after_data_is_written() {
+    let storage: ReadableWritableListableStorage = Arc::new(MemoryStore::new());
+    let mut store = PbzStore::create_with_storage(storage.clone()).unwrap();
+    let population_storage = storage.clone();
+
+    store
+        .create_tracks_with(
+            vec![(
+                "depth".to_owned(),
+                tiny_genome(),
+                TrackConfig::new(Dtype::I32),
+            )],
+            |tracks| {
+                let during_population = PbzStore::open_with_storage(population_storage.clone())?;
+                assert!(during_population.track("depth").is_none());
+
+                let region = tracks[0].genome().resolve(&"chr1:0-4".parse().unwrap())?;
+                tracks[0].write_region(&region, Array1::from(vec![7i32; 4]).into_dyn())
+            },
+        )
+        .unwrap();
+
+    assert!(store.track("depth").is_some());
+    let reopened = PbzStore::open_with_storage(storage).unwrap();
+    let track = reopened.track("depth").unwrap();
+    let region = track
+        .genome()
+        .resolve(&"chr1:0-4".parse().unwrap())
+        .unwrap();
+    assert_eq!(
+        track
+            .read_region::<i32>(&region)
+            .unwrap()
+            .into_raw_vec_and_offset()
+            .0,
+        vec![7; 4]
+    );
 }

@@ -256,3 +256,41 @@ fn uncovered_positions_read_back_as_zero() {
         "uncovered + true-zero both read false"
     );
 }
+
+#[test]
+fn population_failure_leaves_all_tracks_unpublished() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::population_failure_leaves_all_tracks_unpublished: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "invalid",
+        &["chrom", "start", "end", "cov", "flag"],
+        &[("chr1", 0, 10, vec!["not-an-int", "1"])],
+    );
+    let path = dir.path().join("out.pbz");
+    let mut store = PbzStore::create(&path).unwrap();
+    let schema = BedSchema(vec![
+        BedColumnSpec::named("cov", Dtype::I32),
+        BedColumnSpec::named("flag", Dtype::Bool),
+    ]);
+
+    let result = from_bed_multi(
+        &mut store,
+        &bed,
+        &schema,
+        genome(&[("chr1", 10)]),
+        Config::default(),
+    );
+
+    assert!(result.is_err());
+    assert!(store.track("cov").is_none());
+    assert!(store.track("flag").is_none());
+    let reopened = PbzStore::open(path).unwrap();
+    assert!(reopened.track("cov").is_none());
+    assert!(reopened.track("flag").is_none());
+}

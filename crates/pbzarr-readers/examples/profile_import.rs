@@ -175,7 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sources: Vec<D4Source> = (0..args.cols)
             .map(|_| D4Source {
                 path: d4.clone(),
-                sample_label: None,
+                column_label: None,
             })
             .collect();
         from_d4(&mut store, "depth", &sources, import_cfg)?

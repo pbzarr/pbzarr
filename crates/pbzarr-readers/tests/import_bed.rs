@@ -30,7 +30,7 @@ fn genome(contigs: &[(&str, u64)]) -> Genome {
 fn src(path: PathBuf, label: &str) -> BedSource {
     BedSource {
         path,
-        sample_label: Some(label.to_owned()),
+        column_label: Some(label.to_owned()),
     }
 }
 

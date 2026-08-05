@@ -54,7 +54,7 @@ fn import_one_bigwig_into_scalar_track() {
         "signal",
         &[BigWigSource {
             path: bw,
-            sample_label: None,
+            column_label: None,
         }],
         Config::default(),
     )
@@ -94,7 +94,7 @@ fn sharded_scalar_import_matches_unsharded() {
     let src = || {
         vec![BigWigSource {
             path: bw.clone(),
-            sample_label: None,
+            column_label: None,
         }]
     };
     let region = |store: &PbzStore| Region {
@@ -159,7 +159,7 @@ fn cohort_import_distinct_columns() {
                 &banded("chr1", 2_000, base),
                 false,
             ),
-            sample_label: Some(format!("s{i}")),
+            column_label: Some(format!("s{i}")),
         })
         .collect();
 
@@ -219,7 +219,7 @@ fn uncovered_positions_import_as_zero() {
         "signal",
         &[BigWigSource {
             path: bw,
-            sample_label: None,
+            column_label: None,
         }],
         Config {
             chunk_size: Some(1_000),
