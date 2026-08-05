@@ -209,7 +209,9 @@ def _apply_default_chunks(values: xr.DataArray) -> xr.DataArray:
         widths = values.encoding.get("chunks")
     if widths is None:
         return values.chunk()
-    return values.chunk(dict(zip(values.dims, widths, strict=True)))
+    return values.chunk(
+        dict(zip(values.dims, widths, strict=True)), inline_array=True
+    )
 
 
 def _normalize_track_names(

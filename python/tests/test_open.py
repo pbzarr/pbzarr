@@ -195,6 +195,14 @@ def test_open_scalar_track_uses_regular_chunks_without_reading_values():
     assert "source" not in dataset.encoding
     assert not _value_reads(store)
 
+    source_tasks = [
+        task
+        for task in dataset["values"].data.__dask_graph__().to_dict().values()
+        if hasattr(task, "func")
+    ]
+    assert source_tasks
+    assert all(not task.dependencies for task in source_tasks)
+
     assert dataset["values"].isel(position=0).compute().item() == -7
     assert _value_reads(store)
 
