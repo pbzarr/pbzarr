@@ -389,45 +389,47 @@ def _plan_variable_regions(
     bytes_per_position = int(np.dtype(values.dtype).itemsize)
     if values.ndim == 2:
         bytes_per_position *= values.shape[1]
+    component_edges = np.concatenate(
+        (
+            np.array([0], dtype=np.int64),
+            np.flatnonzero(first_blocks[1:] > last_blocks[:-1]) + 1,
+            np.array([layout.n_regions], dtype=np.int64),
+        )
+    )
     region_edges = np.empty(layout.n_regions + 1, dtype=np.int64)
     region_edges[0] = 0
     edge_count = 1
     batch_bytes = 0
     batch_source_blocks = 0
-    batch_last_block = -1
     batch_start = 0
-    for region_index in range(layout.n_regions):
+    for component_start, component_stop in zip(
+        component_edges[:-1], component_edges[1:], strict=True
+    ):
+        component_start = int(component_start)
+        component_stop = int(component_stop)
         next_bytes = (
             int(
-                layout.packed_offsets[region_index + 1]
-                - layout.packed_offsets[region_index]
+                layout.packed_offsets[component_stop]
+                - layout.packed_offsets[component_start]
             )
             * bytes_per_position
         )
-        first_block = int(first_blocks[region_index])
-        last_block = int(last_blocks[region_index])
-        if batch_source_blocks == 0 or first_block > batch_last_block:
-            next_source_blocks = last_block - first_block + 1
-        else:
-            next_source_blocks = max(0, last_block - batch_last_block)
-        can_split = (
-            region_index > batch_start
-            and first_block > int(last_blocks[region_index - 1])
+        next_source_blocks = (
+            int(last_blocks[component_stop - 1])
+            - int(first_blocks[component_start])
+            + 1
         )
-        if can_split and (
+        if component_start > batch_start and (
             batch_bytes + next_bytes > target_bytes
             or batch_source_blocks + next_source_blocks > max_source_blocks
         ):
-            region_edges[edge_count] = region_index
+            region_edges[edge_count] = component_start
             edge_count += 1
-            batch_start = region_index
+            batch_start = component_start
             batch_bytes = 0
             batch_source_blocks = 0
-            batch_last_block = -1
-            next_source_blocks = last_block - first_block + 1
         batch_bytes += next_bytes
         batch_source_blocks += next_source_blocks
-        batch_last_block = last_block
     region_edges[edge_count] = layout.n_regions
     edge_count += 1
     region_edges = region_edges[:edge_count]

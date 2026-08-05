@@ -172,6 +172,33 @@ def test_plan_variable_regions_keeps_an_oversized_source_component_whole():
     ]
 
 
+def test_plan_variable_regions_splits_before_a_source_component():
+    values = xr.DataArray(
+        da.arange(12, dtype=np.int16, chunks=(4, 4, 4)),
+        dims=("position",),
+    )
+    layout = _layout(
+        np.array([0, 4, 9]),
+        np.array([1, 9, 10]),
+    )
+
+    batch_regions, batch_pieces, pieces = _plan_variable_regions(
+        values,
+        layout,
+        target_bytes=13,
+        max_source_blocks=10,
+    )
+
+    np.testing.assert_array_equal(batch_regions, [0, 1, 3])
+    np.testing.assert_array_equal(batch_pieces, [0, 1, 4])
+    assert pieces.tolist() == [
+        (0, 0, 1),
+        (1, 0, 4),
+        (2, 0, 1),
+        (2, 1, 2),
+    ]
+
+
 def test_plan_variable_regions_rejects_non_position_first_or_dependent_coordinates():
     transposed = _values(chunks=((3, 4, 3), (2, 3))).transpose(
         "context", "position"
