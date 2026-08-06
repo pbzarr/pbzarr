@@ -606,31 +606,33 @@ def _plan_variable_regions(
         dtype=bool,
         count=len(region_edges) - 1,
     )
-    valid = (
-        batch_region_edges[0] == 0
-        and batch_region_edges[-1] == layout.n_regions
-        and batch_piece_edges[0] == 0
-        and batch_piece_edges[-1] == n_pieces
-        and np.all(np.diff(batch_region_edges) > 0)
-        and np.all(np.diff(batch_piece_edges) > 0)
-        and np.array_equal(piece_edges, region_piece_edges[region_edges])
-        and np.all(piece_blocks >= 0)
-        and np.all(piece_blocks < len(position_chunks))
-        and np.all(source_starts >= 0)
-        and np.all(source_stops > source_starts)
-        and np.all(
-            source_stops
-            <= boundaries[piece_blocks + 1] - boundaries[piece_blocks]
+    def has_valid_plan() -> bool:
+        return (
+            batch_region_edges[0] == 0
+            and batch_region_edges[-1] == layout.n_regions
+            and batch_piece_edges[0] == 0
+            and batch_piece_edges[-1] == n_pieces
+            and np.all(np.diff(batch_region_edges) > 0)
+            and np.all(np.diff(batch_piece_edges) > 0)
+            and np.array_equal(piece_edges, region_piece_edges[region_edges])
+            and np.all(piece_blocks >= 0)
+            and np.all(piece_blocks < len(position_chunks))
+            and np.all(source_starts >= 0)
+            and np.all(source_stops > source_starts)
+            and np.all(
+                source_stops
+                <= boundaries[piece_blocks + 1] - boundaries[piece_blocks]
+            )
+            and np.all(piece_block_starts[piece_edges[:-1]])
+            and np.array_equal(
+                np.add.reduceat(piece_lengths, region_piece_edges[:-1]),
+                np.diff(layout.packed_offsets),
+            )
+            and int(piece_lengths.sum()) == layout.total_positions
+            and np.all(within_limits | unsplittable)
         )
-        and np.all(piece_block_starts[piece_edges[:-1]])
-        and np.array_equal(
-            np.add.reduceat(piece_lengths, region_piece_edges[:-1]),
-            np.diff(layout.packed_offsets),
-        )
-        and int(piece_lengths.sum()) == layout.total_positions
-        and np.all(within_limits | unsplittable)
-    )
-    if not valid:
+
+    if not has_valid_plan():
         raise AssertionError("invalid packed region plan")
 
     for array in (batch_region_edges, batch_piece_edges, pieces):
