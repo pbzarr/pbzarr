@@ -201,6 +201,50 @@ pub struct Track {
     pub(crate) values: RwLock<Option<Arc<Array<dyn ReadableWritableListableStorageTraits>>>>,
 }
 
+pub(crate) struct PendingTrack {
+    pub(crate) track: Track,
+    completion_attrs: Map<String, Value>,
+}
+
+impl PendingTrack {
+    pub(crate) fn new(track: Track, config: &TrackConfig) -> Result<Self> {
+        let mut completion_attrs = config.extra.clone();
+        let attrs = PerbaseTrackAttrs::new(&track.genome, config);
+        let attr_val = serde_json::to_value(attrs)
+            .map_err(|e| PbzError::Metadata(format!("track {:?}: {e}", track.name)))?;
+        let attr_obj = attr_val.as_object().ok_or_else(|| {
+            PbzError::Metadata(format!(
+                "track {:?}: invalid completion metadata",
+                track.name
+            ))
+        })?;
+        for (key, value) in attr_obj {
+            completion_attrs.insert(key.clone(), value.clone());
+        }
+        Ok(Self {
+            track,
+            completion_attrs,
+        })
+    }
+
+    pub(crate) fn finalize(self) -> Result<Track> {
+        let Self {
+            track,
+            completion_attrs,
+        } = self;
+        let mut group =
+            zarrs::group::Group::open(Arc::clone(&track.storage), &format!("/{}", track.name))
+                .map_err(|e| PbzError::Store(e.to_string()))?;
+        for (key, value) in completion_attrs {
+            group.attributes_mut().insert(key, value);
+        }
+        group
+            .store_metadata()
+            .map_err(|e| PbzError::Store(e.to_string()))?;
+        Ok(track)
+    }
+}
+
 impl Track {
     pub fn name(&self) -> &str {
         &self.name

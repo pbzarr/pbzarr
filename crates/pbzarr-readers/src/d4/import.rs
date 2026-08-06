@@ -14,16 +14,17 @@ use super::reader::D4Reader;
 #[derive(Debug, Clone)]
 pub struct D4Source {
     pub path: PathBuf,
-    pub sample_label: Option<String>,
+    pub column_label: Option<String>,
 }
 
 /// Bulk-import one or more d4 files into a new `int32` track.
 ///
-/// Builds the track's `Genome` from the source headers, sizes the column axis
-/// from the file list, and creates the track before running the pipeline. One
-/// source yields a scalar track; several yield a cohort track whose column
-/// labels come from each source's `sample_label` (falling back to its file
-/// stem). All sources must share a genome (checked by checksum).
+/// Builds the track's `Genome` from the source headers and sizes the column axis
+/// from the file list. One source with no configured column dimension yields a
+/// scalar track;
+/// otherwise the sources form a 2D track whose labels come from each source's
+/// `column_label` (falling back to its file stem). All sources must share a
+/// genome (checked by checksum).
 pub fn from_d4(
     store: &mut PbzStore,
     track_name: &str,
@@ -44,9 +45,10 @@ pub fn from_d4(
 
     let genome = shared_genome(&readers, sources)?;
     let track_config = track_config(sources, &config);
-    let track = store.create_track(track_name, genome, track_config)?;
-
-    run_pipeline::<i32, _>(track, readers, &config)
+    store.create_tracks_with(
+        vec![(track_name.to_owned(), genome, track_config)],
+        move |tracks| run_pipeline::<i32, _>(tracks[0], readers, &config),
+    )
 }
 
 /// The genome shared by every source, taken from the first and required to
@@ -77,7 +79,7 @@ fn track_config(sources: &[D4Source], config: &Config) -> TrackConfig {
     if let Some(scs) = config.shard_column_size {
         cfg = cfg.shard_column_size(scs);
     }
-    if sources.len() > 1 {
+    if sources.len() > 1 || config.column_dim.is_some() {
         let labels: Vec<String> = sources.iter().map(column_label).collect();
         let dim = config.column_dim.as_deref().unwrap_or("sample");
         cfg = cfg.columns(labels).column_dim(dim);
@@ -89,7 +91,7 @@ fn track_config(sources: &[D4Source], config: &Config) -> TrackConfig {
 }
 
 fn column_label(source: &D4Source) -> String {
-    source.sample_label.clone().unwrap_or_else(|| {
+    source.column_label.clone().unwrap_or_else(|| {
         source
             .path
             .file_stem()

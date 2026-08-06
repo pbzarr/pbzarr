@@ -92,7 +92,7 @@ fn sharded_scalar_import_matches_unsharded() {
     let src = || {
         vec![D4Source {
             path: d4.clone(),
-            sample_label: None,
+            column_label: None,
         }]
     };
     let region = |store: &PbzStore| Region {
@@ -157,7 +157,7 @@ fn sharded_cohort_import_matches_unsharded() {
         .enumerate()
         .map(|(i, &base)| D4Source {
             path: write_synthetic_d4_offset(dir.path(), &format!("s{i}"), "chr1", 10_000, base),
-            sample_label: Some(format!("s{i}")),
+            column_label: Some(format!("s{i}")),
         })
         .collect();
     let region = |store: &PbzStore| Region {
@@ -227,7 +227,7 @@ fn import_one_d4_into_scalar_track() {
         "depth",
         &[D4Source {
             path: d4,
-            sample_label: None,
+            column_label: None,
         }],
         Config::default(),
     )
@@ -285,7 +285,7 @@ fn import_d4_multi_contig_writes_correct_contigs() {
         "depth",
         &[D4Source {
             path: d4_path,
-            sample_label: None,
+            column_label: None,
         }],
         Config::default(),
     )

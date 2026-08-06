@@ -29,7 +29,7 @@ htslib = ">=1.24,<2"
 # --- validate feature: cross-language xarray round-trip ---
 [feature.validate.dependencies]
 python = ">=3.11,<3.13"
-xarray = ">=2024.10,<2026"
+xarray = ">=2025.8,<2026"
 zarr = ">=3.0,<4"
 numpy = ">=2.0,<3"
 
@@ -52,7 +52,6 @@ pybigtools = ">=0.3,<0.4"
 build-wheel = "maturin build --release"
 install-wheel = "maturin develop --release"
 test-py = "pytest python/tests -v"
-validate-py-to-rust = "pytest python/tests/test_python_to_rust_roundtrip.py -v"
 
 # --- example feature: notebooks under python/examples ---
 [feature.example.dependencies]

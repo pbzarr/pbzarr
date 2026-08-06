@@ -16,7 +16,7 @@ use noodles_csi::BinningIndex;
 use pbzarr::genome::Genome;
 use pbzarr::import::{Config, Report, run_multi_pipeline};
 use pbzarr::io::{ColumnSinkMut, Dtype, MultiValueReader, ReaderError};
-use pbzarr::{PbzError, PbzStore, Result, Track, TrackConfig};
+use pbzarr::{PbzError, PbzStore, Result, TrackConfig};
 
 use super::import::zero_fill;
 use super::reader::column_index_by_name;
@@ -326,39 +326,34 @@ pub fn from_bed_multi(
 ) -> Result<Report> {
     let resolved = resolve(bed_gz, schema)?;
 
-    for r in &resolved {
-        // Uncovered positions read back as zero; the on-disk fill must match the
-        // zero-filled scratch buffers the pipeline writes, so all-gap chunks elide.
-        let mut cfg = TrackConfig::new(r.dtype).fill_value(zero_fill(r.dtype));
-        if let Some(cs) = config.chunk_size {
-            cfg = cfg.chunk_size(cs);
-        }
-        if let Some(ss) = config.shard_size {
-            cfg = cfg.shard_size(ss);
-        }
-        if let Some(scs) = config.shard_column_size {
-            cfg = cfg.shard_column_size(scs);
-        }
-        if let Some(desc) = &r.description {
-            cfg = cfg.description(desc.clone());
-        }
-        store.create_track(&r.track_name, genome.clone(), cfg)?;
-    }
-
     let columns: Vec<(usize, Dtype)> = resolved.iter().map(|r| (r.file_col, r.dtype)).collect();
-    let reader = BedMultiReader::open(bed_gz, columns, genome)
+    let reader = BedMultiReader::open(bed_gz, columns, genome.clone())
         .map_err(|e| PbzError::Store(format!("open {}: {e}", bed_gz.display())))?;
-
-    let tracks: Vec<&Track> = resolved
+    let specs = resolved
         .iter()
         .map(|r| {
-            store.track(&r.track_name).ok_or_else(|| {
-                PbzError::Store(format!("track {:?} missing after create", r.track_name))
-            })
+            // Uncovered positions read back as zero; the on-disk fill must match the
+            // zero-filled scratch buffers the pipeline writes, so all-gap chunks elide.
+            let mut cfg = TrackConfig::new(r.dtype).fill_value(zero_fill(r.dtype));
+            if let Some(cs) = config.chunk_size {
+                cfg = cfg.chunk_size(cs);
+            }
+            if let Some(ss) = config.shard_size {
+                cfg = cfg.shard_size(ss);
+            }
+            if let Some(scs) = config.shard_column_size {
+                cfg = cfg.shard_column_size(scs);
+            }
+            if let Some(desc) = &r.description {
+                cfg = cfg.description(desc.clone());
+            }
+            (r.track_name.clone(), genome.clone(), cfg)
         })
-        .collect::<Result<_>>()?;
+        .collect();
 
-    run_multi_pipeline(&tracks, reader, &config)
+    store.create_tracks_with(specs, move |tracks| {
+        run_multi_pipeline(tracks, reader, &config)
+    })
 }
 
 #[cfg(test)]

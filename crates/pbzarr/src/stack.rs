@@ -215,13 +215,13 @@ pub fn stack(
             .column_dim(dim.clone())
             .column_chunk_size(column_chunk)
             .chunk_size(pos_chunk);
-        let cohort = out.create_track(tname, genome, cfg)?;
-
         let pcfg = Config {
             workers: config.workers,
             ..Config::default()
         };
-        let report = dispatch(dtype, &stores, tname, cohort, &pcfg)?;
+        let report = out.create_tracks_with(vec![(tname.clone(), genome, cfg)], |tracks| {
+            dispatch(dtype, &stores, tname, tracks[0], &pcfg)
+        })?;
         bytes_written += report.bytes_written;
         tasks_completed += report.tasks_completed;
         contigs_written = report.contigs_written;

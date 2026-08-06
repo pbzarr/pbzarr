@@ -44,13 +44,14 @@ fn total_bytes(sum_len: u64, n_sources: usize, elem_size: usize) -> u64 {
 /// The track is created from the source headers; it must NOT already exist.
 /// d4 stores depths as `int32` natively, so import is zero-conversion.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
+#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_d4(
     py: Python<'_>,
     store_path: String,
     track: String,
     sources: Vec<(String, Option<String>)>,
+    column_dim: Option<String>,
     workers: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
@@ -61,12 +62,15 @@ fn import_d4(
             PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
         let d4_sources: Vec<D4Source> = sources
             .iter()
-            .map(|(path, sample_label)| D4Source {
+            .map(|(path, column_label)| D4Source {
                 path: PathBuf::from(path),
-                sample_label: sample_label.clone(),
+                column_label: column_label.clone(),
             })
             .collect();
-        let mut config = Config::default();
+        let mut config = Config {
+            column_dim,
+            ..Config::default()
+        };
         if let Some(w) = workers {
             config.workers = w;
         }
@@ -97,13 +101,14 @@ fn import_d4(
 /// bigWig stores values as `float32` natively. Positions not covered by any
 /// bigWig become `0.0`, and the track is created with a `0.0` fill value.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
+#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bigwig(
     py: Python<'_>,
     store_path: String,
     track: String,
     sources: Vec<(String, Option<String>)>,
+    column_dim: Option<String>,
     workers: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
@@ -114,12 +119,15 @@ fn import_bigwig(
             PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
         let bw_sources: Vec<BigWigSource> = sources
             .iter()
-            .map(|(path, sample_label)| BigWigSource {
+            .map(|(path, column_label)| BigWigSource {
                 path: PathBuf::from(path),
-                sample_label: sample_label.clone(),
+                column_label: column_label.clone(),
             })
             .collect();
-        let mut config = Config::default();
+        let mut config = Config {
+            column_dim,
+            ..Config::default()
+        };
         if let Some(w) = workers {
             config.workers = w;
         }
@@ -149,7 +157,7 @@ fn import_bigwig(
 /// `column` is a header name; `dtype` is one of "int32" | "float32" | "bool".
 /// `genome` is a .fai / chrom.sizes path (BED files carry no contig lengths).
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column, dtype, genome, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
+#[pyo3(signature = (store_path, track, sources, column, dtype, genome, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bed(
     py: Python<'_>,
@@ -159,6 +167,7 @@ fn import_bed(
     column: String,
     dtype: String,
     genome: String,
+    column_dim: Option<String>,
     workers: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
@@ -169,9 +178,9 @@ fn import_bed(
             PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
         let bed_sources: Vec<BedSource> = sources
             .iter()
-            .map(|(path, sample_label)| BedSource {
+            .map(|(path, column_label)| BedSource {
                 path: PathBuf::from(path),
-                sample_label: sample_label.clone(),
+                column_label: column_label.clone(),
             })
             .collect();
         let (first, _) = bed_sources
@@ -182,7 +191,10 @@ fn import_bed(
             column_index_by_name(first, &column).map_err(|e| PbzError::new_err(format!("{e}")))?;
         let genome = Genome::from_fai(&genome).map_err(|e| PbzError::new_err(format!("{e}")))?;
 
-        let mut config = Config::default();
+        let mut config = Config {
+            column_dim,
+            ..Config::default()
+        };
         if let Some(w) = workers {
             config.workers = w;
         }
@@ -343,28 +355,6 @@ fn create_store(store_path: String) -> PyResult<()> {
         .map_err(|e| PbzError::new_err(format!("{e}")))
 }
 
-/// Read a d4 file's contig list from its header.
-///
-/// Returns `(name, length)` pairs in file order, sizing a store directly from
-/// the source without pyd4 or an external d4tools call.
-#[pyfunction]
-fn d4_contigs(py: Python<'_>, path: String) -> PyResult<Vec<(String, u64)>> {
-    py.allow_threads(|| {
-        pbzarr_readers::d4::contigs(&path).map_err(|e| PbzError::new_err(format!("{e}")))
-    })
-}
-
-/// Read a bigWig file's contig list from its header.
-///
-/// Returns `(name, length)` pairs in the file's chrom order, sizing a store
-/// directly from the source without pybigtools.
-#[pyfunction]
-fn bigwig_contigs(py: Python<'_>, path: String) -> PyResult<Vec<(String, u64)>> {
-    py.allow_threads(|| {
-        pbzarr_readers::bigwig::contigs(&path).map_err(|e| PbzError::new_err(format!("{e}")))
-    })
-}
-
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PbzError", m.py().get_type::<PbzError>())?;
@@ -374,7 +364,5 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(import_bed_multi, m)?)?;
     m.add_function(wrap_pyfunction!(create_store, m)?)?;
     m.add_function(wrap_pyfunction!(stack, m)?)?;
-    m.add_function(wrap_pyfunction!(d4_contigs, m)?)?;
-    m.add_function(wrap_pyfunction!(bigwig_contigs, m)?)?;
     Ok(())
 }

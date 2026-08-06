@@ -7,6 +7,7 @@ def import_d4(
     store_path: str,
     track: str,
     sources: Sequence[tuple[str, str | None]],
+    column_dim: str | None = ...,
     workers: int | None = ...,
     chunk_size: int | None = ...,
     column_chunk_size: int | None = ...,
@@ -16,6 +17,7 @@ def import_bigwig(
     store_path: str,
     track: str,
     sources: Sequence[tuple[str, str | None]],
+    column_dim: str | None = ...,
     workers: int | None = ...,
     chunk_size: int | None = ...,
     column_chunk_size: int | None = ...,
@@ -28,6 +30,7 @@ def import_bed(
     column: str,
     dtype: str,
     genome: str,
+    column_dim: str | None = ...,
     workers: int | None = ...,
     chunk_size: int | None = ...,
     column_chunk_size: int | None = ...,
@@ -52,5 +55,3 @@ def stack(
     column_chunk_size: int | None = ...,
     workers: int | None = ...,
 ) -> None: ...
-def d4_contigs(path: str) -> list[tuple[str, int]]: ...
-def bigwig_contigs(path: str) -> list[tuple[str, int]]: ...
