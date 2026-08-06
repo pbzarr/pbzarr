@@ -78,8 +78,122 @@ def test_reduce_mean_returns_an_ordinary_region_dataset() -> None:
         ),
     )
     xr.testing.assert_identical(actual, expected)
+
     assert actual["depth"].encoding == {}
     assert not actual.xindexes
+
+
+def test_summit_selects_one_position_per_region_and_column() -> None:
+    fire = np.asarray(
+        [
+            [5, 1],
+            [5, 3],
+            [4, 3],
+            [0, 4],
+            [2, 4],
+            [2, 1],
+        ],
+        dtype=np.int32,
+    )
+    coverage = np.asarray(
+        [
+            [7, 9],
+            [8, 5],
+            [100, 6],
+            [9, 8],
+            [3, 7],
+            [3, 10],
+        ],
+        dtype=np.int32,
+    )
+    marker = np.asarray(
+        [
+            [100, 101],
+            [110, 111],
+            [120, 121],
+            [130, 131],
+            [140, 141],
+            [150, 151],
+        ],
+        dtype=np.int32,
+    )
+    packed = xr.Dataset(
+        data_vars={
+            "fire_coverage": (("position", "sample"), fire),
+            "coverage": (("position", "sample"), coverage),
+            "marker": (("position", "sample"), marker),
+        },
+        coords=xr.Coordinates(
+            {
+                "offsets": ("region_boundary", [0, 3, 6]),
+                "region_contig": ("region", ["chr1", "chr2"]),
+                "region_start": ("region", [10, 20]),
+                "region_stop": ("region", [13, 23]),
+                "region_input_index": ("region", [0, 1]),
+                "region_storage_index": ("region", [0, 1]),
+                "sample": ("sample", ["s1", "s2"]),
+            },
+            indexes={},
+        ),
+        attrs={
+            "pbz:representation": "packed-regions",
+            "pbz:parent_genome_checksum": "md5:test",
+            "pbz:coordinates": "0-based-half-open",
+        },
+    )
+
+    actual = _reduce_packed_dataset(
+        packed,
+        "summit",
+        by=("fire_coverage", "coverage"),
+    )
+
+    expected = xr.Dataset(
+        data_vars={
+            "fire_coverage": (
+                ("region", "sample"),
+                [[5, 3], [2, 4]],
+            ),
+            "coverage": (
+                ("region", "sample"),
+                [[8, 6], [3, 8]],
+            ),
+            "marker": (
+                ("region", "sample"),
+                [[110, 121], [140, 131]],
+            ),
+        },
+        coords=xr.Coordinates(
+            {
+                "region_contig": ("region", ["chr1", "chr2"]),
+                "region_start": ("region", [10, 20]),
+                "region_stop": ("region", [13, 23]),
+                "region_input_index": ("region", [0, 1]),
+                "region_storage_index": ("region", [0, 1]),
+                "sample": ("sample", ["s1", "s2"]),
+                "summit_position": (
+                    ("region", "sample"),
+                    [[11, 12], [21, 20]],
+                ),
+            },
+            indexes={},
+        ),
+    )
+    xr.testing.assert_identical(actual, expected)
+
+    lazy_input = packed.assign(
+        {
+            name: values.chunk({"position": 3, "sample": 1})
+            for name, values in packed.data_vars.items()
+        }
+    )
+    lazy = _reduce_packed_dataset(
+        lazy_input,
+        "summit",
+        by=("fire_coverage", "coverage"),
+    )
+    assert lazy.chunks is not None
+    xr.testing.assert_identical(lazy.compute(), expected)
 
 
 @pytest.mark.parametrize(

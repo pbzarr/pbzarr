@@ -27,7 +27,18 @@ _I32_MAX = 2**31 - 1
 _TARGET_BYTES = 128 * 1024**2
 _MAX_SOURCE_BLOCKS = 16
 _PACKED_REDUCERS = frozenset(
-    {"mean", "sum", "min", "max", "count", "std", "var", "median", "quantile"}
+    {
+        "mean",
+        "sum",
+        "min",
+        "max",
+        "count",
+        "std",
+        "var",
+        "median",
+        "quantile",
+        "summit",
+    }
 )
 _PACKED_REGION_COORDS = (
     "region_contig",
@@ -263,6 +274,188 @@ def _validate_reducer(reducer: str, kwargs: dict) -> None:
         raise ValueError(f"unsupported reducer {reducer!r}; choose one of: {allowed}")
     if "dim" in kwargs:
         raise TypeError("reduce_regions controls dim='position'; do not pass dim")
+    if reducer == "summit":
+        unexpected = sorted(set(kwargs) - {"by"})
+        if unexpected:
+            names = ", ".join(unexpected)
+            raise TypeError(f"summit got unexpected keyword argument(s): {names}")
+        by = kwargs.get("by")
+        if (
+            not isinstance(by, (tuple, list))
+            or not by
+            or any(not isinstance(name, str) or not name for name in by)
+        ):
+            raise TypeError("summit requires by=(variable, ...)")
+        if len(set(by)) != len(by):
+            raise ValueError("summit ranking variables must be unique")
+
+
+def _summit_block(source_blocks, local_offsets, region_starts, ranking_indices):
+    blocks = [np.asarray(block) for block in source_blocks]
+    if not blocks or any(block.shape != blocks[0].shape for block in blocks[1:]):
+        raise ValueError("summit variables must have matching shapes")
+
+    starts = np.asarray(local_offsets[:-1], dtype=np.int64)
+    lengths = np.diff(local_offsets).astype(np.int64, copy=False)
+    candidates = np.ones(blocks[0].shape, dtype=bool)
+    for index in ranking_indices:
+        key = blocks[index]
+        if key.dtype.kind == "f":
+            comparable = np.where(np.isnan(key), -np.inf, key)
+            minimum = -np.inf
+        elif key.dtype.kind == "i":
+            comparable = key
+            minimum = np.iinfo(key.dtype).min
+        elif key.dtype.kind == "u":
+            comparable = key
+            minimum = 0
+        elif key.dtype.kind == "b":
+            comparable = key
+            minimum = False
+        else:
+            raise TypeError("summit ranking variables must be numeric")
+        maxima = np.maximum.reduceat(
+            np.where(candidates, comparable, minimum), starts, axis=0
+        )
+        candidates &= comparable == np.repeat(maxima, lengths, axis=0)
+
+    row_shape = (blocks[0].shape[0],) + (1,) * (blocks[0].ndim - 1)
+    row_ids = np.broadcast_to(
+        np.arange(blocks[0].shape[0], dtype=np.int64).reshape(row_shape),
+        blocks[0].shape,
+    )
+    winners = np.minimum.reduceat(
+        np.where(candidates, row_ids, blocks[0].shape[0]), starts, axis=0
+    )
+    tail_indices = tuple(np.indices(winners.shape, sparse=False)[1:])
+    selected = tuple(block[(winners, *tail_indices)] for block in blocks)
+    start_shape = (len(region_starts),) + (1,) * (winners.ndim - 1)
+    summit_positions = (
+        np.asarray(region_starts, dtype=np.int64).reshape(start_shape)
+        + winners
+        - starts.reshape(start_shape)
+    )
+    return (*selected, summit_positions)
+
+
+def _summit_packed_dataset(
+    ds: xr.Dataset, offsets: np.ndarray, by
+) -> xr.Dataset:
+    names = list(ds.data_vars)
+    missing = [name for name in by if name not in ds.data_vars]
+    if missing:
+        raise ValueError(
+            "unknown summit ranking variable(s): " + ", ".join(missing)
+        )
+
+    first = ds[names[0]]
+    if any(ds[name].dims != first.dims for name in names[1:]):
+        raise ValueError("summit requires all variables to have matching dimensions")
+    if any(ds[name].shape != first.shape for name in names[1:]):
+        raise ValueError("summit requires all variables to have matching shapes")
+    if any(ds[name].dtype.kind not in "biuf" for name in by):
+        raise TypeError("summit ranking variables must be numeric")
+
+    ranking_indices = tuple(names.index(name) for name in by)
+    region_starts = np.asarray(ds["region_start"].data, dtype=np.int64)
+    output_dims = ("region", *first.dims[1:])
+    chunks = [ds[name].chunks for name in names]
+    if any((chunk is None) != (chunks[0] is None) for chunk in chunks[1:]):
+        raise ValueError("summit requires all variables to use the same array type")
+    if chunks[0] is not None and any(chunk != chunks[0] for chunk in chunks[1:]):
+        raise ValueError("summit requires all variables to have matching chunks")
+
+    if chunks[0] is None:
+        outputs = _summit_block(
+            [ds[name].data for name in names],
+            offsets,
+            region_starts,
+            ranking_indices,
+        )
+    else:
+        source_blocks = [ds[name].data.to_delayed() for name in names]
+        position_boundaries = np.empty(len(chunks[0][0]) + 1, dtype=np.int64)
+        position_boundaries[0] = 0
+        np.cumsum(chunks[0][0], out=position_boundaries[1:])
+        region_edges = np.searchsorted(offsets, position_boundaries)
+        rows = [[] for _ in range(len(names) + 1)]
+        for position_block in range(len(chunks[0][0])):
+            start_region = int(region_edges[position_block])
+            stop_region = int(region_edges[position_block + 1])
+            local_offsets = _local_offsets(
+                offsets,
+                start_region,
+                stop_region,
+                int(position_boundaries[position_block]),
+            )
+            column_blocks = (
+                range(len(chunks[0][1])) if first.ndim == 2 else range(1)
+            )
+            block_outputs = [[] for _ in range(len(names) + 1)]
+            for column_block in column_blocks:
+                source_key = (
+                    (position_block, column_block)
+                    if first.ndim == 2
+                    else (position_block,)
+                )
+                task = delayed(_summit_block)(
+                    [blocks[source_key] for blocks in source_blocks],
+                    local_offsets,
+                    region_starts[start_region:stop_region],
+                    ranking_indices,
+                )
+                output_shape = (stop_region - start_region,)
+                if first.ndim == 2:
+                    output_shape += (int(chunks[0][1][column_block]),)
+                for output_index, name in enumerate(names):
+                    block_outputs[output_index].append(
+                        da.from_delayed(
+                            task[output_index],
+                            shape=output_shape,
+                            dtype=ds[name].dtype,
+                        )
+                    )
+                block_outputs[-1].append(
+                    da.from_delayed(
+                        task[-1], shape=output_shape, dtype=np.int64
+                    )
+                )
+            for output_index, columns in enumerate(block_outputs):
+                rows[output_index].append(
+                    columns[0]
+                    if len(columns) == 1
+                    else da.concatenate(columns, axis=1)
+                )
+        outputs = tuple(
+            _fuse_region_reduction_tasks(
+                row[0] if len(row) == 1 else da.concatenate(row, axis=0)
+            )
+            for row in rows
+        )
+
+    data_variables = {
+        name: xr.Variable(output_dims, outputs[index], attrs=ds[name].attrs)
+        for index, name in enumerate(names)
+    }
+    coordinates = {
+        name: coordinate.variable
+        for name, coordinate in ds.coords.items()
+        if name != "offsets"
+        and "position" not in coordinate.dims
+        and "region_boundary" not in coordinate.dims
+    }
+    coordinates["summit_position"] = xr.Variable(output_dims, outputs[-1])
+    result = xr.Dataset(
+        data_vars=data_variables,
+        coords=xr.Coordinates(coordinates, indexes={}),
+        attrs={
+            key: value
+            for key, value in ds.attrs.items()
+            if not key.startswith("pbz:")
+        },
+    )
+    result.set_close(ds.close)
+    return result
 
 
 def _local_offsets(offsets, start_region, stop_region, position_start):
@@ -278,6 +471,8 @@ def _reduce_packed_dataset(
 ) -> xr.Dataset:
     offsets = _validate_packed_dataset(ds)
     _validate_reducer(reducer, kwargs)
+    if reducer == "summit":
+        return _summit_packed_dataset(ds, offsets, kwargs["by"])
     dask_region_batches = {}
 
     def eager_batches(values: xr.DataArray, template: xr.DataArray):

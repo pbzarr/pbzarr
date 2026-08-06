@@ -511,6 +511,19 @@ def test_reduce_regions_falls_back_after_an_xarray_value_transformation():
     np.testing.assert_array_equal(reduced.compute()["values"], [1.5, 6.0])
 
 
+def test_reduce_regions_selects_summits_through_the_public_accessor():
+    dataset = _track_dataset()
+
+    reduced = dataset.pbz.reduce_regions(
+        [("chr1", 0, 4), ("chr2", 0, 3)],
+        "summit",
+        by=("values",),
+    ).compute()
+
+    np.testing.assert_array_equal(reduced["values"], [[6, 7], [12, 13]])
+    np.testing.assert_array_equal(reduced["summit_position"], [[3, 3], [2, 2]])
+
+
 def test_reduce_regions_builds_compact_self_contained_pbz_tasks(tmp_path):
     path = tmp_path / "track.pbz"
     _, expected = _store_track(store=path)
