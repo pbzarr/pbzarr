@@ -4,12 +4,14 @@
 
 mod common;
 
-use ndarray::Ix1;
+use ndarray::{Ix1, Ix2};
 use pbzarr::genome::{Contig, Genome};
 use pbzarr::import::Config;
 use pbzarr::io::Dtype;
 use pbzarr::{PbzStore, Region};
-use pbzarr_readers::{BedColumnSpec, BedSchema, from_bed_multi};
+use pbzarr_readers::{
+    BedColumnSpec, BedImportOptions, BedSchema, BedSource, from_bed_matrix, from_bed_multi,
+};
 use tempfile::TempDir;
 
 use common::{htslib_available, write_bed_bgzip_tabix};
@@ -98,6 +100,83 @@ fn multi_column_mixed_dtype_roundtrip() {
         .unwrap();
     assert!(mask.iter().take(20).all(|&v| v));
     assert!(mask.iter().skip(20).all(|&v| !v));
+}
+
+#[test]
+fn multi_source_matrix_import_reconciles_reordered_headers() {
+    if !htslib_available() {
+        eprintln!("skip matrix import test: bgzip/tabix not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let a = write_bed_bgzip_tabix(
+        dir.path(),
+        "a",
+        &["chrom", "start", "end", "coverage", "score"],
+        &[("chr1", 0, 8, vec!["4", "1.5"])],
+    );
+    let b = write_bed_bgzip_tabix(
+        dir.path(),
+        "b",
+        &["chrom", "start", "end", "score", "coverage"],
+        &[("chr1", 0, 8, vec!["2.5", "9"])],
+    );
+    let mut store = PbzStore::create(dir.path().join("matrix.pbz")).unwrap();
+    from_bed_matrix(
+        &mut store,
+        &[
+            BedSource {
+                path: a,
+                column_label: Some("A".into()),
+            },
+            BedSource {
+                path: b,
+                column_label: Some("B".into()),
+            },
+        ],
+        genome(&[("chr1", 8)]),
+        &BedImportOptions::default(),
+        Config {
+            chunk_size: Some(4),
+            column_chunk_size: Some(1),
+            shard_size: Some(4),
+            shard_column_size: Some(2),
+            workers: 2,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    let region = Region {
+        contig: store.genome_for("coverage").unwrap().id("chr1").unwrap(),
+        start: 0,
+        end: 8,
+    };
+    let coverage = store
+        .track("coverage")
+        .unwrap()
+        .read_region::<u8>(&region)
+        .unwrap()
+        .into_dimensionality::<Ix2>()
+        .unwrap();
+    let score = store
+        .track("score")
+        .unwrap()
+        .read_region::<f32>(&region)
+        .unwrap()
+        .into_dimensionality::<Ix2>()
+        .unwrap();
+    assert!(
+        coverage
+            .rows()
+            .into_iter()
+            .all(|row| row.to_vec() == vec![4, 9])
+    );
+    assert!(
+        score
+            .rows()
+            .into_iter()
+            .all(|row| row.to_vec() == vec![1.5, 2.5])
+    );
 }
 
 #[test]

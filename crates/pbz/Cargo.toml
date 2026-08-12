@@ -1,0 +1,15 @@
+[package]
+name = "pbz"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Command-line interface for pbzarr"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+pbzarr = { path = "../pbzarr" }
+pbzarr-readers = { path = "../pbzarr-readers" }

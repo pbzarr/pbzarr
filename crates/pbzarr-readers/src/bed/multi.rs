@@ -14,13 +14,14 @@ use noodles_core::region::Interval;
 use noodles_csi::BinningIndex;
 
 use pbzarr::genome::Genome;
-use pbzarr::import::{Config, Report, run_multi_pipeline};
+use pbzarr::import::{Config, Report, run_matrix_pipeline, run_multi_pipeline};
 use pbzarr::io::{ColumnSinkMut, Dtype, MultiValueReader, ReaderError};
 use pbzarr::{PbzError, PbzStore, Result, TrackConfig};
 
 use super::import::zero_fill;
 use super::reader::column_index_by_name;
 use super::reader::open_bgzf;
+use super::schema::{BedImportOptions, resolve_sources};
 
 /// Reader-side result alias (parse/IO errors), distinct from `pbzarr::Result`.
 type IoResult<T> = std::result::Result<T, ReaderError>;
@@ -353,6 +354,76 @@ pub fn from_bed_multi(
 
     store.create_tracks_with(specs, move |tracks| {
         run_multi_pipeline(tracks, reader, &config)
+    })
+}
+
+/// Import selected fields from one or more tabix-indexed BED sources.
+///
+/// One source creates one scalar track per field. Several sources create one
+/// `(position, column)` track per field, with source labels as coordinates.
+/// Headers are reconciled by field name and dtypes are inferred unless an
+/// override is supplied in [`BedImportOptions`].
+pub fn from_bed_matrix(
+    store: &mut PbzStore,
+    sources: &[super::import::BedSource],
+    genome: Genome,
+    options: &BedImportOptions,
+    config: Config,
+) -> Result<Report> {
+    let (fields, resolved_sources) = resolve_sources(sources, options)?;
+    let labels = resolved_sources
+        .iter()
+        .map(|source| source.label.clone())
+        .collect::<Vec<_>>();
+    let specs = fields
+        .iter()
+        .map(|field| {
+            let mut track_config = TrackConfig::new(field.dtype).fill_value(zero_fill(field.dtype));
+            if let Some(chunk_size) = config.chunk_size {
+                track_config = track_config.chunk_size(chunk_size);
+            }
+            if let Some(shard_size) = config.shard_size {
+                track_config = track_config.shard_size(shard_size);
+            }
+            if let Some(shard_columns) = config.shard_column_size {
+                track_config = track_config.shard_column_size(shard_columns);
+            }
+            if sources.len() > 1 {
+                track_config = track_config
+                    .columns(labels.clone())
+                    .column_dim(config.column_dim.as_deref().unwrap_or("sample"));
+                if let Some(column_chunk_size) = config.column_chunk_size {
+                    track_config = track_config.column_chunk_size(column_chunk_size);
+                }
+            }
+            Ok((field.name.clone(), genome.clone(), track_config))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let readers = sources
+        .iter()
+        .zip(&resolved_sources)
+        .map(|(source, resolved)| {
+            let columns = resolved
+                .columns
+                .iter()
+                .zip(&fields)
+                .map(|(column, field)| (*column, field.dtype))
+                .collect();
+            BedMultiReader::open(&source.path, columns, genome.clone()).map_err(|error| {
+                PbzError::Store(format!("open {}: {error}", source.path.display()))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let source_count = readers.len();
+    store.create_tracks_with(specs, move |tracks| {
+        if source_count == 1 {
+            let reader = readers.into_iter().next().ok_or_else(|| {
+                PbzError::Metadata("bed matrix import lost its only reader".into())
+            })?;
+            run_multi_pipeline(tracks, reader, &config)
+        } else {
+            run_matrix_pipeline(tracks, readers, &config)
+        }
     })
 }
 

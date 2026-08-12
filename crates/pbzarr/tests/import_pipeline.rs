@@ -96,6 +96,62 @@ fn pipeline_writes_constants_into_cohort_track() {
 }
 
 #[test]
+fn cohort_pipeline_tiles_columns_with_multiple_workers() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("tiled.pbz");
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 8,
+    }])
+    .unwrap();
+    let mut store = PbzStore::create(&path).unwrap();
+    store
+        .create_track(
+            "depth",
+            genome.clone(),
+            TrackConfig::new(Dtype::U32)
+                .columns(vec!["a".into(), "b".into(), "c".into(), "d".into()])
+                .chunk_size(4)
+                .column_chunk_size(2),
+        )
+        .unwrap();
+
+    let readers = [7, 8, 9, 10]
+        .into_iter()
+        .map(|val| ConstReader {
+            genome: genome.clone(),
+            val,
+        })
+        .collect();
+    let report = run_pipeline::<u32, _>(
+        store.track("depth").unwrap(),
+        readers,
+        &Config {
+            workers: 2,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.tasks_completed, 4);
+    let region = Region {
+        contig: genome.id("chr1").unwrap(),
+        start: 0,
+        end: 8,
+    };
+    let values = store
+        .track("depth")
+        .unwrap()
+        .read_region::<u32>(&region)
+        .unwrap()
+        .into_dimensionality::<ndarray::Ix2>()
+        .unwrap();
+    for row in values.rows() {
+        assert_eq!(row.as_slice().unwrap(), &[7, 8, 9, 10]);
+    }
+}
+
+#[test]
 fn pipeline_writes_constants_into_scalar_track() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");

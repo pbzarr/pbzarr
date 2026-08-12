@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/pbzarr", "crates/pbzarr-readers", "crates/pbzarr-python"]
+members = [
+    "crates/pbz",
+    "crates/pbzarr",
+    "crates/pbzarr-readers",
+    "crates/pbzarr-python",
+]
 
 [workspace.package]
 version = "0.5.1" # x-release-please-version

@@ -297,6 +297,15 @@ impl Track {
         Ok(self.values_array()?.shape()[1] as usize)
     }
 
+    /// Shape of one independently writable outer unit: a regular chunk, or a
+    /// shard when sharding is configured.
+    pub(crate) fn write_unit_shape(&self) -> Result<Vec<usize>> {
+        let array = self.values_array()?;
+        array
+            .chunk_shape_usize(&vec![0; self.rank])
+            .map_err(|e| PbzError::Store(format!("write-unit shape for {}: {e}", self.name)))
+    }
+
     /// The cached `values` array, opened lazily on first use.
     pub(crate) fn values_array(
         &self,
@@ -398,14 +407,84 @@ impl Track {
                 data.ndim(),
             )));
         }
+        if self.rank == 2 {
+            return self.write_flat_columns(start..end, 0..self.columns_count()? as u64, data);
+        }
         let arr = self.values_array()?;
+        if start > end || end > arr.shape()[0] {
+            return Err(PbzError::InvalidRegion {
+                message: format!("flat range {start}..{end} is outside track {:?}", self.name),
+            });
+        }
+        if data.shape()
+            != [usize::try_from(end - start)
+                .map_err(|_| PbzError::Metadata("flat write length exceeds usize".into()))?]
+        {
+            return Err(PbzError::Metadata(format!(
+                "shape mismatch for track {:?}: expected [{}], got {:?}",
+                self.name,
+                end - start,
+                data.shape(),
+            )));
+        }
         #[allow(clippy::single_range_in_vec_init)]
-        let subset = if self.rank == 1 {
-            ArraySubset::new_with_ranges(&[start..end])
-        } else {
-            ArraySubset::new_with_ranges(&[start..end, 0..(data.shape()[1] as u64)])
-        };
+        let subset = ArraySubset::new_with_ranges(&[start..end]);
         arr.store_array_subset(&subset, data)
+            .map_err(|e| PbzError::Store(format!("write {}: {e}", self.name)))
+    }
+
+    /// Write one rectangular tile of a rank-2 track using flat position and
+    /// column ranges. Import workers use full write units so they never race.
+    pub(crate) fn write_flat_columns<T: Numeric>(
+        &self,
+        position: std::ops::Range<u64>,
+        columns: std::ops::Range<u64>,
+        data: ArrayD<T>,
+    ) -> Result<()> {
+        if T::DTYPE != self.dtype {
+            return Err(PbzError::InvalidDtype {
+                dtype: format!(
+                    "track {:?} is {} but caller wrote {}",
+                    self.name,
+                    self.dtype,
+                    T::DTYPE
+                ),
+            });
+        }
+        if self.rank != 2 || data.ndim() != 2 {
+            return Err(PbzError::Metadata(format!(
+                "column tile for track {:?} requires rank-2 data",
+                self.name
+            )));
+        }
+        let array = self.values_array()?;
+        let shape = array.shape();
+        if position.start > position.end
+            || columns.start > columns.end
+            || position.end > shape[0]
+            || columns.end > shape[1]
+        {
+            return Err(PbzError::InvalidRegion {
+                message: format!(
+                    "column tile {:?} × {:?} is outside track {:?}",
+                    position, columns, self.name
+                ),
+            });
+        }
+        let rows = usize::try_from(position.end - position.start)
+            .map_err(|_| PbzError::Metadata("tile row count exceeds usize".into()))?;
+        let width = usize::try_from(columns.end - columns.start)
+            .map_err(|_| PbzError::Metadata("tile column count exceeds usize".into()))?;
+        if data.shape() != [rows, width] {
+            return Err(PbzError::Metadata(format!(
+                "shape mismatch for track {:?}: expected [{rows}, {width}], got {:?}",
+                self.name,
+                data.shape(),
+            )));
+        }
+        let subset = ArraySubset::new_with_ranges(&[position, columns]);
+        array
+            .store_array_subset(&subset, data)
             .map_err(|e| PbzError::Store(format!("write {}: {e}", self.name)))
     }
 }
@@ -414,6 +493,9 @@ impl Track {
 mod tests {
     use super::*;
     use crate::genome::Contig;
+    use crate::store::PbzStore;
+    use ndarray::{array, s};
+    use tempfile::TempDir;
 
     #[test]
     fn perbase_attrs_roundtrip_and_conform() {
@@ -441,5 +523,78 @@ mod tests {
         let back: PerbaseTrackAttrs = serde_json::from_value(val).unwrap();
         assert_eq!(back.version, "0.4");
         assert_eq!(back.genome_checksum, g.checksum());
+    }
+
+    #[test]
+    fn write_flat_columns_updates_only_the_requested_tile() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tile.pbz");
+        let genome = Genome::new(vec![Contig {
+            name: "chr1".into(),
+            length: 8,
+        }])
+        .unwrap();
+        let mut store = PbzStore::create(&path).unwrap();
+        store
+            .create_track(
+                "depth",
+                genome,
+                TrackConfig::new(Dtype::U16)
+                    .columns(vec!["a".into(), "b".into(), "c".into(), "d".into()])
+                    .chunk_size(4)
+                    .column_chunk_size(2),
+            )
+            .unwrap();
+        let track = store.track("depth").unwrap();
+
+        track
+            .write_flat_columns(
+                0..4,
+                2..4,
+                array![[7u16, 8], [7, 8], [7, 8], [7, 8]].into_dyn(),
+            )
+            .unwrap();
+
+        let region = track
+            .genome()
+            .resolve(&"chr1:0-4".parse().unwrap())
+            .unwrap();
+        let values = track
+            .read_region::<u16>(&region)
+            .unwrap()
+            .into_dimensionality::<ndarray::Ix2>()
+            .unwrap();
+        assert!(values.slice(s![.., 0..2]).iter().all(|&value| value == 0));
+        assert_eq!(values[[3, 2]], 7);
+        assert_eq!(values[[3, 3]], 8);
+    }
+
+    #[test]
+    fn write_unit_shape_uses_outer_shard_dimensions() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sharded.pbz");
+        let genome = Genome::new(vec![Contig {
+            name: "chr1".into(),
+            length: 16,
+        }])
+        .unwrap();
+        let mut store = PbzStore::create(&path).unwrap();
+        store
+            .create_track(
+                "depth",
+                genome,
+                TrackConfig::new(Dtype::U16)
+                    .columns(vec!["a".into(), "b".into(), "c".into(), "d".into()])
+                    .chunk_size(4)
+                    .column_chunk_size(2)
+                    .shard_size(8)
+                    .shard_column_size(4),
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.track("depth").unwrap().write_unit_shape().unwrap(),
+            vec![8, 4]
+        );
     }
 }

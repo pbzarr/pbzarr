@@ -6,4 +6,6 @@
 
 mod pipeline;
 
-pub use pipeline::{Config, ProgressSink, Report, run_multi_pipeline, run_pipeline};
+pub use pipeline::{
+    Config, ProgressSink, Report, run_matrix_pipeline, run_multi_pipeline, run_pipeline,
+};

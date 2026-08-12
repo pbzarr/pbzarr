@@ -82,7 +82,7 @@ pub(super) fn zero_fill(dtype: Dtype) -> serde_json::Value {
     }
 }
 
-fn column_label(source: &BedSource) -> String {
+pub(super) fn column_label(source: &BedSource) -> String {
     source.column_label.clone().unwrap_or_else(|| {
         source
             .path
