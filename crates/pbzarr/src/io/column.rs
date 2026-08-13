@@ -6,7 +6,7 @@
 use std::fmt::Display;
 use std::ops::Range;
 
-use ndarray::{Array1, Array2, ArrayViewMut1, ArrayViewMut2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayViewMut1, ArrayViewMut2, Axis};
 
 use crate::io::dtype::Dtype;
 use crate::io::error::{ReaderError, Result};
@@ -223,6 +223,26 @@ pub enum ColumnSinkMut<'a> {
 }
 
 impl ColumnSinkMut<'_> {
+    /// Bulk copy for readers that accumulate in their own contiguous scratch.
+    pub fn assign_i32(&mut self, src: &[i32]) -> Result<()> {
+        match self {
+            ColumnSinkMut::I32(v) => {
+                if v.len() != src.len() {
+                    return Err(ReaderError::Other(anyhow::anyhow!(
+                        "assign_i32 length {} != sink {}",
+                        src.len(),
+                        v.len()
+                    )));
+                }
+                v.assign(&ArrayView1::from(src));
+                Ok(())
+            }
+            _ => Err(ReaderError::Other(anyhow::anyhow!(
+                "assign_i32 on non-i32 sink"
+            ))),
+        }
+    }
+
     /// Parse `cell` into this sink's dtype and write it across `[lo, hi)`.
     pub fn fill_run(&mut self, lo: usize, hi: usize, cell: &str) -> Result<()> {
         match self {

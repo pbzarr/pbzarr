@@ -32,6 +32,14 @@ pub trait ValueReader: Send + Sync {
         dst: ArrayViewMut2<'_, Self::Item>,
     ) -> Result<()>;
 
+    /// Cheap pre-check: could this reader have any data in `[start, end)` on
+    /// `contig_name`? Defaults to `true` (always read). Sparse-source readers
+    /// (e.g. a BAM/CRAM index) override this so the pipeline can skip a whole
+    /// task's read and write when no reader reports coverage.
+    fn may_have_data(&self, _contig_name: &str, _start: u64, _end: u64) -> bool {
+        true
+    }
+
     /// Produce a worker-local handle for use on a single thread.
     /// Shared state (index, header) is reused via `Arc`; per-thread
     /// state (file handle, decode buffers) is freshly allocated.
@@ -63,6 +71,13 @@ pub trait MultiValueReader: Send + Sync {
         end: u64,
         sinks: &mut [ColumnSinkMut<'_>],
     ) -> Result<()>;
+
+    /// Cheap pre-check: could this reader have any data in `[start, end)` on
+    /// `contig_name`? Defaults to `true` (always read). See
+    /// `ValueReader::may_have_data`.
+    fn may_have_data(&self, _contig_name: &str, _start: u64, _end: u64) -> bool {
+        true
+    }
 
     /// Worker-local handle, sharing index/header via `Arc` (see `ValueReader::fork`).
     fn fork(&self) -> Result<Self>

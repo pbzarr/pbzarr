@@ -72,12 +72,54 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Build a `TrackConfig` for `dtype`/`fill` (`None` leaves the track's
+    /// default fill unset), applying this config's chunk/shard sizing.
+    /// `labels` being `Some` is what makes the track 2D (callers decide via
+    /// `n_sources > 1 || self.column_dim.is_some()`, so a single source with
+    /// an explicit `column_dim` still gets a 1-column track);
+    /// `default_column_dim` is the fallback when `column_dim` is unset.
+    /// Shared by every format reader's import entry point.
+    pub fn track_config(
+        &self,
+        dtype: crate::io::Dtype,
+        fill: Option<serde_json::Value>,
+        labels: Option<Vec<String>>,
+        default_column_dim: &str,
+    ) -> crate::track::TrackConfig {
+        let mut cfg = crate::track::TrackConfig::new(dtype);
+        if let Some(fill) = fill {
+            cfg = cfg.fill_value(fill);
+        }
+        if let Some(cs) = self.chunk_size {
+            cfg = cfg.chunk_size(cs);
+        }
+        if let Some(ss) = self.shard_size {
+            cfg = cfg.shard_size(ss);
+        }
+        if let Some(scs) = self.shard_column_size {
+            cfg = cfg.shard_column_size(scs);
+        }
+        if let Some(labels) = labels {
+            let dim = self.column_dim.as_deref().unwrap_or(default_column_dim);
+            cfg = cfg.columns(labels).column_dim(dim);
+            if let Some(ccs) = self.column_chunk_size {
+                cfg = cfg.column_chunk_size(ccs);
+            }
+        }
+        cfg
+    }
+}
+
 /// Summary returned by `run_pipeline` on success.
 pub struct Report {
     pub contigs_written: usize,
     pub bytes_written: u64,
     /// Number of chunk tasks that completed successfully.
     pub tasks_completed: usize,
+    /// Number of chunk tasks skipped because no reader covered them
+    /// (`may_have_data` was false for every overlapping contig).
+    pub tasks_skipped: usize,
 }
 
 /// One physical position-by-column write unit. Boundaries land on the outer
@@ -89,9 +131,63 @@ struct ChunkTask {
     columns: std::ops::Range<u64>,
 }
 
+/// One contig's overlap with a task, precomputed so the `may_have_data` skip
+/// check can run before any buffer is allocated.
+struct ContigWindow<'g> {
+    name: &'g str,
+    row_lo: usize,
+    row_hi: usize,
+    local_lo: u64,
+    local_hi: u64,
+}
+
+/// True when no window in `windows` has a reader covering it, i.e. this
+/// task's whole region is a fill-value gap and both the read and the write
+/// can be skipped (safe only because tracks are always created with a zero
+/// fill, so an absent chunk already reads back as a zero-filled one would).
+/// Bumps `state.tasks_skipped` as a side effect, since every call site does
+/// that and returns immediately when this is true.
+fn skip_uncovered_task(
+    windows: &[ContigWindow],
+    state: &State,
+    mut may_have_data: impl FnMut(&ContigWindow) -> bool,
+) -> bool {
+    let covered = windows.iter().any(&mut may_have_data);
+    if !covered {
+        state.tasks_skipped.fetch_add(1, Ordering::Relaxed);
+    }
+    !covered
+}
+
+fn contig_windows(genome: &crate::genome::Genome, start: u64, end: u64) -> Vec<ContigWindow<'_>> {
+    let offsets = genome.offsets();
+    let mut windows = Vec::new();
+    for (i, contig) in genome.contigs().iter().enumerate() {
+        let c_start = offsets[i] as u64;
+        if c_start >= end {
+            break;
+        }
+        let c_end = offsets[i + 1] as u64;
+        if c_end <= start {
+            continue;
+        }
+        let ov_start = start.max(c_start);
+        let ov_end = end.min(c_end);
+        windows.push(ContigWindow {
+            name: contig.name.as_str(),
+            row_lo: (ov_start - start) as usize,
+            row_hi: (ov_end - start) as usize,
+            local_lo: ov_start - c_start,
+            local_hi: ov_end - c_start,
+        });
+    }
+    windows
+}
+
 struct State {
     bytes_written: AtomicU64,
     tasks_completed: AtomicUsize,
+    tasks_skipped: AtomicUsize,
     first_err: Mutex<Option<PbzError>>,
 }
 
@@ -190,6 +286,7 @@ where
     let state = Arc::new(State {
         bytes_written: AtomicU64::new(0),
         tasks_completed: AtomicUsize::new(0),
+        tasks_skipped: AtomicUsize::new(0),
         first_err: Mutex::new(None),
     });
 
@@ -280,6 +377,7 @@ where
         contigs_written: n_contigs,
         bytes_written: state.bytes_written.load(Ordering::Relaxed),
         tasks_completed: state.tasks_completed.load(Ordering::Relaxed),
+        tasks_skipped: state.tasks_skipped.load(Ordering::Relaxed),
     })
 }
 
@@ -300,36 +398,34 @@ where
     let tile_width = usize::try_from(task.columns.end - task.columns.start)
         .map_err(|_| PbzError::Metadata("tile width exceeds usize".into()))?;
 
-    // Scratch buffer: (chunk_len, tile width). Pre-fill with `T::ZERO`; readers
-    // overwrite every position they cover.
+    let windows = contig_windows(genome, gs, ge);
+    if skip_uncovered_task(&windows, state, |w| {
+        forked
+            .iter()
+            .any(|r| r.may_have_data(w.name, w.local_lo, w.local_hi))
+    }) {
+        return Ok(());
+    }
+
+    // Scratch buffer: (chunk_len, tile width), pre-filled with `T::ZERO`.
+    // Readers only write the positions they cover; the zero fill stands in
+    // for everything else (gaps, uncovered contigs).
     let mut buf = Array2::<T>::from_elem((chunk_len, tile_width), T::ZERO);
 
-    // The task may straddle contig boundaries; fill each overlapping contig's
-    // slice of the buffer by name. Contigs are in offset order, so stop once
-    // one starts past the task.
-    let offsets = genome.offsets();
-    for (i, contig) in genome.contigs().iter().enumerate() {
-        let c_start = offsets[i] as u64;
-        if c_start >= ge {
-            break;
-        }
-        let c_end = offsets[i + 1] as u64;
-        if c_end <= gs {
-            continue;
-        }
-        let ov_start = gs.max(c_start);
-        let ov_end = ge.min(c_end);
-        let (buf_lo, buf_hi) = ((ov_start - gs) as usize, (ov_end - gs) as usize);
-        let (local_lo, local_hi) = (ov_start - c_start, ov_end - c_start);
+    for w in &windows {
+        let (local_lo, local_hi) = (w.local_lo, w.local_hi);
         for (local_column, reader) in forked.iter_mut().enumerate() {
-            let dst = buf.slice_mut(ndarray::s![buf_lo..buf_hi, local_column..local_column + 1]);
+            let dst = buf.slice_mut(ndarray::s![
+                w.row_lo..w.row_hi,
+                local_column..local_column + 1
+            ]);
             reader
-                .read_into(&contig.name, local_lo, local_hi, dst)
+                .read_into(w.name, local_lo, local_hi, dst)
                 .map_err(|e| {
                     PbzError::Metadata(format!(
                         "reader {} failed on {} [{local_lo},{local_hi}): {e}",
                         task.columns.start + local_column as u64,
-                        contig.name
+                        w.name
                     ))
                 })?;
         }
@@ -433,6 +529,7 @@ pub fn run_multi_pipeline<R: MultiValueReader>(
     let state = Arc::new(State {
         bytes_written: AtomicU64::new(0),
         tasks_completed: AtomicUsize::new(0),
+        tasks_skipped: AtomicUsize::new(0),
         first_err: Mutex::new(None),
     });
 
@@ -494,6 +591,7 @@ pub fn run_multi_pipeline<R: MultiValueReader>(
         contigs_written: n_contigs,
         bytes_written: state.bytes_written.load(Ordering::Relaxed),
         tasks_completed: state.tasks_completed.load(Ordering::Relaxed),
+        tasks_skipped: state.tasks_skipped.load(Ordering::Relaxed),
     })
 }
 
@@ -560,6 +658,7 @@ pub fn run_wide_pipeline<R: MultiValueReader>(
     let state = Arc::new(State {
         bytes_written: AtomicU64::new(0),
         tasks_completed: AtomicUsize::new(0),
+        tasks_skipped: AtomicUsize::new(0),
         first_err: Mutex::new(None),
     });
 
@@ -614,6 +713,7 @@ pub fn run_wide_pipeline<R: MultiValueReader>(
         contigs_written: n_contigs,
         bytes_written: state.bytes_written.load(Ordering::Relaxed),
         tasks_completed: state.tasks_completed.load(Ordering::Relaxed),
+        tasks_skipped: state.tasks_skipped.load(Ordering::Relaxed),
     })
 }
 
@@ -629,34 +729,23 @@ fn process_wide_task<R: MultiValueReader>(
         .map_err(|_| PbzError::Metadata("wide tile row count exceeds usize".into()))?;
     let width = usize::try_from(task.columns.end)
         .map_err(|_| PbzError::Metadata("wide tile width exceeds usize".into()))?;
+    let windows = contig_windows(genome, task.start, task.end);
+    if skip_uncovered_task(&windows, state, |w| {
+        reader.may_have_data(w.name, w.local_lo, w.local_hi)
+    }) {
+        return Ok(());
+    }
+
     let mut buffer = MatrixBuffer::zeros(track.dtype(), rows, width)
         .map_err(|e| PbzError::Metadata(format!("alloc wide buffer: {e}")))?;
 
-    let offsets = genome.offsets();
-    for (i, contig) in genome.contigs().iter().enumerate() {
-        let c_start = offsets[i] as u64;
-        if c_start >= task.end {
-            break;
-        }
-        let c_end = offsets[i + 1] as u64;
-        if c_end <= task.start {
-            continue;
-        }
-        let ov_start = task.start.max(c_start);
-        let ov_end = task.end.min(c_end);
-        let (row_lo, row_hi) = (
-            (ov_start - task.start) as usize,
-            (ov_end - task.start) as usize,
-        );
-        let (local_lo, local_hi) = (ov_start - c_start, ov_end - c_start);
-        let mut sinks = buffer.sink_columns(row_lo..row_hi);
+    for w in &windows {
+        let (local_lo, local_hi) = (w.local_lo, w.local_hi);
+        let mut sinks = buffer.sink_columns(w.row_lo..w.row_hi);
         reader
-            .read_into(&contig.name, local_lo, local_hi, &mut sinks)
+            .read_into(w.name, local_lo, local_hi, &mut sinks)
             .map_err(|e| {
-                PbzError::Metadata(format!(
-                    "wide read {} [{local_lo},{local_hi}): {e}",
-                    contig.name
-                ))
+                PbzError::Metadata(format!("wide read {} [{local_lo},{local_hi}): {e}", w.name))
             })?;
     }
 
@@ -752,6 +841,7 @@ pub fn run_matrix_pipeline<R: MultiValueReader>(
     let state = Arc::new(State {
         bytes_written: AtomicU64::new(0),
         tasks_completed: AtomicUsize::new(0),
+        tasks_skipped: AtomicUsize::new(0),
         first_err: Mutex::new(None),
     });
 
@@ -836,6 +926,7 @@ pub fn run_matrix_pipeline<R: MultiValueReader>(
             .count(),
         bytes_written: state.bytes_written.load(Ordering::Relaxed),
         tasks_completed: state.tasks_completed.load(Ordering::Relaxed),
+        tasks_skipped: state.tasks_skipped.load(Ordering::Relaxed),
     })
 }
 
@@ -853,39 +944,34 @@ fn process_matrix_task<R: MultiValueReader>(
         .map_err(|_| PbzError::Metadata("matrix tile row count exceeds usize".into()))?;
     let width = usize::try_from(task.columns.end - task.columns.start)
         .map_err(|_| PbzError::Metadata("matrix tile width exceeds usize".into()))?;
+    let windows = contig_windows(genome, task.start, task.end);
+    if skip_uncovered_task(&windows, state, |w| {
+        readers
+            .iter()
+            .any(|r| r.may_have_data(w.name, w.local_lo, w.local_hi))
+    }) {
+        return Ok(());
+    }
+
     let mut buffers = dtypes
         .iter()
         .map(|dtype| MatrixBuffer::zeros(*dtype, rows, width))
         .collect::<crate::io::error::Result<Vec<_>>>()
         .map_err(|error| PbzError::Metadata(format!("alloc matrix buffer: {error}")))?;
-    let offsets = genome.offsets();
-    for (contig_index, contig) in genome.contigs().iter().enumerate() {
-        let contig_start = offsets[contig_index] as u64;
-        if contig_start >= task.end {
-            break;
-        }
-        let contig_end = offsets[contig_index + 1] as u64;
-        if contig_end <= task.start {
-            continue;
-        }
-        let overlap_start = task.start.max(contig_start);
-        let overlap_end = task.end.min(contig_end);
-        let row_start = (overlap_start - task.start) as usize;
-        let row_end = (overlap_end - task.start) as usize;
-        let local_start = overlap_start - contig_start;
-        let local_end = overlap_end - contig_start;
+    for w in &windows {
+        let (local_start, local_end) = (w.local_lo, w.local_hi);
         for (local_column, reader) in readers.iter().enumerate() {
             let mut sinks = buffers
                 .iter_mut()
-                .map(|buffer| buffer.sink_column_slice(row_start..row_end, local_column))
+                .map(|buffer| buffer.sink_column_slice(w.row_lo..w.row_hi, local_column))
                 .collect::<Vec<_>>();
             reader
-                .read_into(&contig.name, local_start, local_end, &mut sinks)
+                .read_into(w.name, local_start, local_end, &mut sinks)
                 .map_err(|error| {
                     PbzError::Metadata(format!(
                         "matrix reader {} failed on {} [{local_start},{local_end}): {error}",
                         task.columns.start + local_column as u64,
-                        contig.name
+                        w.name
                     ))
                 })?;
         }
@@ -920,38 +1006,31 @@ fn process_task_multi<R: MultiValueReader>(
     let (gs, ge) = (task.start, task.end);
     let chunk_len = (ge - gs) as usize;
 
+    let windows = contig_windows(genome, gs, ge);
+    if skip_uncovered_task(&windows, state, |w| {
+        reader.may_have_data(w.name, w.local_lo, w.local_hi)
+    }) {
+        return Ok(());
+    }
+
     let mut buffers: Vec<ColumnBuffer> = dtypes
         .iter()
         .map(|d| ColumnBuffer::zeros(*d, chunk_len))
         .collect::<crate::io::error::Result<Vec<_>>>()
         .map_err(|e| PbzError::Metadata(format!("alloc buffer: {e}")))?;
 
-    // Fill each overlapping contig's slice of the buffers by name. Contigs are
-    // in offset order, so stop once one starts past the task.
-    let offsets = genome.offsets();
-    for (i, contig) in genome.contigs().iter().enumerate() {
-        let c_start = offsets[i] as u64;
-        if c_start >= ge {
-            break;
-        }
-        let c_end = offsets[i + 1] as u64;
-        if c_end <= gs {
-            continue;
-        }
-        let ov_start = gs.max(c_start);
-        let ov_end = ge.min(c_end);
-        let (buf_lo, buf_hi) = ((ov_start - gs) as usize, (ov_end - gs) as usize);
-        let (local_lo, local_hi) = (ov_start - c_start, ov_end - c_start);
+    for w in &windows {
+        let (local_lo, local_hi) = (w.local_lo, w.local_hi);
         let mut sinks: Vec<ColumnSinkMut> = buffers
             .iter_mut()
-            .map(|b| b.sink_slice(buf_lo, buf_hi))
+            .map(|b| b.sink_slice(w.row_lo, w.row_hi))
             .collect();
         reader
-            .read_into(&contig.name, local_lo, local_hi, &mut sinks)
+            .read_into(w.name, local_lo, local_hi, &mut sinks)
             .map_err(|e| {
                 PbzError::Metadata(format!(
                     "multi read {} [{local_lo},{local_hi}): {e}",
-                    contig.name
+                    w.name
                 ))
             })?;
     }
@@ -993,10 +1072,15 @@ mod multi_tests {
     use tempfile::TempDir;
 
     /// Fills every column with a constant cell string, exercising `fill_run`.
+    /// `covered = false` makes `may_have_data` report no coverage anywhere
+    /// and turns `read_into` into a hard failure, so a test using it proves
+    /// the pipeline's skip path never reads (see
+    /// `uncovered_tasks_are_skipped_and_store_no_chunks`).
     struct ConstMulti {
         genome: Genome,
         dtypes: Vec<Dtype>,
         cells: Vec<String>,
+        covered: bool,
     }
 
     impl MultiValueReader for ConstMulti {
@@ -1006,6 +1090,9 @@ mod multi_tests {
         fn columns(&self) -> &[Dtype] {
             &self.dtypes
         }
+        fn may_have_data(&self, _contig: &str, _start: u64, _end: u64) -> bool {
+            self.covered
+        }
         fn read_into(
             &self,
             _contig: &str,
@@ -1013,6 +1100,11 @@ mod multi_tests {
             end: u64,
             sinks: &mut [ColumnSinkMut<'_>],
         ) -> crate::io::error::Result<()> {
+            if !self.covered {
+                return Err(crate::io::error::ReaderError::Other(anyhow::anyhow!(
+                    "must not be called"
+                )));
+            }
             let len = (end - start) as usize;
             for (i, s) in sinks.iter_mut().enumerate() {
                 s.fill_run(0, len, &self.cells[i])?;
@@ -1024,6 +1116,7 @@ mod multi_tests {
                 genome: self.genome.clone(),
                 dtypes: self.dtypes.clone(),
                 cells: self.cells.clone(),
+                covered: self.covered,
             })
         }
     }
@@ -1054,6 +1147,7 @@ mod multi_tests {
             genome: g.clone(),
             dtypes: vec![Dtype::I32, Dtype::F32],
             cells: vec!["7".into(), "1.5".into()],
+            covered: true,
         };
         let ta = store.track("a").unwrap();
         let tb = store.track("b").unwrap();
@@ -1090,6 +1184,54 @@ mod multi_tests {
     }
 
     #[test]
+    fn uncovered_tasks_are_skipped_and_store_no_chunks() {
+        let dir = TempDir::new().unwrap();
+        let g = Genome::new(vec![Contig {
+            name: "chr1".into(),
+            length: 40,
+        }])
+        .unwrap();
+        let mut store = PbzStore::create(dir.path().join("skip.pbz")).unwrap();
+        store
+            .create_track("a", g.clone(), TrackConfig::new(Dtype::I32).chunk_size(16))
+            .unwrap();
+
+        let reader = ConstMulti {
+            genome: g.clone(),
+            dtypes: vec![Dtype::I32],
+            cells: vec!["7".into()],
+            covered: false,
+        };
+        let ta = store.track("a").unwrap();
+        let report = run_multi_pipeline(&[ta], reader, &Config::default()).unwrap();
+        assert_eq!(report.tasks_completed, 0);
+        // ΣL=40, chunk 16 -> 3 tasks (16, 16, 8), all skipped (never covered).
+        assert_eq!(report.tasks_skipped, 3);
+
+        let ga = store.genome_for("a").unwrap();
+        let r = Region {
+            contig: ga.id("chr1").unwrap(),
+            start: 0,
+            end: 40,
+        };
+        let vals = store
+            .track("a")
+            .unwrap()
+            .read_region::<i32>(&r)
+            .unwrap()
+            .into_dimensionality::<Ix1>()
+            .unwrap();
+        assert!(vals.iter().all(|&v| v == 0));
+
+        let mut entries: Vec<_> = std::fs::read_dir(dir.path().join("skip.pbz/a/values"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, vec![std::ffi::OsString::from("zarr.json")]);
+    }
+
+    #[test]
     fn matrix_pipeline_writes_two_fields_for_two_sources() {
         let dir = TempDir::new().unwrap();
         let genome = Genome::new(vec![Contig {
@@ -1115,11 +1257,13 @@ mod multi_tests {
                 genome: genome.clone(),
                 dtypes: vec![Dtype::I32, Dtype::F32],
                 cells: vec!["5".into(), "1.5".into()],
+                covered: true,
             },
             ConstMulti {
                 genome: genome.clone(),
                 dtypes: vec![Dtype::I32, Dtype::F32],
                 cells: vec!["9".into(), "2.5".into()],
+                covered: true,
             },
         ];
         run_matrix_pipeline(
