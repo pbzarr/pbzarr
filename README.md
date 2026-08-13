@@ -7,7 +7,9 @@
 
 ## Synopsis
 
-pbzarr stores per-base genomic data in Zarr v3. A `.pbz` collection can hold depth, signal, masks, and other tracks for one sample or many samples.
+pbzarr is an array format for per-base genomic data. A track holds one value per base (depth, signal, a mask) for one sample or a whole cohort. A `.pbz` collection groups related tracks.
+
+The arrays are Zarr v3, so xarray, Dask, and other Zarr tools can read them directly. A question such as "mean depth across all samples in these windows" then becomes one array operation.
 
 pbzarr supports:
 
@@ -15,15 +17,27 @@ pbzarr supports:
 - one value or many labeled values at each base
 - compression across samples or other columns
 - parallel calculations with xarray and Dask
-- d4, bigWig, and BED imports
+- d4, bigWig, BED, and BAM/CRAM imports
 
-The project provides Rust and Python libraries. A command-line tool is planned.
+The project provides Rust and Python libraries and the `pbz` command-line tool.
 
 ## Motivation
 
-Per-base data often lives in one file per sample. Analysis then spends time opening files and joining results in Python.
+Many genomic measurements assign one value to every base in a genome: sequencing depth, assay signal, conservation scores, accessibility masks. Formats like d4, bigWig, and BED handle these values well for a single sample. They compress them into a small file and read regions fast.
 
-pbzarr stores related values in one array. This improves compression and lets array tools calculate across positions and samples at once.
+Most analyses, however, involve many samples at once: a population study, a case-control panel, every individual in a resequencing project. With one file per sample, a cohort of 200 samples is 200 files.
+
+Cohort questions are per-position questions across samples: the mean depth at each site, or the sites covered at 10x in at least 90% of samples. Every such question becomes the same loop: open each file, read the same region again, join the results. This loop is slow at genome scale, and its cost increases with each added sample.
+
+pbzarr stores the cohort as one two-dimensional array: one row per base, one column per sample. Values from all samples at a position sit next to each other on disk, so they compress together. Per-position questions become array operations that run in parallel across all positions and samples.
+
+## Data model
+
+pbzarr uses the [dataset model of xarray](https://docs.xarray.dev/en/stable/user-guide/data-structures.html#dataset). In this model, a dataset holds many variables, and the variables share the same coordinates. In pbzarr, the collection is the dataset, each track is one variable, and the coordinates are genomic positions.
+
+A track has at most these two dimensions. When data contains more than one kind of value, each kind goes into its own track. For example, depth, mapping quality, and a mask become three tracks in one collection. Because the tracks are separate, each kind keeps its own data type, fill value, and compression settings.
+
+Each track records its own genome. Tracks that record the same genome have the same length and the same base order, so pbzarr can open them together and calculate across them. See [format](#format) for more details.
 
 ## Python examples
 
@@ -125,13 +139,26 @@ study.pbz/
     └── contigs
 ```
 
-`values` holds the data. `contigs` and `offsets` map each chromosome to its rows in `values`. A track with columns also stores their labels.
+Each track group holds a fixed set of arrays:
+
+- `values`: the data, with contigs concatenated along the position axis in genome order. The shape is `(L,)` for a track without columns or `(L, n_columns)` with them, where `L` is the total length of the track's genome.
+- `contigs`: the contig names, in the same order.
+- `offsets`: an int64 index with one entry more than `contigs`. `offsets[i]` is the first row of contig `i`, so `offsets[i+1] - offsets[i]` is its length and the last entry equals `L`.
+- a column-label array, named after the column dimension (`sample` above). Present only when the track has columns.
+
+Every track declares one data type and one fill value, and positions with no data hold the fill value. The `values` array is chunked and compressed with Blosc (zstd with byte shuffle). For a track with columns, chunks extend across columns as well as positions, so values from different samples compress together.
+
+Region reads are index arithmetic. The rows for `chr2:10-20` are `offsets[i] + 10` up to `offsets[i] + 20`, where `i` is the index of chr2 in `contigs`. All coordinates are zero-based and half-open.
+
+A track's genome is the list of `(contig name, length)` pairs defined by `contigs` and `offsets`. There is no genome at the collection level: each track carries its own, and two tracks in one collection can cover different genomes. Each track also stores a genome checksum, the MD5 of its contig names and lengths sorted by name. Two tracks record the same genome exactly when their checksums are equal, and pbzarr applies this test whenever it aligns or combines tracks. A track can also store a genome name such as `hg38`, but the name is a human-readable label and has no part in the checksum.
+
+A track's `zarr.json` holds this metadata: the format version, the genome checksum and name, the coordinate convention, and the names of the index arrays. pbzarr writes the metadata block last during an import, so the block also marks the track as complete. A track group without it is incomplete, and opening a collection skips it.
 
 See the [design document](docs/DESIGN.md) for the full file rules and Rust API.
 
 ## Status
 
-pbzarr is under active development and has not reached version 1.0. The API and file rules may change. Remote writes and variable chunk sizes are planned.
+pbzarr is under active development and has not reached version 1.0. The API and file rules can change. Remote writes and variable chunk sizes are planned.
 
 ## Links
 

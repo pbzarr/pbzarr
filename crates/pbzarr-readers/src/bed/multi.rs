@@ -9,14 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use noodles_bgzf as bgzf;
-use noodles_core::Position;
-use noodles_core::region::Interval;
 use noodles_csi::BinningIndex;
 
 use pbzarr::genome::Genome;
 use pbzarr::import::{Config, Report, run_matrix_pipeline, run_multi_pipeline, run_wide_pipeline};
 use pbzarr::io::{ColumnSinkMut, Dtype, MultiValueReader, ReaderError};
 use pbzarr::{PbzError, PbzStore, Result, TrackConfig};
+
+use crate::coords::noodles_query_interval;
 
 use super::import::zero_fill;
 use super::reader::column_index_by_name;
@@ -254,19 +254,12 @@ impl MultiValueReader for BedMultiReader {
         end: u64,
         sinks: &mut [ColumnSinkMut<'_>],
     ) -> IoResult<()> {
-        if end <= start {
+        let Some(interval) = noodles_query_interval(start, end)? else {
             return Ok(());
-        }
+        };
         let Some(&ref_id) = self.shared.ref_ids.get(contig_name) else {
             return Ok(()); // contig absent from this BED -> leave as caller's fill
         };
-
-        // tabix/csi intervals are 1-based inclusive; our range is 0-based half-open.
-        let q_start = Position::try_from(start as usize + 1)
-            .map_err(|e| ReaderError::Other(anyhow::anyhow!("bad start {start}: {e}")))?;
-        let q_end = Position::try_from(end as usize)
-            .map_err(|e| ReaderError::Other(anyhow::anyhow!("bad end {end}: {e}")))?;
-        let interval = Interval::from(q_start..=q_end);
 
         let chunks = self
             .shared
