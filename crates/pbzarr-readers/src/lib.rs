@@ -5,10 +5,12 @@
 //! pipeline; the `from_<format>` functions are the bulk-import entry points.
 //! Future formats (bed, bedgraph) will land as sibling modules.
 
+pub mod bam;
 pub mod bed;
 pub mod bigwig;
 pub mod d4;
 
+pub use bam::{BamReader, DepthFilter, ImportMode, OverlapMode, from_bam};
 pub use bed::{
     BedColumnSpec, BedImportOptions, BedLayout, BedMultiReader, BedReader, BedSchema,
     ColumnSelector, InferRows, column_index_by_name, from_bed, from_bed_matrix, from_bed_multi,
