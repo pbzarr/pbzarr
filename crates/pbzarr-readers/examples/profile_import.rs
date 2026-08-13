@@ -12,10 +12,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use ndarray::ArrayViewMut2;
-use pbzarr::import::{Config, run_pipeline};
+use pbzarr::import::{Config, Source, run_pipeline};
 use pbzarr::io::{Dtype, ValueReader};
 use pbzarr::{Contig, Genome, PbzStore, TrackConfig};
-use pbzarr_readers::{D4Source, from_d4};
+use pbzarr_readers::from_d4;
 use tempfile::TempDir;
 
 #[derive(Debug)]
@@ -172,12 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t0 = Instant::now();
     let report = if let Some(ref d4) = args.d4 {
         // `from_d4` builds the genome and creates the (int32) track itself.
-        let sources: Vec<D4Source> = (0..args.cols)
-            .map(|_| D4Source {
-                path: d4.clone(),
-                column_label: None,
-            })
-            .collect();
+        let sources: Vec<Source> = (0..args.cols).map(|_| Source::new(d4.clone())).collect();
         from_d4(&mut store, "depth", &sources, import_cfg)?
     } else {
         // Synth path: create the u32 track ourselves, then drive the pipeline.

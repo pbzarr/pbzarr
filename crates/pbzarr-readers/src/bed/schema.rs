@@ -5,8 +5,8 @@ use std::path::Path;
 use pbzarr::io::Dtype;
 use pbzarr::{PbzError, Result};
 
-use super::import::{BedSource, column_label};
 use super::reader::open_bgzf;
+use pbzarr::import::Source;
 
 #[derive(Debug, Clone, Copy)]
 pub enum InferRows {
@@ -124,7 +124,7 @@ pub fn read_bed_layout(path: &Path) -> Result<BedLayout> {
 }
 
 pub(super) fn resolve_sources(
-    sources: &[BedSource],
+    sources: &[Source],
     options: &BedImportOptions,
 ) -> Result<ResolvedImport> {
     let first = sources
@@ -150,7 +150,7 @@ pub(super) fn resolve_sources(
             )));
         }
     }
-    let labels = sources.iter().map(column_label).collect::<Vec<_>>();
+    let labels = sources.iter().map(Source::label).collect::<Vec<_>>();
 
     if layout.n_cols == 3 {
         if options.fields.is_some() {
@@ -323,7 +323,7 @@ fn reject_overrides(options: &BedImportOptions) -> Result<()> {
 /// Per-field inference states plus whether every source was scanned to EOF.
 /// Only an exhaustive scan knows the true min/max, so only it may min-width.
 fn infer_states(
-    sources: &[BedSource],
+    sources: &[Source],
     columns: &[usize],
     limit: InferRows,
 ) -> Result<(Vec<InferenceState>, bool)> {

@@ -7,9 +7,9 @@ use std::path::PathBuf;
 
 use ndarray::{Ix1, Ix2};
 use pbzarr::genome::{Contig, Genome};
-use pbzarr::import::Config;
+use pbzarr::import::{Config, Source};
 use pbzarr::{PbzStore, Region};
-use pbzarr_readers::{BedSource, from_bed};
+use pbzarr_readers::from_bed;
 use tempfile::TempDir;
 
 use common::{htslib_available, write_bed_bgzip_tabix};
@@ -27,11 +27,8 @@ fn genome(contigs: &[(&str, u64)]) -> Genome {
     .unwrap()
 }
 
-fn src(path: PathBuf, label: &str) -> BedSource {
-    BedSource {
-        path,
-        column_label: Some(label.to_owned()),
-    }
+fn src(path: PathBuf, label: &str) -> Source {
+    Source::labeled(path, label.to_owned())
 }
 
 #[test]

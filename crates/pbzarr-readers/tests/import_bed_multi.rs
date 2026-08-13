@@ -10,7 +10,7 @@ use pbzarr::import::Config;
 use pbzarr::io::Dtype;
 use pbzarr::{PbzStore, Region};
 use pbzarr_readers::{
-    BedColumnSpec, BedImportOptions, BedSchema, BedSource, from_bed_matrix, from_bed_multi,
+    BedColumnSpec, BedImportOptions, BedSchema, Source, from_bed_matrix, from_bed_multi,
 };
 use tempfile::TempDir;
 
@@ -124,16 +124,7 @@ fn multi_source_matrix_import_roundtrip() {
     let mut store = PbzStore::create(dir.path().join("matrix.pbz")).unwrap();
     from_bed_matrix(
         &mut store,
-        &[
-            BedSource {
-                path: a,
-                column_label: Some("A".into()),
-            },
-            BedSource {
-                path: b,
-                column_label: Some("B".into()),
-            },
-        ],
+        &[Source::labeled(a, "A"), Source::labeled(b, "B")],
         genome(&[("chr1", 8)]),
         &BedImportOptions::default(),
         Config {
@@ -178,6 +169,62 @@ fn multi_source_matrix_import_roundtrip() {
             .into_iter()
             .all(|row| row.to_vec() == vec![1.5, 2.5])
     );
+}
+
+/// D-1 regression: one source with an explicit `column_dim` (no second
+/// source) must still build a rank-2, 1-column track through the `PerField`
+/// path -- `from_bed_matrix`'s single-vs-matrix pipeline dispatch has to key
+/// on that scalarity, not on source count, or it mis-routes into
+/// `run_multi_pipeline`'s scalar-only guard and errors.
+#[test]
+fn single_source_with_column_dim_is_one_column_2d() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::single_source_with_column_dim_is_one_column_2d: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "s1",
+        &["chrom", "start", "end", "cov"],
+        &[("chr1", 0, 8, vec!["4"])],
+    );
+    let mut store = PbzStore::create(dir.path().join("single_column_dim.pbz")).unwrap();
+    from_bed_matrix(
+        &mut store,
+        &[Source::new(bed)],
+        genome(&[("chr1", 8)]),
+        &BedImportOptions {
+            fields: Some(vec!["cov".into()]),
+            ..BedImportOptions::default()
+        },
+        Config {
+            column_dim: Some("sample".into()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let track = store.track("cov").unwrap();
+    assert_eq!(track.rank(), 2);
+    assert_eq!(track.columns_count().unwrap(), 1);
+    assert_eq!(track.column_dim(), Some("sample"));
+
+    let region = Region {
+        contig: store.genome_for("cov").unwrap().id("chr1").unwrap(),
+        start: 0,
+        end: 8,
+    };
+    let cov = store
+        .track("cov")
+        .unwrap()
+        .read_region::<u8>(&region)
+        .unwrap()
+        .into_dimensionality::<Ix2>()
+        .unwrap();
+    assert!(cov.rows().into_iter().all(|row| row.to_vec() == vec![4]));
 }
 
 #[test]
@@ -395,16 +442,7 @@ fn reordered_headers_are_rejected() {
         &[("chr1", 0, 8, vec!["2.5", "9"])],
     );
     let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
-    let sources = [
-        BedSource {
-            path: a,
-            column_label: None,
-        },
-        BedSource {
-            path: b,
-            column_label: None,
-        },
-    ];
+    let sources = [Source::new(a), Source::new(b)];
     let result = from_bed_matrix(
         &mut store,
         &sources,
@@ -430,16 +468,7 @@ fn headerless_bed4_cohort_roundtrip() {
     let a = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 0, 8, vec!["4"])]);
     let b = write_headerless_bed_bgzip_tabix(dir.path(), "s2", &[("chr1", 0, 8, vec!["9"])]);
     let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
-    let sources = [
-        BedSource {
-            path: a,
-            column_label: None,
-        },
-        BedSource {
-            path: b,
-            column_label: None,
-        },
-    ];
+    let sources = [Source::new(a), Source::new(b)];
     let options = BedImportOptions {
         track: Some("depth".into()),
         ..BedImportOptions::default()
@@ -488,10 +517,7 @@ fn headerless_without_track_errors() {
     let dir = TempDir::new().unwrap();
     let bed = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 0, 8, vec!["4"])]);
     let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
-    let sources = [BedSource {
-        path: bed,
-        column_label: None,
-    }];
+    let sources = [Source::new(bed)];
     let result = from_bed_matrix(
         &mut store,
         &sources,
@@ -511,10 +537,7 @@ fn bed3_imports_bool_presence() {
     let dir = TempDir::new().unwrap();
     let bed = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 2, 5, vec![])]);
     let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
-    let sources = [BedSource {
-        path: bed,
-        column_label: None,
-    }];
+    let sources = [Source::new(bed)];
     let options = BedImportOptions {
         track: Some("callable".into()),
         ..BedImportOptions::default()
@@ -567,10 +590,7 @@ fn single_source_wide_track_with_joint_inference() {
         ],
     );
     let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
-    let sources = [BedSource {
-        path: bed,
-        column_label: None,
-    }];
+    let sources = [Source::new(bed)];
     let options = BedImportOptions {
         track: Some("stats".into()),
         ..BedImportOptions::default()
@@ -623,10 +643,7 @@ fn wide_track_rejects_word_bool_field_before_creating_tracks() {
         &[("chr1", 0, 8, vec!["1.5", "false"])],
     );
     let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
-    let sources = [BedSource {
-        path: bed,
-        column_label: None,
-    }];
+    let sources = [Source::new(bed)];
     let options = BedImportOptions {
         track: Some("stats".into()),
         ..BedImportOptions::default()

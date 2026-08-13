@@ -3,7 +3,7 @@ mod multi;
 mod reader;
 mod schema;
 
-pub use import::{BedSource, from_bed};
+pub use import::from_bed;
 pub use multi::{
     BedColumnSpec, BedMultiReader, BedSchema, ColumnSelector, from_bed_matrix, from_bed_multi,
 };

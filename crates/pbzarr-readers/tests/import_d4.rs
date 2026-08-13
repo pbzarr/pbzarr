@@ -5,9 +5,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use pbzarr::import::Config;
+use pbzarr::import::{Config, Source};
 use pbzarr::{PbzStore, Region};
-use pbzarr_readers::{D4Source, from_d4};
+use pbzarr_readers::from_d4;
 use tempfile::TempDir;
 
 fn have_d4tools() -> bool {
@@ -89,12 +89,7 @@ fn sharded_scalar_import_matches_unsharded() {
     }
     let dir = TempDir::new().unwrap();
     let d4 = write_synthetic_d4(dir.path(), "chr1", 10_000);
-    let src = || {
-        vec![D4Source {
-            path: d4.clone(),
-            column_label: None,
-        }]
-    };
+    let src = || vec![Source::new(d4.clone())];
     let region = |store: &PbzStore| Region {
         contig: store.genome_for("depth").unwrap().id("chr1").unwrap(),
         start: 0,
@@ -152,12 +147,14 @@ fn sharded_cohort_import_matches_unsharded() {
         return;
     }
     let dir = TempDir::new().unwrap();
-    let sources: Vec<D4Source> = [0, 100, 200]
+    let sources: Vec<Source> = [0, 100, 200]
         .iter()
         .enumerate()
-        .map(|(i, &base)| D4Source {
-            path: write_synthetic_d4_offset(dir.path(), &format!("s{i}"), "chr1", 10_000, base),
-            column_label: Some(format!("s{i}")),
+        .map(|(i, &base)| {
+            Source::labeled(
+                write_synthetic_d4_offset(dir.path(), &format!("s{i}"), "chr1", 10_000, base),
+                format!("s{i}"),
+            )
         })
         .collect();
     let region = |store: &PbzStore| Region {
@@ -222,16 +219,7 @@ fn import_one_d4_into_scalar_track() {
 
     let store_path = dir.path().join("out.pbz");
     let mut store = PbzStore::create(&store_path).unwrap();
-    from_d4(
-        &mut store,
-        "depth",
-        &[D4Source {
-            path: d4,
-            column_label: None,
-        }],
-        Config::default(),
-    )
-    .unwrap();
+    from_d4(&mut store, "depth", &[Source::new(d4)], Config::default()).unwrap();
 
     let track = store.track("depth").unwrap();
     assert_eq!(track.rank(), 1);
@@ -283,10 +271,7 @@ fn import_d4_multi_contig_writes_correct_contigs() {
     from_d4(
         &mut store,
         "depth",
-        &[D4Source {
-            path: d4_path,
-            column_label: None,
-        }],
+        &[Source::new(d4_path)],
         Config::default(),
     )
     .unwrap();

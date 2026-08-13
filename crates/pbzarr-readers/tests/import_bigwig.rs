@@ -5,9 +5,9 @@ mod common;
 
 use std::path::Path;
 
-use pbzarr::import::Config;
+use pbzarr::import::{Config, Source};
 use pbzarr::{PbzStore, Region};
-use pbzarr_readers::{BigWigSource, from_bigwig};
+use pbzarr_readers::from_bigwig;
 use tempfile::TempDir;
 
 /// Banded intervals: positions [i*10, (i+1)*10) carry value `(i % 50) + 1 + base`.
@@ -49,16 +49,7 @@ fn import_one_bigwig_into_scalar_track() {
 
     let store_path = dir.path().join("out.pbz");
     let mut store = PbzStore::create(&store_path).unwrap();
-    from_bigwig(
-        &mut store,
-        "signal",
-        &[BigWigSource {
-            path: bw,
-            column_label: None,
-        }],
-        Config::default(),
-    )
-    .unwrap();
+    from_bigwig(&mut store, "signal", &[Source::new(bw)], Config::default()).unwrap();
 
     let track = store.track("signal").unwrap();
     assert_eq!(track.rank(), 1);
@@ -91,12 +82,7 @@ fn sharded_scalar_import_matches_unsharded() {
         &banded("chr1", 10_000, 0.0),
         false,
     );
-    let src = || {
-        vec![BigWigSource {
-            path: bw.clone(),
-            column_label: None,
-        }]
-    };
+    let src = || vec![Source::new(bw.clone())];
     let region = |store: &PbzStore| Region {
         contig: store.genome_for("signal").unwrap().id("chr1").unwrap(),
         start: 0,
@@ -148,18 +134,20 @@ fn sharded_scalar_import_matches_unsharded() {
 #[test]
 fn cohort_import_distinct_columns() {
     let dir = TempDir::new().unwrap();
-    let sources: Vec<BigWigSource> = [0.0f32, 100.0, 200.0]
+    let sources: Vec<Source> = [0.0f32, 100.0, 200.0]
         .iter()
         .enumerate()
-        .map(|(i, &base)| BigWigSource {
-            path: common::write_bigwig(
-                dir.path(),
-                &format!("s{i}"),
-                &[("chr1", 2_000)],
-                &banded("chr1", 2_000, base),
-                false,
-            ),
-            column_label: Some(format!("s{i}")),
+        .map(|(i, &base)| {
+            Source::labeled(
+                common::write_bigwig(
+                    dir.path(),
+                    &format!("s{i}"),
+                    &[("chr1", 2_000)],
+                    &banded("chr1", 2_000, base),
+                    false,
+                ),
+                format!("s{i}"),
+            )
         })
         .collect();
 
@@ -217,10 +205,7 @@ fn uncovered_positions_import_as_zero() {
     from_bigwig(
         &mut store,
         "signal",
-        &[BigWigSource {
-            path: bw,
-            column_label: None,
-        }],
+        &[Source::new(bw)],
         Config {
             chunk_size: Some(1_000),
             ..Config::default()

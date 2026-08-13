@@ -337,16 +337,7 @@ pub fn from_bed_multi(
         .map(|r| {
             // Uncovered positions read back as zero; the on-disk fill must match the
             // zero-filled scratch buffers the pipeline writes, so all-gap chunks elide.
-            let mut cfg = TrackConfig::new(r.dtype).fill_value(zero_fill(r.dtype));
-            if let Some(cs) = config.chunk_size {
-                cfg = cfg.chunk_size(cs);
-            }
-            if let Some(ss) = config.shard_size {
-                cfg = cfg.shard_size(ss);
-            }
-            if let Some(scs) = config.shard_column_size {
-                cfg = cfg.shard_column_size(scs);
-            }
+            let mut cfg = config.track_config(r.dtype, Some(zero_fill(r.dtype)), None, "sample");
             if let Some(desc) = &r.description {
                 cfg = cfg.description(desc.clone());
             }
@@ -366,7 +357,7 @@ pub fn from_bed_multi(
 /// output requires `Config::column_dim`.
 pub fn from_bed_matrix(
     store: &mut PbzStore,
-    sources: &[super::import::BedSource],
+    sources: &[pbzarr::import::Source],
     genome: Genome,
     options: &BedImportOptions,
     config: Config,
@@ -386,17 +377,14 @@ pub fn from_bed_matrix(
             column,
             labels,
         } => {
-            let mut cfg = base_track_config(dtype, &config);
-            if sources.len() > 1 {
-                cfg = cfg
-                    .columns(labels)
-                    .column_dim(config.column_dim.as_deref().unwrap_or("sample"));
-                if let Some(ccs) = config.column_chunk_size {
-                    cfg = cfg.column_chunk_size(ccs);
-                }
-            }
+            // Uncovered positions read back as zero; the on-disk fill must match
+            // the zero-filled scratch buffers the pipeline writes, so all-gap
+            // chunks elide.
+            let scalar = sources.len() <= 1 && config.column_dim.is_none();
+            let column_labels = (!scalar).then_some(labels);
+            let cfg = config.track_config(dtype, Some(zero_fill(dtype)), column_labels, "sample");
             let readers = open_readers(sources, &[(column, dtype)], &genome)?;
-            run_single_or_matrix(store, vec![(track, genome, cfg)], readers, config)
+            run_single_or_matrix(store, vec![(track, genome, cfg)], readers, scalar, config)
         }
         ResolvedImport::Wide {
             track,
@@ -404,12 +392,10 @@ pub fn from_bed_matrix(
             columns,
             column_labels,
         } => {
-            let mut cfg = base_track_config(dtype, &config)
-                .columns(column_labels)
-                .column_dim(config.column_dim.as_deref().unwrap_or("column"));
-            if let Some(ccs) = config.column_chunk_size {
-                cfg = cfg.column_chunk_size(ccs);
-            }
+            // `two_d` above already requires `column_dim` whenever `Wide` is
+            // resolved, so the column axis is unconditional here.
+            let cfg =
+                config.track_config(dtype, Some(zero_fill(dtype)), Some(column_labels), "column");
             let reader_columns: Vec<(Option<usize>, Dtype)> =
                 columns.into_iter().map(|c| (Some(c), dtype)).collect();
             let reader = BedMultiReader::open(&sources[0].path, reader_columns, genome.clone())
@@ -423,18 +409,17 @@ pub fn from_bed_matrix(
             columns,
             labels,
         } => {
+            let scalar = sources.len() <= 1 && config.column_dim.is_none();
             let specs = fields
                 .iter()
                 .map(|field| {
-                    let mut cfg = base_track_config(field.dtype, &config);
-                    if sources.len() > 1 {
-                        cfg = cfg
-                            .columns(labels.clone())
-                            .column_dim(config.column_dim.as_deref().unwrap_or("sample"));
-                        if let Some(ccs) = config.column_chunk_size {
-                            cfg = cfg.column_chunk_size(ccs);
-                        }
-                    }
+                    let column_labels = (!scalar).then(|| labels.clone());
+                    let cfg = config.track_config(
+                        field.dtype,
+                        Some(zero_fill(field.dtype)),
+                        column_labels,
+                        "sample",
+                    );
                     (field.name.clone(), genome.clone(), cfg)
                 })
                 .collect();
@@ -444,29 +429,13 @@ pub fn from_bed_matrix(
                 .map(|(column, field)| (Some(*column), field.dtype))
                 .collect();
             let readers = open_readers(sources, &reader_columns, &genome)?;
-            run_single_or_matrix(store, specs, readers, config)
+            run_single_or_matrix(store, specs, readers, scalar, config)
         }
     }
 }
 
-fn base_track_config(dtype: Dtype, config: &Config) -> TrackConfig {
-    // Uncovered positions read back as zero; the on-disk fill must match the
-    // zero-filled scratch buffers the pipeline writes, so all-gap chunks elide.
-    let mut cfg = TrackConfig::new(dtype).fill_value(zero_fill(dtype));
-    if let Some(cs) = config.chunk_size {
-        cfg = cfg.chunk_size(cs);
-    }
-    if let Some(ss) = config.shard_size {
-        cfg = cfg.shard_size(ss);
-    }
-    if let Some(scs) = config.shard_column_size {
-        cfg = cfg.shard_column_size(scs);
-    }
-    cfg
-}
-
 fn open_readers(
-    sources: &[super::import::BedSource],
+    sources: &[pbzarr::import::Source],
     columns: &[(Option<usize>, Dtype)],
     genome: &Genome,
 ) -> Result<Vec<BedMultiReader>> {
@@ -483,11 +452,16 @@ fn run_single_or_matrix(
     store: &mut PbzStore,
     specs: Vec<(String, Genome, TrackConfig)>,
     readers: Vec<BedMultiReader>,
+    // Whether the specs built above are rank-1: source count alone isn't
+    // enough (D-1: an explicit `column_dim` makes even a single source
+    // rank-2), so the caller passes the same scalarity it used to build the
+    // `TrackConfig`s, and `run_multi_pipeline`'s rank-1 requirement is
+    // dispatched on that instead.
+    scalar: bool,
     config: Config,
 ) -> Result<Report> {
-    let source_count = readers.len();
     store.create_tracks_with(specs, move |tracks| {
-        if source_count == 1 {
+        if scalar {
             let reader = readers
                 .into_iter()
                 .next()
