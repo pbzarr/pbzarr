@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::io::BufRead;
+use std::path::Path;
 
 use pbzarr::io::Dtype;
 use pbzarr::{PbzError, Result};
@@ -14,9 +15,15 @@ pub enum InferRows {
 }
 
 pub struct BedImportOptions {
+    /// Header field names to import; `None` selects every value field.
     pub fields: Option<Vec<String>>,
+    /// Per-field dtype overrides for headered per-field imports.
     pub dtype_overrides: BTreeMap<String, Dtype>,
     pub infer_rows: InferRows,
+    /// Output track name; required for BED3, headerless BED4, and wide imports.
+    pub track: Option<String>,
+    /// Value dtype for headerless BED4 input (skips inference).
+    pub dtype: Option<Dtype>,
 }
 
 impl Default for BedImportOptions {
@@ -25,6 +32,8 @@ impl Default for BedImportOptions {
             fields: None,
             dtype_overrides: BTreeMap::new(),
             infer_rows: InferRows::Sample(1_000),
+            track: None,
+            dtype: None,
         }
     }
 }
@@ -34,119 +43,313 @@ pub(super) struct ResolvedField {
     pub dtype: Dtype,
 }
 
-pub(super) struct ResolvedSource {
-    pub columns: Vec<usize>,
-    pub label: String,
+/// The output shape a set of sources + options resolves to. Sources are always
+/// the column axis when there are several; a single multi-field source turns
+/// its fields into the column axis instead.
+pub(super) enum ResolvedImport {
+    /// Headered: each selected field becomes its own track (2D over sources
+    /// when there are several).
+    PerField {
+        fields: Vec<ResolvedField>,
+        columns: Vec<usize>,
+        labels: Vec<String>,
+    },
+    /// BED3 presence (`column` = None) or headerless BED4 (`column` = Some(3)):
+    /// one track, scalar for one source, 2D over sources otherwise.
+    SingleTrack {
+        track: String,
+        dtype: Dtype,
+        column: Option<usize>,
+        labels: Vec<String>,
+    },
+    /// One source, several fields: one 2D track whose columns are the fields.
+    Wide {
+        track: String,
+        dtype: Dtype,
+        columns: Vec<usize>,
+        column_labels: Vec<String>,
+    },
+}
+
+/// The shape of a BED file's first line: its header field names (if the line
+/// is a `#`-prefixed header) and total column count.
+pub struct BedLayout {
+    pub header: Option<Vec<String>>,
+    pub n_cols: usize,
+}
+
+/// Sniff a BED's layout from its first line.
+pub fn read_bed_layout(path: &Path) -> Result<BedLayout> {
+    let mut reader = open_bgzf(path).map_err(|error| PbzError::Store(error.to_string()))?;
+    let mut line = Vec::new();
+    reader
+        .read_until(b'\n', &mut line)
+        .map_err(|error| PbzError::Store(format!("read BED {}: {error}", path.display())))?;
+    let text = std::str::from_utf8(&line)
+        .map_err(|error| {
+            PbzError::Metadata(format!("BED {} is not UTF-8: {error}", path.display()))
+        })?
+        .trim_end();
+    if text.is_empty() {
+        return Err(PbzError::Metadata(format!(
+            "BED {} is empty",
+            path.display()
+        )));
+    }
+    if let Some(header) = text.strip_prefix('#') {
+        let fields = header.split('\t').map(str::to_owned).collect::<Vec<_>>();
+        if fields.len() < 3 || fields[..3] != ["chrom", "start", "end"] {
+            return Err(PbzError::Metadata(format!(
+                "BED {} has invalid coordinate header",
+                path.display()
+            )));
+        }
+        Ok(BedLayout {
+            n_cols: fields.len(),
+            header: Some(fields),
+        })
+    } else {
+        let n_cols = text.split('\t').count();
+        if n_cols < 3 {
+            return Err(PbzError::Metadata(format!(
+                "BED {} has fewer than 3 columns",
+                path.display()
+            )));
+        }
+        Ok(BedLayout {
+            header: None,
+            n_cols,
+        })
+    }
 }
 
 pub(super) fn resolve_sources(
     sources: &[BedSource],
     options: &BedImportOptions,
-) -> Result<(Vec<ResolvedField>, Vec<ResolvedSource>)> {
+) -> Result<ResolvedImport> {
     let first = sources
         .first()
-        .ok_or_else(|| PbzError::Metadata("bed matrix import: no sources".into()))?;
-    let first_header = read_header(&first.path)?;
+        .ok_or_else(|| PbzError::Metadata("bed import: no sources".into()))?;
+    let layout = read_bed_layout(&first.path)?;
+    for source in &sources[1..] {
+        let other = read_bed_layout(&source.path)?;
+        if other.n_cols != layout.n_cols {
+            return Err(PbzError::Metadata(format!(
+                "bed import: {} has {} columns but {} has {}",
+                source.path.display(),
+                other.n_cols,
+                first.path.display(),
+                layout.n_cols
+            )));
+        }
+        if other.header != layout.header {
+            return Err(PbzError::Metadata(format!(
+                "bed import: {} header differs from {}",
+                source.path.display(),
+                first.path.display()
+            )));
+        }
+    }
+    let labels = sources.iter().map(column_label).collect::<Vec<_>>();
+
+    if layout.n_cols == 3 {
+        if options.fields.is_some() {
+            return Err(PbzError::Metadata(
+                "bed import: BED3 input has no value fields to select".into(),
+            ));
+        }
+        if options.dtype.is_some() {
+            return Err(PbzError::Metadata(
+                "bed import: BED3 input is always bool; drop the dtype".into(),
+            ));
+        }
+        reject_overrides(options)?;
+        return Ok(ResolvedImport::SingleTrack {
+            track: required_track(options, "for BED3 input")?,
+            dtype: Dtype::Bool,
+            column: None,
+            labels,
+        });
+    }
+
+    let Some(header) = &layout.header else {
+        if layout.n_cols > 4 {
+            return Err(PbzError::Metadata(format!(
+                "bed import: {} has {} value fields and no header; add a header line or use a schema",
+                first.path.display(),
+                layout.n_cols - 3
+            )));
+        }
+        if options.fields.is_some() {
+            return Err(PbzError::Metadata(
+                "bed import: field selection requires a #-prefixed header".into(),
+            ));
+        }
+        reject_overrides(options)?;
+        let dtype = match options.dtype {
+            Some(dtype) => dtype,
+            None => {
+                let mut states = infer_states(sources, &[3], options.infer_rows)?;
+                states
+                    .pop()
+                    .ok_or_else(|| {
+                        PbzError::Metadata("bed import: inference produced no dtype".into())
+                    })?
+                    .finish()?
+            }
+        };
+        return Ok(ResolvedImport::SingleTrack {
+            track: required_track(options, "for headerless input")?,
+            dtype,
+            column: Some(3),
+            labels,
+        });
+    };
+
+    if options.dtype.is_some() {
+        return Err(PbzError::Metadata(
+            "bed import: a bare dtype only applies to headerless BED4 input".into(),
+        ));
+    }
     let selected = options
         .fields
         .clone()
-        .unwrap_or_else(|| first_header[3..].to_vec());
+        .unwrap_or_else(|| header[3..].to_vec());
     if selected.is_empty() {
         return Err(PbzError::Metadata(
-            "bed matrix import: no value fields selected".into(),
+            "bed import: no value fields selected".into(),
         ));
     }
     let mut seen = HashSet::new();
     if selected.iter().any(|name| !seen.insert(name.clone())) {
         return Err(PbzError::Metadata(
-            "bed matrix import: duplicate selected field".into(),
+            "bed import: duplicate selected field".into(),
         ));
     }
-    let mut inference = vec![InferenceState::default(); selected.len()];
-    let mut resolved = Vec::with_capacity(sources.len());
-    for source in sources {
-        let header = read_header(&source.path)?;
-        let index: HashMap<_, _> = header
-            .into_iter()
-            .enumerate()
-            .map(|(i, name)| (name, i))
-            .collect();
-        let columns = selected
+    let columns = selected
+        .iter()
+        .map(|name| {
+            header
+                .iter()
+                .position(|field| field == name)
+                .filter(|index| *index >= 3)
+                .ok_or_else(|| {
+                    PbzError::Metadata(format!(
+                        "bed import: field {name:?} is not a value field of the header"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if sources.len() == 1 && selected.len() > 1 {
+        reject_overrides(options)?;
+        let states = infer_states(sources, &columns, options.infer_rows)?;
+        let dtype = states
             .iter()
-            .map(|name| {
-                index
-                    .get(name)
-                    .copied()
-                    .filter(|index| *index >= 3)
-                    .ok_or_else(|| {
-                        PbzError::Metadata(format!(
-                            "bed matrix import: field {name:?} missing from {}",
-                            source.path.display()
-                        ))
-                    })
+            .cloned()
+            .reduce(|mut joint, state| {
+                joint.merge(&state);
+                joint
             })
-            .collect::<Result<Vec<_>>>()?;
-        sample_cells(source, &columns, options.infer_rows, &mut inference)?;
-        resolved.push(ResolvedSource {
+            .ok_or_else(|| PbzError::Metadata("bed import: inference produced no dtype".into()))?
+            .finish()?;
+        // A true/false word column can only ever be bool; the import parser
+        // will not read the words back as a number, so refuse to fold one into
+        // a numeric wide track before any track is created.
+        if dtype != Dtype::Bool {
+            let word_bool_fields = selected
+                .iter()
+                .zip(&states)
+                .filter(|(_, state)| state.saw_word_bool)
+                .map(|(name, _)| format!("{name:?}"))
+                .collect::<Vec<_>>();
+            if !word_bool_fields.is_empty() {
+                return Err(PbzError::Metadata(format!(
+                    "bed import: field(s) {} hold true/false and cannot join a {dtype} wide track; drop them with a field selection or import them via a schema",
+                    word_bool_fields.join(", ")
+                )));
+            }
+        }
+        return Ok(ResolvedImport::Wide {
+            track: required_track(options, "when several fields form one wide track")?,
+            dtype,
             columns,
-            label: column_label(source),
+            column_labels: selected,
         });
+    }
+
+    if options.track.is_some() {
+        return Err(PbzError::Metadata(
+            "bed import: a track name only applies to single-track imports; fields name their own tracks"
+                .into(),
+        ));
     }
     let fields = selected
         .into_iter()
-        .zip(inference)
-        .map(|(name, inference)| {
+        .zip(infer_states(sources, &columns, options.infer_rows)?)
+        .map(|(name, state)| {
             let dtype = options
                 .dtype_overrides
                 .get(&name)
                 .copied()
                 .map(Ok)
-                .unwrap_or_else(|| inference.finish())?;
+                .unwrap_or_else(|| state.finish())?;
             Ok(ResolvedField { name, dtype })
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok((fields, resolved))
+    Ok(ResolvedImport::PerField {
+        fields,
+        columns,
+        labels,
+    })
 }
 
-fn read_header(path: &std::path::Path) -> Result<Vec<String>> {
-    let mut reader = open_bgzf(path).map_err(|error| PbzError::Store(error.to_string()))?;
-    let mut line = Vec::new();
-    reader
-        .read_until(b'\n', &mut line)
-        .map_err(|error| PbzError::Store(format!("read BED header {}: {error}", path.display())))?;
-    let line = std::str::from_utf8(&line).map_err(|error| {
-        PbzError::Metadata(format!(
-            "BED header {} is not UTF-8: {error}",
-            path.display()
+fn required_track(options: &BedImportOptions, context: &str) -> Result<String> {
+    options.track.clone().ok_or_else(|| {
+        PbzError::Metadata(format!("bed import: a track name is required {context}"))
+    })
+}
+
+fn reject_overrides(options: &BedImportOptions) -> Result<()> {
+    if options.dtype_overrides.is_empty() {
+        Ok(())
+    } else {
+        Err(PbzError::Metadata(
+            "bed import: per-field dtype overrides only apply to headered per-field imports".into(),
         ))
-    })?;
-    let Some(header) = line.strip_prefix('#') else {
-        return Err(PbzError::Metadata(format!(
-            "BED {} needs a #-prefixed header",
-            path.display()
-        )));
-    };
-    let fields = header
-        .trim_end()
-        .split('\t')
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if fields.len() < 4 || fields[..3] != ["chrom", "start", "end"] {
-        return Err(PbzError::Metadata(format!(
-            "BED {} has invalid coordinate header",
-            path.display()
-        )));
     }
-    Ok(fields)
 }
 
-fn sample_cells(
-    source: &BedSource,
+fn infer_states(
+    sources: &[BedSource],
+    columns: &[usize],
+    limit: InferRows,
+) -> Result<Vec<InferenceState>> {
+    let mut states = vec![InferenceState::default(); columns.len()];
+    for source in sources {
+        sample_columns(&source.path, columns, limit, &mut states)?;
+    }
+    Ok(states)
+}
+
+/// Sample `bed_gz` and infer a dtype per file column (0-based, `>= 3`).
+pub fn infer_bed_dtypes(
+    bed_gz: &Path,
+    columns: &[usize],
+    infer_rows: InferRows,
+) -> Result<Vec<Dtype>> {
+    let mut states = vec![InferenceState::default(); columns.len()];
+    sample_columns(bed_gz, columns, infer_rows, &mut states)?;
+    states.into_iter().map(InferenceState::finish).collect()
+}
+
+fn sample_columns(
+    path: &Path,
     columns: &[usize],
     limit: InferRows,
     inference: &mut [InferenceState],
 ) -> Result<()> {
-    let mut reader = open_bgzf(&source.path).map_err(|error| PbzError::Store(error.to_string()))?;
+    let mut reader = open_bgzf(path).map_err(|error| PbzError::Store(error.to_string()))?;
     let mut line = Vec::new();
     let mut count = 0usize;
     while reader
@@ -160,10 +363,7 @@ fn sample_cells(
             let cells = text.trim_end().split('\t').collect::<Vec<_>>();
             for (field, column) in columns.iter().enumerate() {
                 inference[field].observe(cells.get(*column).ok_or_else(|| {
-                    PbzError::Metadata(format!(
-                        "BED {} has no column {column}",
-                        source.path.display()
-                    ))
+                    PbzError::Metadata(format!("BED {} has no column {column}", path.display()))
                 })?)?;
             }
             count += 1;
@@ -192,6 +392,9 @@ where
 #[derive(Clone)]
 struct InferenceState {
     bool_only: bool,
+    /// The column held a `true`/`false` word literal; such cells only parse
+    /// back as bool at import time, never as a number.
+    saw_word_bool: bool,
     saw_decimal: bool,
     f32_finite: bool,
     min: Option<i128>,
@@ -202,6 +405,7 @@ impl Default for InferenceState {
     fn default() -> Self {
         Self {
             bool_only: true,
+            saw_word_bool: false,
             saw_decimal: false,
             f32_finite: true,
             min: None,
@@ -217,8 +421,14 @@ impl InferenceState {
             return Err(PbzError::Metadata("bed type inference: empty value".into()));
         }
         let integer = match cell {
-            "true" | "True" | "TRUE" => Some(1),
-            "false" | "False" | "FALSE" => Some(0),
+            "true" | "True" | "TRUE" => {
+                self.saw_word_bool = true;
+                Some(1)
+            }
+            "false" | "False" | "FALSE" => {
+                self.saw_word_bool = true;
+                Some(0)
+            }
             _ => cell.parse::<i128>().ok(),
         };
         if let Some(value) = integer {
@@ -250,6 +460,23 @@ impl InferenceState {
             self.f32_finite = false;
         }
         Ok(())
+    }
+
+    /// Combine two sampled states; joint (wide) inference merges the per-field
+    /// states so one dtype covers every field.
+    fn merge(&mut self, other: &Self) {
+        self.bool_only &= other.bool_only;
+        self.saw_word_bool |= other.saw_word_bool;
+        self.saw_decimal |= other.saw_decimal;
+        self.f32_finite &= other.f32_finite;
+        self.min = match (self.min, other.min) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.max = match (self.max, other.max) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
     }
 
     fn finish(self) -> Result<Dtype> {
@@ -312,11 +539,12 @@ mod tests {
     }
 
     #[test]
-    fn inference_state_discards_cells_after_observing_them() {
-        let mut state = InferenceState::default();
-        for value in ["-129", "128", "127"] {
-            state.observe(value).unwrap();
-        }
-        assert_eq!(state.finish().unwrap(), Dtype::I16);
+    fn merge_widens_to_cover_both_ranges() {
+        let mut a = InferenceState::default();
+        a.observe("3").unwrap();
+        let mut b = InferenceState::default();
+        b.observe("70000").unwrap();
+        a.merge(&b);
+        assert_eq!(a.finish().unwrap(), Dtype::U32);
     }
 }

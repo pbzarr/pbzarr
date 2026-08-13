@@ -6,7 +6,7 @@
 use std::fmt::Display;
 use std::ops::Range;
 
-use ndarray::{Array1, Array2, ArrayViewMut1};
+use ndarray::{Array1, Array2, ArrayViewMut1, ArrayViewMut2, Axis};
 
 use crate::io::dtype::Dtype;
 use crate::io::error::{ReaderError, Result};
@@ -113,6 +113,49 @@ impl MatrixBuffer {
         }
     }
 
+    /// One disjoint mutable sink per column over the given row range, so a
+    /// single reader can fill every column of one tile in one pass.
+    pub fn sink_columns(&mut self, rows: Range<usize>) -> Vec<ColumnSinkMut<'_>> {
+        match self {
+            MatrixBuffer::U8(a) => collect_column_sinks(a.slice_mut(ndarray::s![rows, ..]))
+                .into_iter()
+                .map(ColumnSinkMut::U8)
+                .collect(),
+            MatrixBuffer::U16(a) => collect_column_sinks(a.slice_mut(ndarray::s![rows, ..]))
+                .into_iter()
+                .map(ColumnSinkMut::U16)
+                .collect(),
+            MatrixBuffer::U32(a) => collect_column_sinks(a.slice_mut(ndarray::s![rows, ..]))
+                .into_iter()
+                .map(ColumnSinkMut::U32)
+                .collect(),
+            MatrixBuffer::I8(a) => collect_column_sinks(a.slice_mut(ndarray::s![rows, ..]))
+                .into_iter()
+                .map(ColumnSinkMut::I8)
+                .collect(),
+            MatrixBuffer::I16(a) => collect_column_sinks(a.slice_mut(ndarray::s![rows, ..]))
+                .into_iter()
+                .map(ColumnSinkMut::I16)
+                .collect(),
+            MatrixBuffer::I32(a) => collect_column_sinks(a.slice_mut(ndarray::s![rows, ..]))
+                .into_iter()
+                .map(ColumnSinkMut::I32)
+                .collect(),
+            MatrixBuffer::F32(a) => collect_column_sinks(a.slice_mut(ndarray::s![rows, ..]))
+                .into_iter()
+                .map(ColumnSinkMut::F32)
+                .collect(),
+            MatrixBuffer::F64(a) => collect_column_sinks(a.slice_mut(ndarray::s![rows, ..]))
+                .into_iter()
+                .map(ColumnSinkMut::F64)
+                .collect(),
+            MatrixBuffer::Bool(a) => collect_column_sinks(a.slice_mut(ndarray::s![rows, ..]))
+                .into_iter()
+                .map(ColumnSinkMut::Bool)
+                .collect(),
+        }
+    }
+
     pub(crate) fn write_to_track(
         self,
         track: &Track,
@@ -149,6 +192,19 @@ impl MatrixBuffer {
             }
         }
     }
+}
+
+/// Split a rank-2 view into one rank-1 view per column, all borrowing the
+/// original lifetime (repeated `split_at` sidesteps the borrow checker's
+/// one-`&mut`-at-a-time rule for a plain iterator).
+fn collect_column_sinks<T>(mut view: ArrayViewMut2<'_, T>) -> Vec<ArrayViewMut1<'_, T>> {
+    let mut sinks = Vec::with_capacity(view.ncols());
+    while view.ncols() > 0 {
+        let (column, rest) = view.split_at(Axis(1), 1);
+        sinks.push(column.remove_axis(Axis(1)));
+        view = rest;
+    }
+    sinks
 }
 
 /// A borrowing, dtype-tagged view a reader fills. The reader hands raw cells to

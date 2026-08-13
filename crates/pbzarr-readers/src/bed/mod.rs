@@ -8,4 +8,4 @@ pub use multi::{
     BedColumnSpec, BedMultiReader, BedSchema, ColumnSelector, from_bed_matrix, from_bed_multi,
 };
 pub use reader::{BedReader, column_index_by_name};
-pub use schema::{BedImportOptions, InferRows};
+pub use schema::{BedImportOptions, BedLayout, InferRows, infer_bed_dtypes, read_bed_layout};

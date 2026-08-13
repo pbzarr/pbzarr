@@ -14,14 +14,14 @@ use noodles_core::region::Interval;
 use noodles_csi::BinningIndex;
 
 use pbzarr::genome::Genome;
-use pbzarr::import::{Config, Report, run_matrix_pipeline, run_multi_pipeline};
+use pbzarr::import::{Config, Report, run_matrix_pipeline, run_multi_pipeline, run_wide_pipeline};
 use pbzarr::io::{ColumnSinkMut, Dtype, MultiValueReader, ReaderError};
 use pbzarr::{PbzError, PbzStore, Result, TrackConfig};
 
 use super::import::zero_fill;
 use super::reader::column_index_by_name;
 use super::reader::open_bgzf;
-use super::schema::{BedImportOptions, resolve_sources};
+use super::schema::{BedImportOptions, ResolvedImport, resolve_sources};
 
 /// Reader-side result alias (parse/IO errors), distinct from `pbzarr::Result`.
 type IoResult<T> = std::result::Result<T, ReaderError>;
@@ -89,11 +89,6 @@ pub(super) fn resolve(bed_gz: &Path, schema: &BedSchema) -> Result<Vec<Resolved>
     let mut out: Vec<Resolved> = Vec::with_capacity(schema.0.len());
     let mut seen: HashSet<String> = HashSet::new();
     for spec in &schema.0 {
-        if !matches!(spec.dtype, Dtype::I32 | Dtype::F32 | Dtype::Bool) {
-            return Err(PbzError::InvalidDtype {
-                dtype: format!("bed multi import unsupported dtype {}", spec.dtype),
-            });
-        }
         let (file_col, default_name) = match &spec.selector {
             ColumnSelector::Index(i) => (*i, None),
             ColumnSelector::Name(n) => {
@@ -132,7 +127,7 @@ struct MultiShared {
     path: PathBuf,
     index: noodles_tabix::Index,
     ref_ids: HashMap<String, usize>,
-    columns: Vec<(usize, Dtype)>,
+    columns: Vec<(Option<usize>, Dtype)>,
     dtypes: Vec<Dtype>,
     genome: Genome,
 }
@@ -146,11 +141,12 @@ pub struct BedMultiReader {
 
 impl BedMultiReader {
     /// Open a bgzipped, tabix-indexed BED. `columns` is `(file column, dtype)`
-    /// in track order; every file column must be `>= 3`. `genome`'s contig
-    /// names must match the BED's.
+    /// in track order; every file column must be `>= 3`. A `None` column is a
+    /// presence column: covered positions read as `1` (BED3 masks). `genome`'s
+    /// contig names must match the BED's.
     pub fn open<P: AsRef<Path>>(
         bed_gz: P,
-        columns: Vec<(usize, Dtype)>,
+        columns: Vec<(Option<usize>, Dtype)>,
         genome: Genome,
     ) -> IoResult<Self> {
         let path = bed_gz.as_ref().to_path_buf();
@@ -226,13 +222,16 @@ impl BedMultiReader {
         let (rel_lo, rel_hi) = ((lo - win_start) as usize, (hi - win_start) as usize);
 
         for (col_idx, (file_col, _dt)) in self.shared.columns.iter().enumerate() {
-            let cell = cols.get(*file_col).copied().ok_or_else(|| {
-                ReaderError::Other(anyhow::anyhow!(
-                    "line has no column {} in {}",
-                    file_col,
-                    self.shared.path.display()
-                ))
-            })?;
+            let cell = match file_col {
+                Some(file_col) => cols.get(*file_col).copied().ok_or_else(|| {
+                    ReaderError::Other(anyhow::anyhow!(
+                        "line has no column {} in {}",
+                        file_col,
+                        self.shared.path.display()
+                    ))
+                })?,
+                None => "1",
+            };
             sinks[col_idx].fill_run(rel_lo, rel_hi, cell)?;
         }
         Ok(())
@@ -327,7 +326,10 @@ pub fn from_bed_multi(
 ) -> Result<Report> {
     let resolved = resolve(bed_gz, schema)?;
 
-    let columns: Vec<(usize, Dtype)> = resolved.iter().map(|r| (r.file_col, r.dtype)).collect();
+    let columns: Vec<(Option<usize>, Dtype)> = resolved
+        .iter()
+        .map(|r| (Some(r.file_col), r.dtype))
+        .collect();
     let reader = BedMultiReader::open(bed_gz, columns, genome.clone())
         .map_err(|e| PbzError::Store(format!("open {}: {e}", bed_gz.display())))?;
     let specs = resolved
@@ -357,12 +359,11 @@ pub fn from_bed_multi(
     })
 }
 
-/// Import selected fields from one or more tabix-indexed BED sources.
-///
-/// One source creates one scalar track per field. Several sources create one
-/// `(position, column)` track per field, with source labels as coordinates.
-/// Headers are reconciled by field name and dtypes are inferred unless an
-/// override is supplied in [`BedImportOptions`].
+/// Import BED sources following the default shape table: BED3 becomes a bool
+/// presence track, headerless BED4 a single value track, headered fields their
+/// own tracks (2D over sources when there are several), and a single
+/// multi-field source one wide 2D track whose columns are the fields. Any 2D
+/// output requires `Config::column_dim`.
 pub fn from_bed_matrix(
     store: &mut PbzStore,
     sources: &[super::import::BedSource],
@@ -370,56 +371,127 @@ pub fn from_bed_matrix(
     options: &BedImportOptions,
     config: Config,
 ) -> Result<Report> {
-    let (fields, resolved_sources) = resolve_sources(sources, options)?;
-    let labels = resolved_sources
-        .iter()
-        .map(|source| source.label.clone())
-        .collect::<Vec<_>>();
-    let specs = fields
-        .iter()
-        .map(|field| {
-            let mut track_config = TrackConfig::new(field.dtype).fill_value(zero_fill(field.dtype));
-            if let Some(chunk_size) = config.chunk_size {
-                track_config = track_config.chunk_size(chunk_size);
-            }
-            if let Some(shard_size) = config.shard_size {
-                track_config = track_config.shard_size(shard_size);
-            }
-            if let Some(shard_columns) = config.shard_column_size {
-                track_config = track_config.shard_column_size(shard_columns);
-            }
+    let resolved = resolve_sources(sources, options)?;
+    let two_d = matches!(resolved, ResolvedImport::Wide { .. }) || sources.len() > 1;
+    if two_d && config.column_dim.is_none() {
+        return Err(PbzError::Metadata(
+            "bed import: 2D output requires a column dimension name".into(),
+        ));
+    }
+
+    match resolved {
+        ResolvedImport::SingleTrack {
+            track,
+            dtype,
+            column,
+            labels,
+        } => {
+            let mut cfg = base_track_config(dtype, &config);
             if sources.len() > 1 {
-                track_config = track_config
-                    .columns(labels.clone())
+                cfg = cfg
+                    .columns(labels)
                     .column_dim(config.column_dim.as_deref().unwrap_or("sample"));
-                if let Some(column_chunk_size) = config.column_chunk_size {
-                    track_config = track_config.column_chunk_size(column_chunk_size);
+                if let Some(ccs) = config.column_chunk_size {
+                    cfg = cfg.column_chunk_size(ccs);
                 }
             }
-            Ok((field.name.clone(), genome.clone(), track_config))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let readers = sources
-        .iter()
-        .zip(&resolved_sources)
-        .map(|(source, resolved)| {
-            let columns = resolved
-                .columns
+            let readers = open_readers(sources, &[(column, dtype)], &genome)?;
+            run_single_or_matrix(store, vec![(track, genome, cfg)], readers, config)
+        }
+        ResolvedImport::Wide {
+            track,
+            dtype,
+            columns,
+            column_labels,
+        } => {
+            let mut cfg = base_track_config(dtype, &config)
+                .columns(column_labels)
+                .column_dim(config.column_dim.as_deref().unwrap_or("column"));
+            if let Some(ccs) = config.column_chunk_size {
+                cfg = cfg.column_chunk_size(ccs);
+            }
+            let reader_columns: Vec<(Option<usize>, Dtype)> =
+                columns.into_iter().map(|c| (Some(c), dtype)).collect();
+            let reader = BedMultiReader::open(&sources[0].path, reader_columns, genome.clone())
+                .map_err(|e| PbzError::Store(format!("open {}: {e}", sources[0].path.display())))?;
+            store.create_tracks_with(vec![(track, genome, cfg)], move |tracks| {
+                run_wide_pipeline(tracks[0], reader, &config)
+            })
+        }
+        ResolvedImport::PerField {
+            fields,
+            columns,
+            labels,
+        } => {
+            let specs = fields
+                .iter()
+                .map(|field| {
+                    let mut cfg = base_track_config(field.dtype, &config);
+                    if sources.len() > 1 {
+                        cfg = cfg
+                            .columns(labels.clone())
+                            .column_dim(config.column_dim.as_deref().unwrap_or("sample"));
+                        if let Some(ccs) = config.column_chunk_size {
+                            cfg = cfg.column_chunk_size(ccs);
+                        }
+                    }
+                    (field.name.clone(), genome.clone(), cfg)
+                })
+                .collect();
+            let reader_columns: Vec<(Option<usize>, Dtype)> = columns
                 .iter()
                 .zip(&fields)
-                .map(|(column, field)| (*column, field.dtype))
+                .map(|(column, field)| (Some(*column), field.dtype))
                 .collect();
-            BedMultiReader::open(&source.path, columns, genome.clone()).map_err(|error| {
-                PbzError::Store(format!("open {}: {error}", source.path.display()))
-            })
+            let readers = open_readers(sources, &reader_columns, &genome)?;
+            run_single_or_matrix(store, specs, readers, config)
+        }
+    }
+}
+
+fn base_track_config(dtype: Dtype, config: &Config) -> TrackConfig {
+    // Uncovered positions read back as zero; the on-disk fill must match the
+    // zero-filled scratch buffers the pipeline writes, so all-gap chunks elide.
+    let mut cfg = TrackConfig::new(dtype).fill_value(zero_fill(dtype));
+    if let Some(cs) = config.chunk_size {
+        cfg = cfg.chunk_size(cs);
+    }
+    if let Some(ss) = config.shard_size {
+        cfg = cfg.shard_size(ss);
+    }
+    if let Some(scs) = config.shard_column_size {
+        cfg = cfg.shard_column_size(scs);
+    }
+    cfg
+}
+
+fn open_readers(
+    sources: &[super::import::BedSource],
+    columns: &[(Option<usize>, Dtype)],
+    genome: &Genome,
+) -> Result<Vec<BedMultiReader>> {
+    sources
+        .iter()
+        .map(|source| {
+            BedMultiReader::open(&source.path, columns.to_vec(), genome.clone())
+                .map_err(|e| PbzError::Store(format!("open {}: {e}", source.path.display())))
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect()
+}
+
+fn run_single_or_matrix(
+    store: &mut PbzStore,
+    specs: Vec<(String, Genome, TrackConfig)>,
+    readers: Vec<BedMultiReader>,
+    config: Config,
+) -> Result<Report> {
     let source_count = readers.len();
     store.create_tracks_with(specs, move |tracks| {
         if source_count == 1 {
-            let reader = readers.into_iter().next().ok_or_else(|| {
-                PbzError::Metadata("bed matrix import lost its only reader".into())
-            })?;
+            let reader = readers
+                .into_iter()
+                .next()
+                .ok_or_else(|| PbzError::Metadata("bed import lost its only reader".into()))?;
             run_multi_pipeline(tracks, reader, &config)
         } else {
             run_matrix_pipeline(tracks, readers, &config)
@@ -459,12 +531,6 @@ mod tests {
             BedColumnSpec::indexed(3, Dtype::I32, "dup"),
             BedColumnSpec::indexed(4, Dtype::F32, "dup"),
         ]);
-        assert!(resolve(&PathBuf::from("unused.bed.gz"), &schema).is_err());
-    }
-
-    #[test]
-    fn unsupported_dtype_is_rejected() {
-        let schema = BedSchema(vec![BedColumnSpec::indexed(3, Dtype::U16, "x")]);
         assert!(resolve(&PathBuf::from("unused.bed.gz"), &schema).is_err());
     }
 

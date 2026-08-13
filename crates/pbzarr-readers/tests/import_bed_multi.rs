@@ -14,7 +14,7 @@ use pbzarr_readers::{
 };
 use tempfile::TempDir;
 
-use common::{htslib_available, write_bed_bgzip_tabix};
+use common::{htslib_available, write_bed_bgzip_tabix, write_headerless_bed_bgzip_tabix};
 
 fn genome(cs: &[(&str, u64)]) -> Genome {
     Genome::new(
@@ -103,7 +103,7 @@ fn multi_column_mixed_dtype_roundtrip() {
 }
 
 #[test]
-fn multi_source_matrix_import_reconciles_reordered_headers() {
+fn multi_source_matrix_import_roundtrip() {
     if !htslib_available() {
         eprintln!("skip matrix import test: bgzip/tabix not on PATH");
         return;
@@ -118,8 +118,8 @@ fn multi_source_matrix_import_reconciles_reordered_headers() {
     let b = write_bed_bgzip_tabix(
         dir.path(),
         "b",
-        &["chrom", "start", "end", "score", "coverage"],
-        &[("chr1", 0, 8, vec!["2.5", "9"])],
+        &["chrom", "start", "end", "coverage", "score"],
+        &[("chr1", 0, 8, vec!["9", "2.5"])],
     );
     let mut store = PbzStore::create(dir.path().join("matrix.pbz")).unwrap();
     from_bed_matrix(
@@ -142,6 +142,7 @@ fn multi_source_matrix_import_reconciles_reordered_headers() {
             shard_size: Some(4),
             shard_column_size: Some(2),
             workers: 2,
+            column_dim: Some("sample".into()),
             ..Config::default()
         },
     )
@@ -372,4 +373,278 @@ fn population_failure_leaves_all_tracks_unpublished() {
     let reopened = PbzStore::open(path).unwrap();
     assert!(reopened.track("cov").is_none());
     assert!(reopened.track("flag").is_none());
+}
+
+#[test]
+fn reordered_headers_are_rejected() {
+    if !htslib_available() {
+        eprintln!("skip import_bed_multi::reordered_headers_are_rejected: bgzip/tabix not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let a = write_bed_bgzip_tabix(
+        dir.path(),
+        "a",
+        &["chrom", "start", "end", "coverage", "score"],
+        &[("chr1", 0, 8, vec!["4", "1.5"])],
+    );
+    let b = write_bed_bgzip_tabix(
+        dir.path(),
+        "b",
+        &["chrom", "start", "end", "score", "coverage"],
+        &[("chr1", 0, 8, vec!["2.5", "9"])],
+    );
+    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let sources = [
+        BedSource {
+            path: a,
+            column_label: None,
+        },
+        BedSource {
+            path: b,
+            column_label: None,
+        },
+    ];
+    let result = from_bed_matrix(
+        &mut store,
+        &sources,
+        genome(&[("chr1", 8)]),
+        &BedImportOptions::default(),
+        Config {
+            column_dim: Some("sample".into()),
+            ..Config::default()
+        },
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn headerless_bed4_cohort_roundtrip() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::headerless_bed4_cohort_roundtrip: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let a = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 0, 8, vec!["4"])]);
+    let b = write_headerless_bed_bgzip_tabix(dir.path(), "s2", &[("chr1", 0, 8, vec!["9"])]);
+    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let sources = [
+        BedSource {
+            path: a,
+            column_label: None,
+        },
+        BedSource {
+            path: b,
+            column_label: None,
+        },
+    ];
+    let options = BedImportOptions {
+        track: Some("depth".into()),
+        ..BedImportOptions::default()
+    };
+    from_bed_matrix(
+        &mut store,
+        &sources,
+        genome(&[("chr1", 8)]),
+        &options,
+        Config {
+            column_dim: Some("sample".into()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let g = store.genome_for("depth").unwrap();
+    let reg = Region {
+        contig: g.id("chr1").unwrap(),
+        start: 0,
+        end: 8,
+    };
+    let depth = store
+        .track("depth")
+        .unwrap()
+        .read_region::<u8>(&reg)
+        .unwrap()
+        .into_dimensionality::<Ix2>()
+        .unwrap();
+    assert!(
+        depth
+            .rows()
+            .into_iter()
+            .all(|row| row.to_vec() == vec![4, 9])
+    );
+}
+
+#[test]
+fn headerless_without_track_errors() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::headerless_without_track_errors: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 0, 8, vec!["4"])]);
+    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let sources = [BedSource {
+        path: bed,
+        column_label: None,
+    }];
+    let result = from_bed_matrix(
+        &mut store,
+        &sources,
+        genome(&[("chr1", 8)]),
+        &BedImportOptions::default(),
+        Config::default(),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn bed3_imports_bool_presence() {
+    if !htslib_available() {
+        eprintln!("skip import_bed_multi::bed3_imports_bool_presence: bgzip/tabix not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 2, 5, vec![])]);
+    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let sources = [BedSource {
+        path: bed,
+        column_label: None,
+    }];
+    let options = BedImportOptions {
+        track: Some("callable".into()),
+        ..BedImportOptions::default()
+    };
+    from_bed_matrix(
+        &mut store,
+        &sources,
+        genome(&[("chr1", 8)]),
+        &options,
+        Config::default(),
+    )
+    .unwrap();
+
+    let g = store.genome_for("callable").unwrap();
+    let reg = Region {
+        contig: g.id("chr1").unwrap(),
+        start: 0,
+        end: 8,
+    };
+    let mask = store
+        .track("callable")
+        .unwrap()
+        .read_region::<bool>(&reg)
+        .unwrap()
+        .into_dimensionality::<Ix1>()
+        .unwrap();
+    assert_eq!(
+        mask.to_vec(),
+        vec![false, false, true, true, true, false, false, false]
+    );
+}
+
+#[test]
+fn single_source_wide_track_with_joint_inference() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::single_source_wide_track_with_joint_inference: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    // cov fits u8 alone; mapq's 300 forces the joint dtype up to u16.
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "s1",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[
+            ("chr1", 0, 4, vec!["4", "60"]),
+            ("chr1", 4, 8, vec!["9", "300"]),
+        ],
+    );
+    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let sources = [BedSource {
+        path: bed,
+        column_label: None,
+    }];
+    let options = BedImportOptions {
+        track: Some("stats".into()),
+        ..BedImportOptions::default()
+    };
+    from_bed_matrix(
+        &mut store,
+        &sources,
+        genome(&[("chr1", 8)]),
+        &options,
+        Config {
+            column_dim: Some("field".into()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let g = store.genome_for("stats").unwrap();
+    let reg = Region {
+        contig: g.id("chr1").unwrap(),
+        start: 0,
+        end: 8,
+    };
+    let stats = store
+        .track("stats")
+        .unwrap()
+        .read_region::<u16>(&reg)
+        .unwrap()
+        .into_dimensionality::<Ix2>()
+        .unwrap();
+    for (i, row) in stats.rows().into_iter().enumerate() {
+        let expected = if i < 4 { vec![4, 60] } else { vec![9, 300] };
+        assert_eq!(row.to_vec(), expected);
+    }
+}
+
+#[test]
+fn wide_track_rejects_word_bool_field_before_creating_tracks() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::wide_track_rejects_word_bool_field_before_creating_tracks: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    // Mirrors a FIRE pileup: numeric fields plus a true/false word column.
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "s1",
+        &["chrom", "start", "end", "score", "is_local_max"],
+        &[("chr1", 0, 8, vec!["1.5", "false"])],
+    );
+    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let sources = [BedSource {
+        path: bed,
+        column_label: None,
+    }];
+    let options = BedImportOptions {
+        track: Some("stats".into()),
+        ..BedImportOptions::default()
+    };
+    let result = from_bed_matrix(
+        &mut store,
+        &sources,
+        genome(&[("chr1", 8)]),
+        &options,
+        Config {
+            column_dim: Some("metric".into()),
+            ..Config::default()
+        },
+    );
+    let error = match result {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("wide import with a word-bool field should fail"),
+    };
+    assert!(error.contains("is_local_max"), "unexpected error: {error}");
+    assert!(store.track("stats").is_none());
 }

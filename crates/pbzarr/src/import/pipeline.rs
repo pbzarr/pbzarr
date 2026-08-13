@@ -497,6 +497,180 @@ pub fn run_multi_pipeline<R: MultiValueReader>(
     })
 }
 
+/// Drive one [`MultiValueReader`] into a single rank-2 track whose columns are
+/// the reader's fields, in one decode pass. Every field must share the track's
+/// dtype; tasks partition the position axis at full column width, so no two
+/// tasks touch the same chunk even when the width spans several column chunks.
+pub fn run_wide_pipeline<R: MultiValueReader>(
+    track: &Track,
+    reader: R,
+    config: &Config,
+) -> Result<Report> {
+    if track.rank() != 2 {
+        return Err(PbzError::Metadata(format!(
+            "wide pipeline: track {:?} is not rank 2",
+            track.name()
+        )));
+    }
+    let width = track.columns_count()?;
+    let dtypes = reader.columns().to_vec();
+    if dtypes.len() != width {
+        return Err(PbzError::Metadata(format!(
+            "wide pipeline: {} fields for {width} columns",
+            dtypes.len()
+        )));
+    }
+    if dtypes.iter().any(|dtype| *dtype != track.dtype()) {
+        return Err(PbzError::InvalidDtype {
+            dtype: format!(
+                "wide pipeline: track {:?} is {} but a field differs",
+                track.name(),
+                track.dtype()
+            ),
+        });
+    }
+    if reader.contigs().checksum() != track.genome().checksum() {
+        return Err(PbzError::Metadata(
+            "wide pipeline: reader genome differs from track".into(),
+        ));
+    }
+
+    let genome = Arc::clone(track.genome());
+    let n_contigs = genome.iter().filter(|(_, c)| c.length > 0).count();
+    let total = track.total_len();
+    let step = u64::try_from(track.write_unit_shape()?[0])
+        .map_err(|_| PbzError::Metadata("position write unit exceeds u64".into()))?
+        .max(1);
+    let width_u64 =
+        u64::try_from(width).map_err(|_| PbzError::Metadata("column count exceeds u64".into()))?;
+
+    let mut tasks = Vec::new();
+    for i in 0..total.div_ceil(step) {
+        let start = i * step;
+        tasks.push(ChunkTask {
+            start,
+            end: (start + step).min(total),
+            columns: 0..width_u64,
+        });
+    }
+
+    let workers = config.workers.max(1);
+    let (task_tx, task_rx) = bounded::<ChunkTask>((workers * 2).max(1));
+    let reader = Arc::new(reader);
+    let state = Arc::new(State {
+        bytes_written: AtomicU64::new(0),
+        tasks_completed: AtomicUsize::new(0),
+        first_err: Mutex::new(None),
+    });
+
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            let task_rx = task_rx.clone();
+            let reader = Arc::clone(&reader);
+            let genome = Arc::clone(&genome);
+            let state = Arc::clone(&state);
+            let progress = config.progress.clone();
+            scope.spawn(move || {
+                let forked = match reader.fork() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        state.record_err(PbzError::Metadata(format!("reader fork failed: {e}")));
+                        return;
+                    }
+                };
+                while let Ok(task) = task_rx.recv() {
+                    if state.has_err() {
+                        continue;
+                    }
+                    if let Err(e) = process_wide_task(
+                        track,
+                        &forked,
+                        &genome,
+                        &task,
+                        progress.as_deref(),
+                        &state,
+                    ) {
+                        state.record_err(e);
+                    }
+                }
+            });
+        }
+        for task in tasks {
+            if state.has_err() || task_tx.send(task).is_err() {
+                break;
+            }
+        }
+        drop(task_tx);
+    });
+
+    if let Some(ref p) = config.progress {
+        p.done();
+    }
+    if let Some(e) = state.first_err.lock().expect("error slot poisoned").take() {
+        return Err(e);
+    }
+
+    Ok(Report {
+        contigs_written: n_contigs,
+        bytes_written: state.bytes_written.load(Ordering::Relaxed),
+        tasks_completed: state.tasks_completed.load(Ordering::Relaxed),
+    })
+}
+
+fn process_wide_task<R: MultiValueReader>(
+    track: &Track,
+    reader: &R,
+    genome: &crate::genome::Genome,
+    task: &ChunkTask,
+    progress: Option<&dyn ProgressSink>,
+    state: &State,
+) -> Result<()> {
+    let rows = usize::try_from(task.end - task.start)
+        .map_err(|_| PbzError::Metadata("wide tile row count exceeds usize".into()))?;
+    let width = usize::try_from(task.columns.end)
+        .map_err(|_| PbzError::Metadata("wide tile width exceeds usize".into()))?;
+    let mut buffer = MatrixBuffer::zeros(track.dtype(), rows, width)
+        .map_err(|e| PbzError::Metadata(format!("alloc wide buffer: {e}")))?;
+
+    let offsets = genome.offsets();
+    for (i, contig) in genome.contigs().iter().enumerate() {
+        let c_start = offsets[i] as u64;
+        if c_start >= task.end {
+            break;
+        }
+        let c_end = offsets[i + 1] as u64;
+        if c_end <= task.start {
+            continue;
+        }
+        let ov_start = task.start.max(c_start);
+        let ov_end = task.end.min(c_end);
+        let (row_lo, row_hi) = (
+            (ov_start - task.start) as usize,
+            (ov_end - task.start) as usize,
+        );
+        let (local_lo, local_hi) = (ov_start - c_start, ov_end - c_start);
+        let mut sinks = buffer.sink_columns(row_lo..row_hi);
+        reader
+            .read_into(&contig.name, local_lo, local_hi, &mut sinks)
+            .map_err(|e| {
+                PbzError::Metadata(format!(
+                    "wide read {} [{local_lo},{local_hi}): {e}",
+                    contig.name
+                ))
+            })?;
+    }
+
+    buffer.write_to_track(track, task.start..task.end, task.columns.clone())?;
+
+    let bytes = rows as u64 * width as u64 * dtype_bytes(track.dtype()) as u64;
+    state.bytes_written.fetch_add(bytes, Ordering::Relaxed);
+    state.tasks_completed.fetch_add(1, Ordering::Relaxed);
+    if let Some(p) = progress {
+        p.tick(bytes);
+    }
+    Ok(())
+}
+
 /// Drive several homogeneous [`MultiValueReader`] sources into one rank-2
 /// track per reader field. Each task owns one physical position-by-column tile
 /// across every target track.
