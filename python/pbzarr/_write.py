@@ -218,6 +218,78 @@ def import_bed_multi(
     )
 
 
+def import_bam(
+    destination: PathLike,
+    track: str,
+    sources: Source | Iterable[Source],
+    *,
+    mode: str = "depth",
+    reference: PathLike | None = None,
+    min_mapq: int = 0,
+    exclude_flags: int = 1796,
+    min_bq: int = 0,
+    overlap: str = "proper",
+    count_deletions: bool = False,
+    column_labels: Sequence[str] | None = None,
+    column_dim: str | None = None,
+    chunk_size: int | None = None,
+    column_chunk_size: int | None = None,
+    shard_size: int | None = None,
+    shard_column_size: int | None = None,
+    workers: int | None = None,
+) -> dict[str, int]:
+    """Import per-base depth or composition counts from BAM/CRAM sources.
+
+    `mode` is `"depth"` (writes `track`) or `"composition"` (writes `track`
+    plus one `track_{field}` per composition field). CRAM sources need
+    `reference`; BAM sources ignore it. `count_deletions` defaults to
+    `False`, matching the samtools/mosdepth/Picard/riker convention that
+    CIGAR `D` positions do not count toward depth; set `True` to count
+    deletion spans toward depth (useful for callability masks). `overlap`
+    controls mate-overlap dedup: `"proper"` (default) matches mosdepth,
+    collapsing only PROPER_PAIR-flagged overlapping mates to one count;
+    `"all"` matches riker/samtools-mpileup-style unconditional dedup of any
+    overlapping mate pair; `"none"` disables dedup, double-counting every
+    overlapping pair's shared span. Returns the import report dict.
+    """
+    destination_path = _path(destination, "destination")
+    if overlap not in ("proper", "all", "none"):
+        raise ValueError('overlap must be "proper", "all", or "none"')
+    normalized_sources = _sources(sources)
+    if column_labels is not None:
+        labels = list(column_labels)
+        if len(labels) != len(normalized_sources):
+            raise ValueError("column_labels must match the number of sources")
+        merged: list[tuple[str, str | None]] = []
+        for (path, existing), label in zip(normalized_sources, labels):
+            if existing is not None:
+                raise ValueError(
+                    "column_labels conflicts with a (path, label) source tuple"
+                )
+            merged.append((path, label))
+        normalized_sources = merged
+    reference_path = _path(reference, "reference") if reference is not None else None
+    _require_collection(destination_path)
+    return _native.import_bam(
+        destination_path,
+        track,
+        normalized_sources,
+        mode,
+        reference_path,
+        min_mapq,
+        exclude_flags,
+        min_bq,
+        overlap,
+        count_deletions,
+        column_dim,
+        workers,
+        chunk_size,
+        column_chunk_size,
+        shard_size,
+        shard_column_size,
+    )
+
+
 def stack(
     sources: Source | Iterable[Source],
     destination: PathLike,

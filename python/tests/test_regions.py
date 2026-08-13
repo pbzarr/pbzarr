@@ -735,6 +735,7 @@ def test_public_namespace_is_the_xarray_api():
         "import_bigwig",
         "import_bed",
         "import_bed_multi",
+        "import_bam",
         "stack",
     }
     assert set(pbzarr.__all__) == public_names == expected

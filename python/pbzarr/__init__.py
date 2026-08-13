@@ -7,6 +7,7 @@ from ._open import open
 from ._region import RegionQuery, parse_region
 from ._write import (
     create_store,
+    import_bam,
     import_bed,
     import_bed_multi,
     import_bigwig,
@@ -23,6 +24,7 @@ __all__ = [
     "import_bigwig",
     "import_bed",
     "import_bed_multi",
+    "import_bam",
     "stack",
     "open",
 ]
