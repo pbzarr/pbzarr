@@ -12,13 +12,15 @@ use std::path::{Path, PathBuf};
 
 use noodles_bam as bam;
 use noodles_bgzf_bam as bgzf;
-use noodles_core::{Position, Region as NoodlesRegion};
+use noodles_core::Region as NoodlesRegion;
 use noodles_sam as sam;
 use rust_htslib::bam::Read as HtslibRead;
 use rust_htslib::bam::record::Cigar as HtslibCigar;
 
 use pbzarr::genome::{Contig, Genome};
 use pbzarr::io::{ReaderError, Result};
+
+use crate::coords::{noodles_query_interval, pos_to_zero_based};
 
 use super::record::{AlignedRead, CigarKind};
 
@@ -260,8 +262,9 @@ fn open_cram(path: &Path, reference: Option<&Path>) -> Result<(Backend, Genome)>
 
 /// Builds the half-open `[start, end)` query region (0-based) as noodles'
 /// 1-based inclusive `Region`, and runs it against `index` to get a `Query`
-/// iterator. Shared by `fetch_bam` and `has_records_bam`, the read and probe
-/// paths, which otherwise duplicated this coordinate conversion verbatim.
+/// iterator. Returns `None` for an empty/inverted range instead of erroring.
+/// Shared by `fetch_bam` and `has_records_bam`, the read and probe paths,
+/// which otherwise duplicated this coordinate conversion verbatim.
 fn bam_query_region<'r>(
     reader: &'r mut bam::io::Reader<bgzf::io::Reader<File>>,
     header: &sam::Header,
@@ -269,16 +272,17 @@ fn bam_query_region<'r>(
     contig: &str,
     start: u64,
     end: u64,
-) -> Result<bam::io::reader::Query<'r, bgzf::io::Reader<File>>> {
-    let q_start = Position::try_from(start as usize + 1)
-        .map_err(|e| ReaderError::Other(anyhow::anyhow!("bad start {start}: {e}")))?;
-    let q_end = Position::try_from(end as usize)
-        .map_err(|e| ReaderError::Other(anyhow::anyhow!("bad end {end}: {e}")))?;
-    let region = NoodlesRegion::new(contig, q_start..=q_end);
+) -> Result<Option<bam::io::reader::Query<'r, bgzf::io::Reader<File>>>> {
+    let Some(interval) = noodles_query_interval(start, end)? else {
+        return Ok(None);
+    };
+    let region = NoodlesRegion::new(contig, interval);
 
-    bam_query(reader, header, index, &region).map_err(|source| {
-        ReaderError::Other(anyhow::anyhow!("query {contig}:{start}-{end}: {source}"))
-    })
+    bam_query(reader, header, index, &region)
+        .map(Some)
+        .map_err(|source| {
+            ReaderError::Other(anyhow::anyhow!("query {contig}:{start}-{end}: {source}"))
+        })
 }
 
 fn fetch_bam(
@@ -290,7 +294,9 @@ fn fetch_bam(
     end: u64,
     visit: &mut dyn FnMut(&AlignedRead) -> Result<()>,
 ) -> Result<()> {
-    let mut query = bam_query_region(reader, header, index, contig, start, end)?;
+    let Some(mut query) = bam_query_region(reader, header, index, contig, start, end)? else {
+        return Ok(());
+    };
 
     let mut record = noodles_bam::Record::default();
     let mut read = AlignedRead::default();
@@ -315,7 +321,9 @@ fn has_records_bam(
     start: u64,
     end: u64,
 ) -> Result<bool> {
-    let mut query = bam_query_region(reader, header, index, contig, start, end)?;
+    let Some(mut query) = bam_query_region(reader, header, index, contig, start, end)? else {
+        return Ok(false);
+    };
 
     let mut record = noodles_bam::Record::default();
     let n = query
@@ -330,6 +338,7 @@ fn has_records_cram(
     start: u64,
     end: u64,
 ) -> Result<bool> {
+    // htslib's fetch() is natively 0-based half-open; no conversion needed.
     reader
         .fetch((contig, start as i64, end as i64))
         .map_err(|source| {
@@ -361,7 +370,7 @@ fn decode_bam_record(record: &noodles_bam::Record, out: &mut AlignedRead) -> Res
         .alignment_start()
         .transpose()
         .map_err(|e| ReaderError::Other(anyhow::anyhow!("alignment_start: {e}")))?
-        .map(|p| (usize::from(p) - 1) as u64)
+        .map(pos_to_zero_based)
         .unwrap_or(0);
     out.start = start;
 
@@ -379,7 +388,7 @@ fn decode_bam_record(record: &noodles_bam::Record, out: &mut AlignedRead) -> Res
         .mate_alignment_start()
         .transpose()
         .map_err(|e| ReaderError::Other(anyhow::anyhow!("mate_alignment_start: {e}")))?
-        .map(|p| (usize::from(p) - 1) as i64)
+        .map(|p| pos_to_zero_based(p) as i64)
         .unwrap_or(-1);
 
     if let Some(name) = record.name() {
@@ -417,6 +426,7 @@ fn fetch_cram(
     end: u64,
     visit: &mut dyn FnMut(&AlignedRead) -> Result<()>,
 ) -> Result<()> {
+    // htslib's fetch() is natively 0-based half-open; no conversion needed.
     reader
         .fetch((contig, start as i64, end as i64))
         .map_err(|source| {
@@ -446,6 +456,8 @@ fn decode_cram_record(record: &rust_htslib::bam::Record, out: &mut AlignedRead) 
     out.flags = record.flags();
     out.paired = record.is_paired();
     out.mapq = record.mapq();
+    // htslib's pos()/mpos() are natively 0-based; no conversion needed. An
+    // unmapped record's pos() is -1, clamped to the 0 sentinel here.
     out.start = record.pos().max(0) as u64;
 
     out.mate_same_contig =

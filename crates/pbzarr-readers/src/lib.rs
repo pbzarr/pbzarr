@@ -8,6 +8,7 @@
 pub mod bam;
 pub mod bed;
 pub mod bigwig;
+pub(crate) mod coords;
 pub mod d4;
 
 pub use bam::{BamReader, DepthFilter, ImportMode, OverlapMode, from_bam};

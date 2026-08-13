@@ -90,6 +90,34 @@ fn misnamed_bam_as_cram_extension_still_opens_as_bam() {
 }
 
 #[test]
+fn zero_width_window_is_empty_not_an_error() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let Some(fx) = bam_common::fixture(dir.path()) else {
+        return;
+    };
+
+    let (mut bam, _) = Backend::open(&fx.bam, None).unwrap();
+    assert!(!bam.has_records("ref1", 10, 10).unwrap());
+    let mut n = 0;
+    bam.fetch("ref1", 10, 10, &mut |_| {
+        n += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(n, 0);
+
+    let (mut cram, _) = Backend::open(&fx.cram, Some(&fx.fasta)).unwrap();
+    assert!(!cram.has_records("ref1", 10, 10).unwrap());
+    let mut n = 0;
+    cram.fetch("ref1", 10, 10, &mut |_| {
+        n += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn cram_open_with_bogus_reference_errors_without_crashing() {
     let dir = tempfile::TempDir::new().unwrap();
     let Some(fx) = bam_common::fixture(dir.path()) else {

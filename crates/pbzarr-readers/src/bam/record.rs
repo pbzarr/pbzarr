@@ -22,7 +22,10 @@ pub enum CigarKind {
 pub struct AlignedRead {
     pub flags: u16,
     pub mapq: u8,
-    /// 0-based alignment start on the queried contig.
+    /// 0-based alignment start on the queried contig. An unmapped or
+    /// otherwise absent start decodes as the `0` sentinel (mirroring
+    /// `mate_start`'s `-1` for an absent mate, the closest an unsigned
+    /// field can get to "no position").
     pub start: u64,
     /// 0-based mate alignment start, or `-1` when the mate is unmapped or
     /// the read is unpaired.
