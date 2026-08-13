@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use pbzarr::import::Config;
 use pbzarr::io::Dtype;
 use pbzarr::{Genome, PbzStore};
 use pbzarr_readers::{
-    BedColumnSpec, BedImportOptions, BedSchema, BedSource, ColumnSelector, InferRows,
-    column_index_by_name, from_bed_matrix, from_bed_multi, infer_bed_dtypes, read_bed_layout,
+    BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
+    OverlapMode, column_index_by_name, from_bam, from_bed_matrix, from_bed_multi, infer_bed_dtypes,
+    read_bed_layout,
 };
 
 #[derive(Debug, Parser)]
@@ -48,6 +49,8 @@ struct ImportArgs {
 enum ImportCommand {
     /// Import from tabix-indexed BED files.
     Bed(BedArgs),
+    /// Import per-base depth or composition counts from BAM/CRAM files.
+    Bam(BamArgs),
 }
 
 #[derive(Debug, Args)]
@@ -233,15 +236,81 @@ struct BedOptions {
     infer_rows: String,
 }
 
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz import bam -o depth.pbz --track depth s1.bam s2.bam\n  pbz import bam -o comp.pbz --track depth --mode composition --reference ref.fa sample.cram"
+)]
+struct BamArgs {
+    #[command(flatten)]
+    global: GlobalOptions,
+    #[command(flatten)]
+    import: ImportOptions,
+    #[command(flatten)]
+    bam: BamOptions,
+}
+
+#[derive(Debug, Args)]
+struct BamOptions {
+    /// PBZ output store. It is created when absent.
+    #[arg(short('o'), long)]
+    output: PathBuf,
+    #[command(flatten)]
+    input: ImportInputOptions,
+    /// Output track name. In composition mode the depth track keeps this
+    /// name and the per-event tracks are named `{track}_{field}`.
+    #[arg(long)]
+    track: String,
+    /// Depth counts coverage only; composition also counts per-base events,
+    /// emitting `{track}_{field}` for a, c, g, t, n, ins, del, ref_skip.
+    #[arg(long, value_enum, default_value_t = ImportModeArg::Depth)]
+    mode: ImportModeArg,
+    /// Reference FASTA for CRAM sources (ignored for BAM).
+    #[arg(long)]
+    reference: Option<PathBuf>,
+    /// Minimum mapping quality for a read to count.
+    #[arg(long, default_value_t = 0)]
+    min_mapq: u8,
+    /// Minimum per-base quality for a base to count.
+    #[arg(long, default_value_t = 0)]
+    min_bq: u8,
+    /// SAM flag bits that exclude a read (default: UNMAP|SECONDARY|QCFAIL|DUP).
+    #[arg(long, default_value_t = 1796)]
+    exclude_flags: u16,
+    /// Mate-overlap dedup mode. `proper` (default) matches mosdepth: only
+    /// PROPER_PAIR-flagged overlapping mates are collapsed to one count.
+    /// `all` matches riker/samtools-mpileup-style unconditional dedup of
+    /// any overlapping mate pair. `none` disables dedup, double-counting
+    /// every overlapping pair's shared span.
+    #[arg(long, value_enum, default_value_t = OverlapModeArg::Proper)]
+    overlap: OverlapModeArg,
+    /// Count CIGAR D (deletion)-spanned positions as covered depth. Off by
+    /// default, matching the samtools/mosdepth/Picard/riker convention of
+    /// excluding deletions from depth.
+    #[arg(long)]
+    count_deletions: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ImportModeArg {
+    Depth,
+    Composition,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OverlapModeArg {
+    Proper,
+    All,
+    None,
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::View(args) => view(args),
-        Command::Import(import) => {
-            let ImportArgs {
-                format: ImportCommand::Bed(args),
-            } = *import;
-            import_bed(args)
-        }
+        Command::Import(import) => match import.format {
+            ImportCommand::Bed(args) => import_bed(args),
+            ImportCommand::Bam(args) => import_bam(args),
+        },
     }
 }
 
@@ -253,12 +322,12 @@ fn view(args: ViewArgs) -> Result<()> {
 fn import_bed(args: BedArgs) -> Result<()> {
     // TODO: setup logging/tracing
     let _ = args.global.verbose;
-    let sources: Vec<BedSource> = args
+    let sources: Vec<pbzarr::import::Source> = args
         .bed
         .input
         .resolve_input()?
         .into_iter()
-        .map(|source| BedSource {
+        .map(|source| pbzarr::import::Source {
             path: source.path,
             column_label: source.label,
         })
@@ -317,6 +386,76 @@ fn import_bed(args: BedArgs) -> Result<()> {
         from_bed_matrix(&mut store, &sources, genome, &options, config)
             .context("import BED fields")?;
     }
+    Ok(())
+}
+
+fn import_bam(args: BamArgs) -> Result<()> {
+    // TODO: setup logging/tracing
+    let _ = args.global.verbose;
+    let sources: Vec<pbzarr::import::Source> = args
+        .bam
+        .input
+        .resolve_input()?
+        .into_iter()
+        .map(|source| pbzarr::import::Source {
+            path: source.path,
+            column_label: source.label,
+        })
+        .collect();
+    let n_sources = sources.len();
+
+    let config = Config {
+        workers: args.import.threads,
+        chunk_size: args.import.chunk_size,
+        column_chunk_size: args.import.column_chunk_size,
+        shard_size: args.import.shard_size,
+        shard_column_size: args.import.shard_column_size,
+        column_dim: args.import.column_dim,
+        ..Config::default()
+    };
+    let mode = match args.bam.mode {
+        ImportModeArg::Depth => ImportMode::Depth,
+        ImportModeArg::Composition => ImportMode::Composition,
+    };
+    let overlap = match args.bam.overlap {
+        OverlapModeArg::Proper => OverlapMode::ProperOnly,
+        OverlapModeArg::All => OverlapMode::All,
+        OverlapModeArg::None => OverlapMode::None,
+    };
+    let filter = DepthFilter {
+        min_mapq: args.bam.min_mapq,
+        exclude_flags: args.bam.exclude_flags,
+        min_bq: args.bam.min_bq,
+        overlap,
+        count_deletions: args.bam.count_deletions,
+    };
+
+    let output = args.bam.output;
+    let mut store = if output.exists() {
+        PbzStore::open(&output)
+            .with_context(|| format!("open output store {}", output.display()))?
+    } else {
+        PbzStore::create(&output)
+            .with_context(|| format!("create output store {}", output.display()))?
+    };
+
+    let report = from_bam(
+        &mut store,
+        &args.bam.track,
+        &sources,
+        mode,
+        filter,
+        args.bam.reference,
+        config,
+    )
+    .context("import BAM/CRAM")?;
+
+    println!(
+        "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
+        output.display(),
+        report.tasks_completed,
+        report.tasks_skipped
+    );
     Ok(())
 }
 
