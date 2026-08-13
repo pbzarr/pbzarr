@@ -226,7 +226,9 @@ struct BedOptions {
     /// stdout and exit without importing. Edit it and feed it back via --schema.
     #[arg(long, conflicts_with_all = ["schema", "fields", "track", "dtype"])]
     emit_schema: bool,
-    /// Records sampled for dtype inference, or `all`.
+    /// Records sampled for dtype inference, or `all`. A sample infers
+    /// conservative classes (bool/int32/float32); `all` (or a file smaller
+    /// than the sample) scans exhaustively and min-widths (uint8, int16, ...).
     #[arg(long, default_value = "1000", value_name = "N|all")]
     infer_rows: String,
 }

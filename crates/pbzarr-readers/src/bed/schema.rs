@@ -189,13 +189,13 @@ pub(super) fn resolve_sources(
         let dtype = match options.dtype {
             Some(dtype) => dtype,
             None => {
-                let mut states = infer_states(sources, &[3], options.infer_rows)?;
+                let (mut states, exact) = infer_states(sources, &[3], options.infer_rows)?;
                 states
                     .pop()
                     .ok_or_else(|| {
                         PbzError::Metadata("bed import: inference produced no dtype".into())
                     })?
-                    .finish()?
+                    .finish(exact)?
             }
         };
         return Ok(ResolvedImport::SingleTrack {
@@ -243,33 +243,32 @@ pub(super) fn resolve_sources(
 
     if sources.len() == 1 && selected.len() > 1 {
         reject_overrides(options)?;
-        let states = infer_states(sources, &columns, options.infer_rows)?;
-        let dtype = states
+        let (states, exact) = infer_states(sources, &columns, options.infer_rows)?;
+        let joint = states
             .iter()
             .cloned()
             .reduce(|mut joint, state| {
                 joint.merge(&state);
                 joint
             })
-            .ok_or_else(|| PbzError::Metadata("bed import: inference produced no dtype".into()))?
-            .finish()?;
+            .ok_or_else(|| PbzError::Metadata("bed import: inference produced no dtype".into()))?;
         // A true/false word column can only ever be bool; the import parser
         // will not read the words back as a number, so refuse to fold one into
-        // a numeric wide track before any track is created.
-        if dtype != Dtype::Bool {
+        // a numeric wide track before any track is created. Checked on the
+        // merged state ahead of finish() so the error can name the fields.
+        if joint.saw_word_bool && !joint.bool_only {
             let word_bool_fields = selected
                 .iter()
                 .zip(&states)
                 .filter(|(_, state)| state.saw_word_bool)
                 .map(|(name, _)| format!("{name:?}"))
                 .collect::<Vec<_>>();
-            if !word_bool_fields.is_empty() {
-                return Err(PbzError::Metadata(format!(
-                    "bed import: field(s) {} hold true/false and cannot join a {dtype} wide track; drop them with a field selection or import them via a schema",
-                    word_bool_fields.join(", ")
-                )));
-            }
+            return Err(PbzError::Metadata(format!(
+                "bed import: field(s) {} hold true/false and cannot join a numeric wide track; drop them with a field selection or import them via a schema",
+                word_bool_fields.join(", ")
+            )));
         }
+        let dtype = joint.finish(exact)?;
         return Ok(ResolvedImport::Wide {
             track: required_track(options, "when several fields form one wide track")?,
             dtype,
@@ -284,16 +283,17 @@ pub(super) fn resolve_sources(
                 .into(),
         ));
     }
+    let (states, exact) = infer_states(sources, &columns, options.infer_rows)?;
     let fields = selected
         .into_iter()
-        .zip(infer_states(sources, &columns, options.infer_rows)?)
+        .zip(states)
         .map(|(name, state)| {
             let dtype = options
                 .dtype_overrides
                 .get(&name)
                 .copied()
                 .map(Ok)
-                .unwrap_or_else(|| state.finish())?;
+                .unwrap_or_else(|| state.finish(exact))?;
             Ok(ResolvedField { name, dtype })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -320,16 +320,19 @@ fn reject_overrides(options: &BedImportOptions) -> Result<()> {
     }
 }
 
+/// Per-field inference states plus whether every source was scanned to EOF.
+/// Only an exhaustive scan knows the true min/max, so only it may min-width.
 fn infer_states(
     sources: &[BedSource],
     columns: &[usize],
     limit: InferRows,
-) -> Result<Vec<InferenceState>> {
+) -> Result<(Vec<InferenceState>, bool)> {
     let mut states = vec![InferenceState::default(); columns.len()];
+    let mut exact = true;
     for source in sources {
-        sample_columns(&source.path, columns, limit, &mut states)?;
+        exact &= sample_columns(&source.path, columns, limit, &mut states)?;
     }
-    Ok(states)
+    Ok((states, exact))
 }
 
 /// Sample `bed_gz` and infer a dtype per file column (0-based, `>= 3`).
@@ -339,16 +342,21 @@ pub fn infer_bed_dtypes(
     infer_rows: InferRows,
 ) -> Result<Vec<Dtype>> {
     let mut states = vec![InferenceState::default(); columns.len()];
-    sample_columns(bed_gz, columns, infer_rows, &mut states)?;
-    states.into_iter().map(InferenceState::finish).collect()
+    let exact = sample_columns(bed_gz, columns, infer_rows, &mut states)?;
+    states
+        .into_iter()
+        .map(|state| state.finish(exact))
+        .collect()
 }
 
+/// Returns true when the scan reached EOF (saw every record) rather than
+/// stopping at the sample limit.
 fn sample_columns(
     path: &Path,
     columns: &[usize],
     limit: InferRows,
     inference: &mut [InferenceState],
-) -> Result<()> {
+) -> Result<bool> {
     let mut reader = open_bgzf(path).map_err(|error| PbzError::Store(error.to_string()))?;
     let mut line = Vec::new();
     let mut count = 0usize;
@@ -368,12 +376,12 @@ fn sample_columns(
             }
             count += 1;
             if matches!(limit, InferRows::Sample(max) if count >= max) {
-                break;
+                return Ok(false);
             }
         }
         line.clear();
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -386,7 +394,7 @@ where
     for cell in cells {
         state.observe(cell.as_ref())?;
     }
-    state.finish()
+    state.finish(true)
 }
 
 #[derive(Clone)]
@@ -479,11 +487,21 @@ impl InferenceState {
         };
     }
 
-    fn finish(self) -> Result<Dtype> {
+    /// Pick a dtype. `exact` means the scan saw every record: only then is the
+    /// observed min/max the true range, so only then min-width. A sample bounds
+    /// nothing (head-of-file coverage says nothing about peak coverage), so a
+    /// sampled scan returns the conservative class instead: bool only for
+    /// true/false words, int32 for integers, float32 for decimals.
+    fn finish(self, exact: bool) -> Result<Dtype> {
         if self.min.is_none() && !self.saw_decimal {
             return Err(PbzError::Metadata("bed type inference: no values".into()));
         }
-        if self.bool_only {
+        if self.saw_word_bool && !self.bool_only {
+            return Err(PbzError::Metadata(
+                "bed type inference: column mixes true/false with numbers".into(),
+            ));
+        }
+        if self.bool_only && (exact || self.saw_word_bool) {
             return Ok(Dtype::Bool);
         }
         if self.saw_decimal {
@@ -499,6 +517,17 @@ impl InferenceState {
         let max = self
             .max
             .ok_or_else(|| PbzError::Metadata("bed type inference: no integers".into()))?;
+        if !exact {
+            return if min >= i128::from(i32::MIN) && max <= i128::from(i32::MAX) {
+                Ok(Dtype::I32)
+            } else if min >= 0 && max <= u32::MAX as i128 {
+                Ok(Dtype::U32)
+            } else {
+                Err(PbzError::Metadata(format!(
+                    "bed type inference: integer range {min}..{max} exceeds int32/uint32"
+                )))
+            };
+        }
         if min >= 0 {
             return match max {
                 0..=255 => Ok(Dtype::U8),
@@ -545,6 +574,35 @@ mod tests {
         let mut b = InferenceState::default();
         b.observe("70000").unwrap();
         a.merge(&b);
-        assert_eq!(a.finish().unwrap(), Dtype::U32);
+        assert_eq!(a.finish(true).unwrap(), Dtype::U32);
+    }
+
+    #[test]
+    fn sampled_scan_is_class_only_and_conservative() {
+        let mut ints = InferenceState::default();
+        for cell in ["0", "1", "2"] {
+            ints.observe(cell).unwrap();
+        }
+        assert_eq!(ints.clone().finish(false).unwrap(), Dtype::I32);
+        assert_eq!(ints.finish(true).unwrap(), Dtype::U8);
+
+        // Numeric 0/1 could be a truncated count; only true/false words prove bool.
+        let mut numeric_flags = InferenceState::default();
+        numeric_flags.observe("0").unwrap();
+        numeric_flags.observe("1").unwrap();
+        assert_eq!(numeric_flags.finish(false).unwrap(), Dtype::I32);
+
+        let mut word_flags = InferenceState::default();
+        word_flags.observe("false").unwrap();
+        assert_eq!(word_flags.finish(false).unwrap(), Dtype::Bool);
+    }
+
+    #[test]
+    fn words_mixed_with_numbers_are_rejected() {
+        let mut state = InferenceState::default();
+        state.observe("false").unwrap();
+        state.observe("7").unwrap();
+        assert!(state.clone().finish(true).is_err());
+        assert!(state.finish(false).is_err());
     }
 }
