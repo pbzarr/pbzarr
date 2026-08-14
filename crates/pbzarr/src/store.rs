@@ -1,6 +1,7 @@
 //! `PbzStore`: top-level handle for a PBZ on-disk store.
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use hashbrown::{HashMap, HashSet};
@@ -159,6 +160,7 @@ impl PbzStore {
 
             let genome = rehydrate_genome(&storage, &name, attrs.genome_name.as_deref())?;
 
+            let sealed = group.attributes().contains_key("multiscales");
             track_handles.insert(
                 name.clone(),
                 Track {
@@ -169,6 +171,7 @@ impl PbzStore {
                     column_dim,
                     storage: Arc::clone(&storage),
                     values: RwLock::new(Some(Arc::new(values))),
+                    sealed: AtomicBool::new(sealed),
                 },
             );
         }
@@ -429,8 +432,19 @@ impl PbzStore {
             column_dim: col_dim,
             storage: Arc::clone(&self.storage),
             values: RwLock::new(None),
+            sealed: AtomicBool::new(false),
         };
         PendingTrack::new(track, &config)
+    }
+
+    /// Refresh the store-root consolidated metadata (zarr-python v3 flavor).
+    ///
+    /// TODO(Task 2): currently a no-op stub. `pbzarr::scale` calls it as the
+    /// final publication step; Task 2 fills in the actual implementation
+    /// (enumerate every node, inline each `zarr.json` under the root's
+    /// `consolidated_metadata` field).
+    pub fn consolidate_metadata(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -485,7 +499,7 @@ fn rehydrate_genome(
 ///
 /// Built per-array so `typesize` matches the element size. Returns the
 /// vec-form that `ArrayBuilder::bytes_to_bytes_codecs` consumes.
-fn default_data_codecs(dtype: Dtype) -> Result<Vec<Arc<dyn BytesToBytesCodecTraits>>> {
+pub(crate) fn default_data_codecs(dtype: Dtype) -> Result<Vec<Arc<dyn BytesToBytesCodecTraits>>> {
     let typesize = dtype_size(dtype);
     let clevel = BloscCompressionLevel::try_from(5u8)
         .map_err(|e| PbzError::Store(format!("invalid blosc clevel: {e}")))?;

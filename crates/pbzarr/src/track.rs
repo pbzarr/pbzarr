@@ -1,5 +1,6 @@
 //! Track metadata + I/O.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use ndarray::ArrayD;
@@ -211,6 +212,10 @@ pub struct Track {
     /// Cached `values` array; `Array::open` re-reads `zarr.json`, so opening
     /// once keeps per-region reads/writes cheap.
     pub(crate) values: RwLock<Option<Arc<Array<dyn ReadableWritableListableStorageTraits>>>>,
+    /// Whether this track carries a published `multiscales` pyramid. Set from
+    /// the group attrs at open (and by `scale` after publication); a sealed
+    /// track rejects base writes until the pyramid is unpublished.
+    pub(crate) sealed: AtomicBool,
 }
 
 pub(crate) struct PendingTrack {
@@ -395,6 +400,23 @@ impl Track {
         Ok(arr)
     }
 
+    /// Mark this handle as carrying a published `multiscales` pyramid.
+    pub(crate) fn seal(&self) {
+        self.sealed.store(true, Ordering::Release);
+    }
+
+    /// The seal: base writes on a track with a published pyramid are an error
+    /// (the levels would silently go stale). Callers must unpublish first.
+    fn ensure_unsealed(&self) -> Result<()> {
+        if self.sealed.load(Ordering::Acquire) {
+            return Err(PbzError::Metadata(format!(
+                "track {:?} has a published multiscales pyramid; base writes are sealed",
+                self.name
+            )));
+        }
+        Ok(())
+    }
+
     /// Flat base offset of a region's contig on the `values` position axis.
     fn base_of(&self, region: &Region) -> Result<u64> {
         let idx = region.contig.as_usize();
@@ -459,6 +481,7 @@ impl Track {
         end: u64,
         data: ArrayD<T>,
     ) -> Result<()> {
+        self.ensure_unsealed()?;
         if T::DTYPE != self.dtype {
             return Err(PbzError::InvalidDtype {
                 dtype: format!(
@@ -511,6 +534,7 @@ impl Track {
         columns: std::ops::Range<u64>,
         data: ArrayD<T>,
     ) -> Result<()> {
+        self.ensure_unsealed()?;
         if T::DTYPE != self.dtype {
             return Err(PbzError::InvalidDtype {
                 dtype: format!(
