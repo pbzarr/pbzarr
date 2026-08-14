@@ -1,20 +1,22 @@
-//! PyO3 bindings for pbzarr: `import_d4`, `import_bigwig`, and `import_bed`.
+//! PyO3 bindings for pbzarr: `import_d4`, `import_bigwig`, `import_bed`, and
+//! `import_bam`.
 
 use std::path::{Path, PathBuf};
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use pbzarr::Genome;
 use pbzarr::PbzStore;
-use pbzarr::import::Config;
+use pbzarr::import::{Config, Report, Source};
 use pbzarr::io::Dtype;
 use pbzarr::{StackConfig, stack as rs_stack};
 use pbzarr_readers::{
-    BedColumnSpec, BedSchema, BedSource, BigWigSource, D4Source, column_index_by_name,
-    from_bed as rs_from_bed, from_bed_multi as rs_from_bed_multi, from_bigwig as rs_from_bigwig,
-    from_d4 as rs_from_d4,
+    BedColumnSpec, BedSchema, DepthFilter, ImportMode, OverlapMode, column_index_by_name,
+    from_bam as rs_from_bam, from_bed as rs_from_bed, from_bed_multi as rs_from_bed_multi,
+    from_bigwig as rs_from_bigwig, from_d4 as rs_from_d4,
 };
 
 /// Bytes per element for progress accounting.
@@ -60,10 +62,10 @@ fn import_d4(
     py.allow_threads(|| {
         let mut store =
             PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
-        let d4_sources: Vec<D4Source> = sources
+        let d4_sources: Vec<Source> = sources
             .iter()
-            .map(|(path, column_label)| D4Source {
-                path: PathBuf::from(path),
+            .map(|(path, column_label)| Source {
+                path: path.into(),
                 column_label: column_label.clone(),
             })
             .collect();
@@ -117,10 +119,10 @@ fn import_bigwig(
     py.allow_threads(|| {
         let mut store =
             PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
-        let bw_sources: Vec<BigWigSource> = sources
+        let bw_sources: Vec<Source> = sources
             .iter()
-            .map(|(path, column_label)| BigWigSource {
-                path: PathBuf::from(path),
+            .map(|(path, column_label)| Source {
+                path: path.into(),
                 column_label: column_label.clone(),
             })
             .collect();
@@ -176,10 +178,10 @@ fn import_bed(
     py.allow_threads(|| {
         let mut store =
             PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
-        let bed_sources: Vec<BedSource> = sources
+        let bed_sources: Vec<Source> = sources
             .iter()
-            .map(|(path, column_label)| BedSource {
-                path: PathBuf::from(path),
+            .map(|(path, column_label)| Source {
+                path: path.into(),
                 column_label: column_label.clone(),
             })
             .collect();
@@ -295,6 +297,116 @@ fn import_bed_multi(
     })
 }
 
+/// Turn a `Report` into the `dict` handed back to Python callers.
+fn report_to_dict(py: Python<'_>, report: &Report) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    dict.set_item("contigs_written", report.contigs_written)?;
+    dict.set_item("bytes_written", report.bytes_written)?;
+    dict.set_item("tasks_completed", report.tasks_completed)?;
+    dict.set_item("tasks_skipped", report.tasks_skipped)?;
+    Ok(dict.into_any().unbind())
+}
+
+/// Bulk-import per-base depth or composition counts from one or more
+/// BAM/CRAM files into a new `int32` track (or tracks, for composition mode).
+///
+/// `mode` is `"depth"` (single `track` output) or `"composition"` (`track`
+/// plus one `track_{field}` per composition field, per `from_bam`'s track
+/// naming). CRAM sources need `reference`; BAM sources ignore it. `overlap`
+/// is `"proper"` (default, mosdepth-matched: only PROPER_PAIR-flagged
+/// overlapping mates are deduped), `"all"` (riker/samtools-mpileup-style
+/// unconditional dedup), or `"none"` (dedup disabled).
+#[pyfunction]
+#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), reference=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None))]
+#[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
+fn import_bam(
+    py: Python<'_>,
+    store_path: String,
+    track: String,
+    sources: Vec<(String, Option<String>)>,
+    mode: String,
+    reference: Option<String>,
+    min_mapq: u8,
+    exclude_flags: u16,
+    min_bq: u8,
+    overlap: String,
+    count_deletions: bool,
+    column_dim: Option<String>,
+    workers: Option<usize>,
+    chunk_size: Option<usize>,
+    column_chunk_size: Option<usize>,
+    shard_size: Option<usize>,
+    shard_column_size: Option<usize>,
+) -> PyResult<Py<PyAny>> {
+    let mode = match mode.as_str() {
+        "depth" => ImportMode::Depth,
+        "composition" => ImportMode::Composition,
+        other => {
+            return Err(PbzError::new_err(format!(
+                "unsupported bam import mode {other:?} (expected \"depth\" or \"composition\")"
+            )));
+        }
+    };
+    let overlap = match overlap.as_str() {
+        "proper" => OverlapMode::ProperOnly,
+        "all" => OverlapMode::All,
+        "none" => OverlapMode::None,
+        other => {
+            return Err(PbzError::new_err(format!(
+                "unsupported overlap mode {other:?} (expected \"proper\", \"all\", or \"none\")"
+            )));
+        }
+    };
+    let filter = DepthFilter {
+        min_mapq,
+        exclude_flags,
+        min_bq,
+        overlap,
+        count_deletions,
+    };
+    let report = py.allow_threads(|| {
+        let mut store =
+            PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let bam_sources: Vec<Source> = sources
+            .iter()
+            .map(|(path, column_label)| Source {
+                path: path.into(),
+                column_label: column_label.clone(),
+            })
+            .collect();
+        let mut config = Config {
+            column_dim,
+            ..Config::default()
+        };
+        if let Some(w) = workers {
+            config.workers = w;
+        }
+        if let Some(c) = chunk_size {
+            config.chunk_size = Some(c);
+        }
+        if let Some(c) = column_chunk_size {
+            config.column_chunk_size = Some(c);
+        }
+        if let Some(s) = shard_size {
+            config.shard_size = Some(s);
+        }
+        if let Some(s) = shard_column_size {
+            config.shard_column_size = Some(s);
+        }
+        rs_from_bam(
+            &mut store,
+            &track,
+            &bam_sources,
+            mode,
+            filter,
+            reference.map(PathBuf::from),
+            config,
+        )
+        .map_err(|e| PbzError::new_err(format!("{e}")))
+    })?;
+    report_to_dict(py, &report)
+}
+
 /// Combine single-sample stores into a fresh cohort store `out`.
 ///
 /// `sources` is a list of `(store_path, label)`; `label=None` defaults to the
@@ -362,6 +474,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(import_bigwig, m)?)?;
     m.add_function(wrap_pyfunction!(import_bed, m)?)?;
     m.add_function(wrap_pyfunction!(import_bed_multi, m)?)?;
+    m.add_function(wrap_pyfunction!(import_bam, m)?)?;
     m.add_function(wrap_pyfunction!(create_store, m)?)?;
     m.add_function(wrap_pyfunction!(stack, m)?)?;
     Ok(())

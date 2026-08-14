@@ -46,6 +46,24 @@ def import_bed_multi(
     shard_size: int | None = ...,
     progress: bool = ...,
 ) -> None: ...
+def import_bam(
+    store_path: str,
+    track: str,
+    sources: Sequence[tuple[str, str | None]],
+    mode: str = ...,
+    reference: str | None = ...,
+    min_mapq: int = ...,
+    exclude_flags: int = ...,
+    min_bq: int = ...,
+    overlap: str = ...,
+    count_deletions: bool = ...,
+    column_dim: str | None = ...,
+    workers: int | None = ...,
+    chunk_size: int | None = ...,
+    column_chunk_size: int | None = ...,
+    shard_size: int | None = ...,
+    shard_column_size: int | None = ...,
+) -> dict[str, int]: ...
 def create_store(store_path: str) -> None: ...
 def stack(
     sources: Sequence[tuple[str, str | None]],

@@ -71,9 +71,30 @@ pub fn write_bed_bgzip_tabix(
     header: &[&str],
     rows: &[(&str, u64, u64, Vec<&str>)],
 ) -> PathBuf {
+    write_bed_impl(dir, name, Some(header), rows)
+}
+
+/// Headerless variant of `write_bed_bgzip_tabix`; pass empty data cells for BED3.
+#[allow(dead_code)]
+pub fn write_headerless_bed_bgzip_tabix(
+    dir: &Path,
+    name: &str,
+    rows: &[(&str, u64, u64, Vec<&str>)],
+) -> PathBuf {
+    write_bed_impl(dir, name, None, rows)
+}
+
+fn write_bed_impl(
+    dir: &Path,
+    name: &str,
+    header: Option<&[&str]>,
+    rows: &[(&str, u64, u64, Vec<&str>)],
+) -> PathBuf {
     let bed_path = dir.join(format!("{name}.bed"));
     let mut f = std::fs::File::create(&bed_path).unwrap();
-    writeln!(f, "#{}", header.join("\t")).unwrap();
+    if let Some(header) = header {
+        writeln!(f, "#{}", header.join("\t")).unwrap();
+    }
     for (chrom, start, end, cells) in rows {
         write!(f, "{chrom}\t{start}\t{end}").unwrap();
         for c in cells {

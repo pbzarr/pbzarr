@@ -159,6 +159,7 @@ pub fn stack(
 
     let mut bytes_written = 0u64;
     let mut tasks_completed = 0usize;
+    let mut tasks_skipped = 0usize;
     let mut contigs_written = 0usize;
 
     for tname in &track_names {
@@ -224,6 +225,7 @@ pub fn stack(
         })?;
         bytes_written += report.bytes_written;
         tasks_completed += report.tasks_completed;
+        tasks_skipped += report.tasks_skipped;
         contigs_written = report.contigs_written;
     }
 
@@ -231,6 +233,7 @@ pub fn stack(
         contigs_written,
         bytes_written,
         tasks_completed,
+        tasks_skipped,
     })
 }
 

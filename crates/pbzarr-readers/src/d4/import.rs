@@ -1,21 +1,13 @@
 //! D4-specific import glue. Wires `D4Reader` into the generic pipeline.
 
-use std::path::PathBuf;
-
 use pbzarr::PbzError;
 use pbzarr::PbzStore;
 use pbzarr::Result;
-use pbzarr::import::{Config, Report, run_pipeline};
+use pbzarr::import::{Config, Report, Source, run_pipeline};
 use pbzarr::io::{Dtype, ValueReader};
 use pbzarr::{Genome, TrackConfig};
 
 use super::reader::D4Reader;
-
-#[derive(Debug, Clone)]
-pub struct D4Source {
-    pub path: PathBuf,
-    pub column_label: Option<String>,
-}
 
 /// Bulk-import one or more d4 files into a new `int32` track.
 ///
@@ -28,7 +20,7 @@ pub struct D4Source {
 pub fn from_d4(
     store: &mut PbzStore,
     track_name: &str,
-    sources: &[D4Source],
+    sources: &[Source],
     config: Config,
 ) -> Result<Report> {
     if sources.is_empty() {
@@ -53,7 +45,7 @@ pub fn from_d4(
 
 /// The genome shared by every source, taken from the first and required to
 /// match the rest by checksum (all files must describe the same reference).
-fn shared_genome(readers: &[D4Reader], sources: &[D4Source]) -> Result<Genome> {
+fn shared_genome(readers: &[D4Reader], sources: &[Source]) -> Result<Genome> {
     let genome = readers[0].contigs().clone();
     let checksum = genome.checksum();
     for (reader, source) in readers.iter().zip(sources).skip(1) {
@@ -68,34 +60,8 @@ fn shared_genome(readers: &[D4Reader], sources: &[D4Source]) -> Result<Genome> {
     Ok(genome)
 }
 
-fn track_config(sources: &[D4Source], config: &Config) -> TrackConfig {
-    let mut cfg = TrackConfig::new(Dtype::I32);
-    if let Some(cs) = config.chunk_size {
-        cfg = cfg.chunk_size(cs);
-    }
-    if let Some(ss) = config.shard_size {
-        cfg = cfg.shard_size(ss);
-    }
-    if let Some(scs) = config.shard_column_size {
-        cfg = cfg.shard_column_size(scs);
-    }
-    if sources.len() > 1 || config.column_dim.is_some() {
-        let labels: Vec<String> = sources.iter().map(column_label).collect();
-        let dim = config.column_dim.as_deref().unwrap_or("sample");
-        cfg = cfg.columns(labels).column_dim(dim);
-        if let Some(ccs) = config.column_chunk_size {
-            cfg = cfg.column_chunk_size(ccs);
-        }
-    }
-    cfg
-}
-
-fn column_label(source: &D4Source) -> String {
-    source.column_label.clone().unwrap_or_else(|| {
-        source
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| source.path.to_string_lossy().into_owned())
-    })
+fn track_config(sources: &[Source], config: &Config) -> TrackConfig {
+    let labels = (sources.len() > 1 || config.column_dim.is_some())
+        .then(|| sources.iter().map(Source::label).collect());
+    config.track_config(Dtype::I32, None, labels, "sample")
 }

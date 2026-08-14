@@ -5,5 +5,10 @@
 //! bindings (e.g. d4) live in their own crates and call `run_pipeline`.
 
 mod pipeline;
+mod source;
 
-pub use pipeline::{Config, ProgressSink, Report, run_multi_pipeline, run_pipeline};
+pub use pipeline::{
+    Config, ProgressSink, Report, run_matrix_pipeline, run_multi_pipeline, run_pipeline,
+    run_wide_pipeline,
+};
+pub use source::Source;

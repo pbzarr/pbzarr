@@ -1,12 +1,12 @@
-# Holds format-specific git dependencies (currently d4) so the core `pbzarr`
-# crate stays free of git deps and remains publishable to crates.io. Not
-# published itself.
+# Holds format-specific git dependencies (d4, the rust-htslib fork) so the
+# core `pbzarr` crate stays free of git deps and remains publishable to
+# crates.io. Not published itself.
 [package]
 name = "pbzarr-readers"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Input-format readers (d4, bed, bedgraph, bigwig) for the pbzarr library"
+description = "Input-format readers (d4, bed, bigwig, bam/cram) for the pbzarr library"
 license.workspace = true
 repository.workspace = true
 publish = false
@@ -25,6 +25,35 @@ noodles-bgzf = "0.48"
 noodles-csi = "0.57"
 noodles-tabix = "0.63"
 noodles-core = "0.20"
+noodles-bam = "0.94"
+noodles-sam = "0.89"
+# noodles-bam/-sam pull a newer noodles-bgzf (0.51) than the bed/tabix path
+# (0.48, capped by noodles-tabix 0.63's own noodles-csi 0.57 pin). Renamed so
+# the BAM backend can name its indexed-reader field type against the same
+# bgzf version noodles-bam itself resolves to, instead of the two colliding.
+noodles-bgzf-bam = { package = "noodles-bgzf", version = "0.51" }
+# noodles-bam 0.94 pins noodles-csi 0.60 (newer than the bed/tabix path's
+# 0.57). `Reader::query`'s `I: BinningIndex` bound is version-specific, so the
+# BAM backend's own `.csi`-fallback index must be read with the same 0.60
+# `BinningIndex` the query call resolves against, not our 0.57 copy.
+noodles-csi-bam = { package = "noodles-csi", version = "0.60" }
+# Composition/depth scratch structures for the bam/cram importer (Task 9+).
+rustc-hash = "2.1"
+bitvec = "1.1"
+# SIMD for the no-gate depth inner loop (bam::walk::bump_depth).
+wide = "1.6.1"
+# CRAM backend. libdeflate speeds up the block codec; bzip2/lzma cover the
+# rarer block compression methods CRAM permits. `hts-sys` builds the
+# vendored htslib C sources (bindgen included, no system-linking/pkg-config
+# mode) for self-contained, pinned wheels.
+# Pinned to a fork carrying a fix for a CRAM index drop-order use-after-free
+# in upstream `Drop for IndexedReader` (hts_close ran before the index was
+# destroyed); drop this pin once upstream releases the fix.
+rust-htslib = { git = "https://github.com/cademirch/rust-htslib", rev = "c08910034decaec2fb278a07d7f9422a38ac38cd", default-features = false, features = [
+    "libdeflate",
+    "bzip2",
+    "lzma",
+] }
 
 [dev-dependencies]
 tempfile = "3"

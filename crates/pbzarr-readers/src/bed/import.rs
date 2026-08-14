@@ -1,17 +1,10 @@
 //! Bulk-import one BED column across one or more sources into a track.
 
-use std::path::PathBuf;
-
-use pbzarr::import::{Config, Report, run_pipeline};
+use pbzarr::import::{Config, Report, Source, run_pipeline};
 use pbzarr::io::{Dtype, Numeric};
 use pbzarr::{Genome, PbzError, PbzStore, Result, TrackConfig};
 
 use super::reader::BedReader;
-
-pub struct BedSource {
-    pub path: PathBuf,
-    pub column_label: Option<String>,
-}
 
 /// Import the value at file column `column` (absolute, 0-based, `>= 3`) from each
 /// source BED into a new track sized to `genome`. One source with no configured
@@ -23,7 +16,7 @@ pub struct BedSource {
 pub fn from_bed<T>(
     store: &mut PbzStore,
     track_name: &str,
-    sources: &[BedSource],
+    sources: &[Source],
     column: usize,
     genome: Genome,
     config: Config,
@@ -51,26 +44,10 @@ where
     )
 }
 
-fn track_config<T: Numeric>(sources: &[BedSource], config: &Config) -> TrackConfig {
-    let mut cfg = TrackConfig::new(T::DTYPE).fill_value(zero_fill(T::DTYPE));
-    if let Some(cs) = config.chunk_size {
-        cfg = cfg.chunk_size(cs);
-    }
-    if let Some(ss) = config.shard_size {
-        cfg = cfg.shard_size(ss);
-    }
-    if let Some(scs) = config.shard_column_size {
-        cfg = cfg.shard_column_size(scs);
-    }
-    if sources.len() > 1 || config.column_dim.is_some() {
-        let labels: Vec<String> = sources.iter().map(column_label).collect();
-        let dim = config.column_dim.as_deref().unwrap_or("sample");
-        cfg = cfg.columns(labels).column_dim(dim);
-        if let Some(ccs) = config.column_chunk_size {
-            cfg = cfg.column_chunk_size(ccs);
-        }
-    }
-    cfg
+fn track_config<T: Numeric>(sources: &[Source], config: &Config) -> TrackConfig {
+    let labels = (sources.len() > 1 || config.column_dim.is_some())
+        .then(|| sources.iter().map(Source::label).collect());
+    config.track_config(T::DTYPE, Some(zero_fill(T::DTYPE)), labels, "sample")
 }
 
 /// Zero fill matching `T::ZERO` so all-gap chunks are elided on write.
@@ -80,14 +57,4 @@ pub(super) fn zero_fill(dtype: Dtype) -> serde_json::Value {
         Dtype::Bool => serde_json::json!(false),
         _ => serde_json::json!(0),
     }
-}
-
-fn column_label(source: &BedSource) -> String {
-    source.column_label.clone().unwrap_or_else(|| {
-        source
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| source.path.to_string_lossy().into_owned())
-    })
 }

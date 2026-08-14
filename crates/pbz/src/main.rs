@@ -1,0 +1,629 @@
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+use anyhow::{Context, Result, bail};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use pbzarr::import::Config;
+use pbzarr::io::Dtype;
+use pbzarr::{Genome, PbzStore};
+use pbzarr_readers::{
+    BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
+    OverlapMode, column_index_by_name, from_bam, from_bed_matrix, from_bed_multi, infer_bed_dtypes,
+    read_bed_layout,
+};
+
+#[derive(Debug, Parser)]
+#[command(name = "pbz", version, about = "Per-base Zarr tools")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Inspect a PBZ store.
+    View(ViewArgs),
+    /// Import data into a PBZ store.
+    Import(Box<ImportArgs>),
+}
+
+#[derive(Debug, Args)]
+struct ViewArgs {
+    #[command(flatten)]
+    global: GlobalOptions,
+    /// PBZ store to inspect.
+    store: PathBuf,
+    /// Track to view (defaults to first track if multiple present)
+    track: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ImportArgs {
+    #[command(subcommand)]
+    format: ImportCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ImportCommand {
+    /// Import from tabix-indexed BED files.
+    Bed(BedArgs),
+    /// Import per-base depth or composition counts from BAM/CRAM files.
+    Bam(BamArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth -c sample s1.bed.gz s2.bed.gz\n  pbz import bed -o mask.pbz --genome genome.fai --track callable regions.bed.gz\n  pbz import bed -o stats.pbz --genome genome.fai --schema schema.tsv wide.bed.gz"
+)]
+struct BedArgs {
+    #[command(flatten)]
+    global: GlobalOptions,
+    #[command(flatten)]
+    import: ImportOptions,
+    #[command(flatten)]
+    bed: BedOptions,
+}
+
+#[derive(Debug, Args)]
+struct GlobalOptions {
+    /// Increase logging verbosity. Repeated uses are accepted.
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
+}
+
+#[derive(Debug, Args)]
+struct ImportOptions {
+    /// Number of import workers.
+    #[arg(short = 't', long, default_value_t = 4)]
+    threads: usize,
+    /// Position chunk size.
+    #[arg(long)]
+    chunk_size: Option<usize>,
+    /// Column chunk size for multi-source imports.
+    #[arg(long)]
+    column_chunk_size: Option<usize>,
+    /// Position shard size.
+    #[arg(long)]
+    shard_size: Option<usize>,
+    /// Column shard size for multi-source imports.
+    #[arg(long)]
+    shard_column_size: Option<usize>,
+    /// Name for the column dimension of a 2D track (required whenever the
+    /// output is 2D: several sources, or several fields from one source).
+    #[arg(short = 'c', long)]
+    column_dim: Option<String>,
+}
+
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+struct ImportInputOptions {
+    /// Input files, optionally suffixed with `:LABEL`.
+    #[arg(value_name = "PATH[:LABEL]")]
+    input_files: Vec<Source>,
+    /// Tab-delimited source manifest containing PATH or PATH<TAB>LABEL records.
+    #[arg(short, long, value_name = "PATH")]
+    file_list: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Source {
+    path: PathBuf,
+    label: Option<String>,
+}
+
+impl Source {
+    fn validate_labels(sources: &[Self]) -> Result<()> {
+        let has_labels = sources.iter().any(|source| source.label.is_some());
+        let has_unlabeled = sources.iter().any(|source| source.label.is_none());
+        if has_labels && has_unlabeled {
+            bail!("sources must either all provide labels or none do");
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for Source {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let (path, label) = match value.rsplit_once(':') {
+            Some((path, label)) => (path, Some(label)),
+            None => (value, None),
+        };
+        if path.is_empty() {
+            return Err("source path must not be empty".into());
+        }
+        if label == Some("") {
+            return Err("source label must not be empty".into());
+        }
+        Ok(Self {
+            path: PathBuf::from(path),
+            label: label.map(str::to_owned),
+        })
+    }
+}
+
+fn read_source_list(path: &Path) -> Result<Vec<Source>> {
+    let file = File::open(path).with_context(|| format!("open source list {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut sources = Vec::new();
+
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("read source list line {}", index + 1))?;
+        let record = line.trim();
+        if record.is_empty() || record.starts_with('#') {
+            continue;
+        }
+        let fields = record.split('\t').collect::<Vec<_>>();
+        if fields.len() > 2 || fields[0].is_empty() {
+            bail!(
+                "source list {} line {} must be PATH or PATH<TAB>LABEL",
+                path.display(),
+                index + 1
+            );
+        }
+        let label = fields.get(1).map(|label| label.to_string());
+        if label.as_deref() == Some("") {
+            bail!(
+                "source list {} line {} has an empty label",
+                path.display(),
+                index + 1
+            );
+        }
+        sources.push(Source {
+            path: PathBuf::from(fields[0]),
+            label,
+        });
+    }
+
+    if sources.is_empty() {
+        bail!("source list {} contains no BED sources", path.display());
+    }
+    Source::validate_labels(&sources)?;
+    Ok(sources)
+}
+
+impl ImportInputOptions {
+    fn resolve_input(&self) -> Result<Vec<Source>> {
+        let sources = match &self.file_list {
+            Some(path) => read_source_list(path)?,
+            None => self.input_files.clone(),
+        };
+        if sources.is_empty() {
+            bail!("at least one input source is required");
+        }
+        Source::validate_labels(&sources)?;
+        Ok(sources)
+    }
+}
+
+#[derive(Debug, Args)]
+struct BedOptions {
+    /// PBZ output store. It is created when absent.
+    #[arg(short('o'), long, required_unless_present = "emit_schema")]
+    output: Option<PathBuf>,
+    #[command(flatten)]
+    input: ImportInputOptions,
+    /// FAI or chromosome-sizes file defining the genome.
+    #[arg(long, required_unless_present = "emit_schema")]
+    genome: Option<PathBuf>,
+    /// Header field to import (requires a `#`-prefixed header). Repeating
+    /// selects several fields; omit to import all value fields.
+    #[arg(long = "field", conflicts_with = "schema")]
+    fields: Vec<String>,
+    /// Output track name. Required for BED3, headerless BED4, and when several
+    /// fields from one source form one wide track.
+    #[arg(long, conflicts_with = "schema")]
+    track: Option<String>,
+    /// Value dtype for headerless BED4 input (inferred when omitted).
+    #[arg(long, conflicts_with = "schema")]
+    dtype: Option<String>,
+    /// TSV schema: FIELD<TAB>[TRACK]<TAB>[DTYPE] per row; each row becomes its
+    /// own scalar track. FIELD is a header name or 1-based column index.
+    #[arg(long, value_name = "PATH")]
+    schema: Option<PathBuf>,
+    /// Print a schema TSV for one BED source (field, track, inferred dtype) to
+    /// stdout and exit without importing. Edit it and feed it back via --schema.
+    #[arg(long, conflicts_with_all = ["schema", "fields", "track", "dtype"])]
+    emit_schema: bool,
+    /// Records sampled for dtype inference, or `all`. A sample infers
+    /// conservative classes (bool/int32/float32); `all` (or a file smaller
+    /// than the sample) scans exhaustively and min-widths (uint8, int16, ...).
+    #[arg(long, default_value = "1000", value_name = "N|all")]
+    infer_rows: String,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz import bam -o depth.pbz --track depth s1.bam s2.bam\n  pbz import bam -o comp.pbz --track depth --mode composition --reference ref.fa sample.cram"
+)]
+struct BamArgs {
+    #[command(flatten)]
+    global: GlobalOptions,
+    #[command(flatten)]
+    import: ImportOptions,
+    #[command(flatten)]
+    bam: BamOptions,
+}
+
+#[derive(Debug, Args)]
+struct BamOptions {
+    /// PBZ output store. It is created when absent.
+    #[arg(short('o'), long)]
+    output: PathBuf,
+    #[command(flatten)]
+    input: ImportInputOptions,
+    /// Output track name. In composition mode the depth track keeps this
+    /// name and the per-event tracks are named `{track}_{field}`.
+    #[arg(long)]
+    track: String,
+    /// Depth counts coverage only; composition also counts per-base events,
+    /// emitting `{track}_{field}` for a, c, g, t, n, ins, del, ref_skip.
+    #[arg(long, value_enum, default_value_t = ImportModeArg::Depth)]
+    mode: ImportModeArg,
+    /// Reference FASTA for CRAM sources (ignored for BAM).
+    #[arg(long)]
+    reference: Option<PathBuf>,
+    /// Minimum mapping quality for a read to count.
+    #[arg(long, default_value_t = 0)]
+    min_mapq: u8,
+    /// Minimum per-base quality for a base to count.
+    #[arg(long, default_value_t = 0)]
+    min_bq: u8,
+    /// SAM flag bits that exclude a read (default: UNMAP|SECONDARY|QCFAIL|DUP).
+    #[arg(long, default_value_t = 1796)]
+    exclude_flags: u16,
+    /// Mate-overlap dedup mode. `proper` (default) matches mosdepth: only
+    /// PROPER_PAIR-flagged overlapping mates are collapsed to one count.
+    /// `all` matches riker/samtools-mpileup-style unconditional dedup of
+    /// any overlapping mate pair. `none` disables dedup, double-counting
+    /// every overlapping pair's shared span.
+    #[arg(long, value_enum, default_value_t = OverlapModeArg::Proper)]
+    overlap: OverlapModeArg,
+    /// Count CIGAR D (deletion)-spanned positions as covered depth. Off by
+    /// default, matching the samtools/mosdepth/Picard/riker convention of
+    /// excluding deletions from depth.
+    #[arg(long)]
+    count_deletions: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ImportModeArg {
+    Depth,
+    Composition,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OverlapModeArg {
+    Proper,
+    All,
+    None,
+}
+
+fn main() -> Result<()> {
+    match Cli::parse().command {
+        Command::View(args) => view(args),
+        Command::Import(import) => match import.format {
+            ImportCommand::Bed(args) => import_bed(args),
+            ImportCommand::Bam(args) => import_bam(args),
+        },
+    }
+}
+
+fn view(args: ViewArgs) -> Result<()> {
+    let _ = args.global.verbose;
+    bail!("view is not implemented yet for {}", args.store.display())
+}
+
+fn import_bed(args: BedArgs) -> Result<()> {
+    // TODO: setup logging/tracing
+    let _ = args.global.verbose;
+    let sources: Vec<pbzarr::import::Source> = args
+        .bed
+        .input
+        .resolve_input()?
+        .into_iter()
+        .map(|source| pbzarr::import::Source {
+            path: source.path,
+            column_label: source.label,
+        })
+        .collect();
+    let infer_rows = parse_infer_rows(&args.bed.infer_rows)?;
+
+    if args.bed.emit_schema {
+        if sources.len() != 1 {
+            bail!("--emit-schema requires exactly one BED source");
+        }
+        return emit_schema(&sources[0].path, infer_rows);
+    }
+
+    let genome_path = args.bed.genome.context("--genome is required to import")?;
+    let genome = Genome::from_fai(&genome_path)
+        .with_context(|| format!("read genome {}", genome_path.display()))?;
+    let output = args.bed.output.context("--output is required to import")?;
+    let config = Config {
+        workers: args.import.threads,
+        chunk_size: args.import.chunk_size,
+        column_chunk_size: args.import.column_chunk_size,
+        shard_size: args.import.shard_size,
+        shard_column_size: args.import.shard_column_size,
+        column_dim: args.import.column_dim,
+        ..Config::default()
+    };
+    let mut store = if output.exists() {
+        PbzStore::open(&output)
+            .with_context(|| format!("open output store {}", output.display()))?
+    } else {
+        PbzStore::create(&output)
+            .with_context(|| format!("create output store {}", output.display()))?
+    };
+
+    if let Some(schema_path) = &args.bed.schema {
+        if sources.len() != 1 {
+            bail!("--schema requires exactly one BED source");
+        }
+        let schema = load_schema(schema_path, &sources[0].path, infer_rows)?;
+        from_bed_multi(&mut store, &sources[0].path, &schema, genome, config)
+            .context("import BED schema")?;
+    } else {
+        let options = BedImportOptions {
+            fields: (!args.bed.fields.is_empty()).then_some(args.bed.fields),
+            track: args.bed.track,
+            dtype: args
+                .bed
+                .dtype
+                .as_deref()
+                .map(Dtype::from_str)
+                .transpose()
+                .context("invalid --dtype")?,
+            infer_rows,
+            ..BedImportOptions::default()
+        };
+        from_bed_matrix(&mut store, &sources, genome, &options, config)
+            .context("import BED fields")?;
+    }
+    Ok(())
+}
+
+fn import_bam(args: BamArgs) -> Result<()> {
+    // TODO: setup logging/tracing
+    let _ = args.global.verbose;
+    let sources: Vec<pbzarr::import::Source> = args
+        .bam
+        .input
+        .resolve_input()?
+        .into_iter()
+        .map(|source| pbzarr::import::Source {
+            path: source.path,
+            column_label: source.label,
+        })
+        .collect();
+    let n_sources = sources.len();
+
+    let config = Config {
+        workers: args.import.threads,
+        chunk_size: args.import.chunk_size,
+        column_chunk_size: args.import.column_chunk_size,
+        shard_size: args.import.shard_size,
+        shard_column_size: args.import.shard_column_size,
+        column_dim: args.import.column_dim,
+        ..Config::default()
+    };
+    let mode = match args.bam.mode {
+        ImportModeArg::Depth => ImportMode::Depth,
+        ImportModeArg::Composition => ImportMode::Composition,
+    };
+    let overlap = match args.bam.overlap {
+        OverlapModeArg::Proper => OverlapMode::ProperOnly,
+        OverlapModeArg::All => OverlapMode::All,
+        OverlapModeArg::None => OverlapMode::None,
+    };
+    let filter = DepthFilter {
+        min_mapq: args.bam.min_mapq,
+        exclude_flags: args.bam.exclude_flags,
+        min_bq: args.bam.min_bq,
+        overlap,
+        count_deletions: args.bam.count_deletions,
+    };
+
+    let output = args.bam.output;
+    let mut store = if output.exists() {
+        PbzStore::open(&output)
+            .with_context(|| format!("open output store {}", output.display()))?
+    } else {
+        PbzStore::create(&output)
+            .with_context(|| format!("create output store {}", output.display()))?
+    };
+
+    let report = from_bam(
+        &mut store,
+        &args.bam.track,
+        &sources,
+        mode,
+        filter,
+        args.bam.reference,
+        config,
+    )
+    .context("import BAM/CRAM")?;
+
+    println!(
+        "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
+        output.display(),
+        report.tasks_completed,
+        report.tasks_skipped
+    );
+    Ok(())
+}
+
+struct SchemaRow {
+    field: String,
+    track: Option<String>,
+    dtype: Option<Dtype>,
+}
+
+fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<SchemaRow>> {
+    let mut rows = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let record = line.trim_end();
+        if record.trim().is_empty() || record.trim_start().starts_with('#') {
+            continue;
+        }
+        let cells = record.split('\t').collect::<Vec<_>>();
+        if cells.len() > 3 || cells[0].is_empty() {
+            bail!(
+                "schema {} line {} must be FIELD[<TAB>TRACK[<TAB>DTYPE]]",
+                path.display(),
+                index + 1
+            );
+        }
+        let dtype = cells
+            .get(2)
+            .filter(|dtype| !dtype.is_empty())
+            .map(|dtype| Dtype::from_str(dtype))
+            .transpose()
+            .with_context(|| format!("schema {} line {}", path.display(), index + 1))?;
+        rows.push(SchemaRow {
+            field: cells[0].to_owned(),
+            track: cells
+                .get(1)
+                .filter(|t| !t.is_empty())
+                .map(|t| (*t).to_owned()),
+            dtype,
+        });
+    }
+    if rows.is_empty() {
+        bail!("schema {} selects no fields", path.display());
+    }
+    Ok(rows)
+}
+
+/// Print a schema TSV scaffold for `bed` to stdout: one row per value field
+/// with its inferred dtype, ready to edit and feed back through `--schema`.
+/// Headerless files get 1-based index selectors with `fieldN` placeholder
+/// track names.
+fn emit_schema(bed: &Path, infer_rows: InferRows) -> Result<()> {
+    let layout =
+        read_bed_layout(bed).with_context(|| format!("read layout of {}", bed.display()))?;
+    if layout.n_cols == 3 {
+        bail!(
+            "{} is BED3; it has no value fields (import it directly with --track)",
+            bed.display()
+        );
+    }
+    let columns: Vec<usize> = (3..layout.n_cols).collect();
+    let dtypes = infer_bed_dtypes(bed, &columns, infer_rows)
+        .with_context(|| format!("infer dtypes for {}", bed.display()))?;
+    println!("# field\ttrack\tdtype");
+    match &layout.header {
+        Some(names) => {
+            for (name, dtype) in names[3..].iter().zip(&dtypes) {
+                println!("{name}\t{name}\t{}", dtype.as_str());
+            }
+        }
+        None => {
+            for (column, dtype) in columns.iter().zip(&dtypes) {
+                println!("{}\tfield{}\t{}", column + 1, column + 1, dtype.as_str());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build a `BedSchema` from a TSV schema file, resolving name selectors against
+/// the BED header and inferring any dtype the schema leaves blank.
+fn load_schema(schema_path: &Path, bed: &Path, infer_rows: InferRows) -> Result<BedSchema> {
+    let text = std::fs::read_to_string(schema_path)
+        .with_context(|| format!("read schema {}", schema_path.display()))?;
+    let rows = read_schema_rows(&text, schema_path)?;
+
+    let mut specs = Vec::with_capacity(rows.len());
+    let mut file_cols = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let (selector, file_col) = if let Ok(index) = row.field.parse::<usize>() {
+            if index < 4 {
+                bail!(
+                    "schema column {index} is a coordinate column (indices are 1-based; value fields start at 4)"
+                );
+            }
+            if row.track.is_none() {
+                bail!("schema column {index} needs a track name (no header name to default to)");
+            }
+            (ColumnSelector::Index(index - 1), index - 1)
+        } else {
+            let file_col = column_index_by_name(bed, &row.field)
+                .with_context(|| format!("resolve schema field {:?}", row.field))?;
+            (ColumnSelector::Name(row.field.clone()), file_col)
+        };
+        file_cols.push(file_col);
+        specs.push(BedColumnSpec {
+            selector,
+            dtype: row.dtype.unwrap_or(Dtype::Bool),
+            track_name: row.track.clone(),
+            description: None,
+        });
+    }
+
+    let missing: Vec<usize> = rows
+        .iter()
+        .zip(&file_cols)
+        .filter(|(row, _)| row.dtype.is_none())
+        .map(|(_, col)| *col)
+        .collect();
+    if !missing.is_empty() {
+        let inferred = infer_bed_dtypes(bed, &missing, infer_rows)
+            .with_context(|| format!("infer dtypes for {}", bed.display()))?;
+        let mut inferred = inferred.into_iter();
+        for (spec, row) in specs.iter_mut().zip(&rows) {
+            if row.dtype.is_none() {
+                spec.dtype = inferred
+                    .next()
+                    .context("inference returned fewer dtypes than requested")?;
+            }
+        }
+    }
+    Ok(BedSchema(specs))
+}
+
+fn parse_infer_rows(value: &str) -> Result<InferRows> {
+    if value == "all" {
+        return Ok(InferRows::All);
+    }
+    let rows = value.parse::<usize>().with_context(|| {
+        format!("invalid --infer-rows value {value:?}; expected a positive integer or all")
+    })?;
+    if rows == 0 {
+        bail!("--infer-rows must be positive or all");
+    }
+    Ok(InferRows::Sample(rows))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_rows_parse_selectors_tracks_and_dtypes() {
+        let text =
+            "# field\ttrack\tdtype\n4\tdepth\tint32\nmapq\n\ncallable\tcallable_mask\tbool\n";
+        let rows = read_schema_rows(text, Path::new("schema.tsv")).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].field, "4");
+        assert_eq!(rows[0].track.as_deref(), Some("depth"));
+        assert_eq!(rows[0].dtype, Some(Dtype::I32));
+        assert_eq!(rows[1].field, "mapq");
+        assert!(rows[1].track.is_none());
+        assert!(rows[1].dtype.is_none());
+        assert_eq!(rows[2].track.as_deref(), Some("callable_mask"));
+        assert_eq!(rows[2].dtype, Some(Dtype::Bool));
+    }
+
+    #[test]
+    fn schema_rows_reject_wide_and_empty_records() {
+        assert!(read_schema_rows("a\tb\tint32\td\n", Path::new("s.tsv")).is_err());
+        assert!(read_schema_rows("# only comments\n", Path::new("s.tsv")).is_err());
+    }
+}

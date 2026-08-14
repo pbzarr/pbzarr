@@ -25,6 +25,7 @@ doc = "cargo doc --workspace --no-deps --open"
 # osx-arm64 has 0.3.11; linux-64/osx-64 ship 0.3.10. Pin to the 0.3 line.
 d4tools = ">=0.3.10,<0.4"
 htslib = ">=1.24,<2"
+samtools = ">=1.24,<1.25"
 
 # --- validate feature: cross-language xarray round-trip ---
 [feature.validate.dependencies]
@@ -44,9 +45,11 @@ pytest = ">=8"
 flox = ">=0.9,<0.11"
 
 # pybigtools synthesizes .bw fixtures for the bigwig import test (no conda
-# package, so it comes in via PyPI).
+# package, so it comes in via PyPI). pysam synthesizes BAM fixtures for the
+# bam import test.
 [feature.wheel.pypi-dependencies]
 pybigtools = ">=0.3,<0.4"
+pysam = ">=0.22,<0.23"
 
 [feature.wheel.tasks]
 build-wheel = "maturin build --release"
