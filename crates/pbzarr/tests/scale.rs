@@ -153,6 +153,60 @@ fn f32_cohort_track_is_nan_aware_per_column() {
 }
 
 #[test]
+fn wide_cohort_bins_are_read_in_column_blocks() {
+    // At factor 2^25 one full-width bin (2^25 * 2 cols * 4 B = 256 MiB)
+    // exceeds the 64 MiB slab budget, so the engine slabs the column axis
+    // (one column per read here). The contig is tiny, so the clamped reads
+    // stay small; the per-column means prove each block landed in the right
+    // column range of the level.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 6,
+    }])
+    .unwrap();
+    let mut store = PbzStore::create(&path).unwrap();
+    store
+        .create_track(
+            "af",
+            genome,
+            TrackConfig::new(Dtype::F32).columns(vec!["a".into(), "b".into()]),
+        )
+        .unwrap();
+
+    let track = store.track("af").unwrap();
+    let region = track
+        .genome()
+        .resolve(&"chr1:0-6".parse().unwrap())
+        .unwrap();
+    let nan = f32::NAN;
+    let data = Array2::from_shape_vec(
+        (6, 2),
+        vec![
+            4.0, 1.0, // col a: 4, 4 (rest NaN) -> mean 4.0
+            4.0, 2.0, // col b: 1..=6 -> mean 3.5
+            nan, 3.0, //
+            nan, 4.0, //
+            nan, 5.0, //
+            nan, 6.0, //
+        ],
+    )
+    .unwrap();
+    track.write_region(&region, data.into_dyn()).unwrap();
+
+    let factor = 1u64 << 25;
+    let report = scale(&store, "af", &factors_config(vec![factor])).unwrap();
+    assert_eq!(report.levels[0].bins, 1);
+
+    let level = open_array(&path, &format!("/af/scales/{factor}/mean"));
+    assert_eq!(level.shape(), &[1, 2]);
+    let got = read_all_f32(&level);
+    assert_eq!(got[[0, 0]], 4.0);
+    assert_eq!(got[[0, 1]], 3.5);
+}
+
+#[test]
 fn bool_track_means_are_fraction_true() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");

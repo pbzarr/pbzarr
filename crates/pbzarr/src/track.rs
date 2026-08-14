@@ -458,6 +458,50 @@ impl Track {
             .map_err(|e| PbzError::Store(format!("read {}: {e}", self.name)))
     }
 
+    /// Read one rectangular tile of a rank-2 track using flat position and
+    /// column ranges. The scale engine uses this to bound slab memory on wide
+    /// cohort tracks (whole bins x a column subrange per read).
+    pub(crate) fn read_flat_columns<T: Numeric>(
+        &self,
+        position: std::ops::Range<u64>,
+        columns: std::ops::Range<u64>,
+    ) -> Result<ArrayD<T>> {
+        if T::DTYPE != self.dtype {
+            return Err(PbzError::InvalidDtype {
+                dtype: format!(
+                    "track {:?} is {} but caller requested {}",
+                    self.name,
+                    self.dtype,
+                    T::DTYPE
+                ),
+            });
+        }
+        if self.rank != 2 {
+            return Err(PbzError::Metadata(format!(
+                "column tile read for track {:?} requires a rank-2 track",
+                self.name
+            )));
+        }
+        let array = self.values_array()?;
+        let shape = array.shape();
+        if position.start > position.end
+            || columns.start > columns.end
+            || position.end > shape[0]
+            || columns.end > shape[1]
+        {
+            return Err(PbzError::InvalidRegion {
+                message: format!(
+                    "column tile {:?} × {:?} is outside track {:?}",
+                    position, columns, self.name
+                ),
+            });
+        }
+        let subset = ArraySubset::new_with_ranges(&[position, columns]);
+        array
+            .retrieve_array_subset::<ArrayD<T>>(&subset)
+            .map_err(|e| PbzError::Store(format!("read {}: {e}", self.name)))
+    }
+
     /// Write data into an arbitrary region.
     ///
     /// Takes ownership of `data` because zarrs' `store_array_subset` consumes

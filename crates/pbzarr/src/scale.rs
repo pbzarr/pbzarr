@@ -375,7 +375,10 @@ fn slab_len(factor: u64, n_cols: u64) -> u64 {
 
 /// Fill one level array with per-bin means, sequence by sequence, slab by
 /// slab. Slabs start on bin boundaries and each bin is contained in exactly
-/// one slab, so nothing carries across slabs.
+/// one slab, so nothing carries across slabs along the position axis. When a
+/// single full-width bin would exceed the slab budget (wide cohorts at large
+/// factors), the column axis is slabbed instead: each read covers whole bins
+/// over a column subrange, and nothing carries across column blocks either.
 fn compute_level<T: Numeric>(
     t: &Track,
     level: &Array<dyn ReadableWritableListableStorageTraits>,
@@ -385,69 +388,95 @@ fn compute_level<T: Numeric>(
 ) -> Result<()> {
     let rank2 = t.rank() == 2;
     let n_cols = t.columns_count()?;
-    let slab = slab_len(factor, n_cols as u64);
+
+    // Widest column range for which one whole bin stays under the budget.
+    // When it covers all columns (1-D and narrow tracks), read full width
+    // through `read_region`; otherwise loop column blocks.
+    let col_block = ((SLAB_TARGET_BYTES / (4 * factor)).max(1) as usize).min(n_cols);
+    let full_width = !rank2 || col_block >= n_cols;
+    let read_width = if full_width { n_cols } else { col_block };
+    let slab = slab_len(factor, read_width as u64);
 
     let genome = Arc::clone(t.genome());
+    let offsets = genome.offsets();
     let mut level_base = 0u64;
     for (cid, contig) in genome.iter() {
         let len = contig.length;
+        let flat_base = offsets[cid.as_usize()] as u64;
         let mut slab_start = 0u64;
         while slab_start < len {
             let slab_end = (slab_start + slab).min(len);
-            let region = Region {
-                contig: cid,
-                start: slab_start,
-                end: slab_end,
-            };
-            let data: ArrayD<T> = t.read_region(&region)?;
             let rows = (slab_end - slab_start) as usize;
-            let data = data
-                .into_shape_with_order((rows, n_cols))
-                .map_err(|e| PbzError::Store(format!("scale: reshape slab: {e}")))?;
-
             let n_bins = (slab_end - slab_start).div_ceil(factor) as usize;
-            let mut sums = vec![0f64; n_bins * n_cols];
-            let mut counts = vec![0i64; n_bins * n_cols];
-            for (i, row) in data.outer_iter().enumerate() {
-                let bin = i / factor as usize;
-                for (j, &v) in row.iter().enumerate() {
-                    let v = to_f64(v);
-                    if nan_aware && v.is_nan() {
-                        continue;
-                    }
-                    sums[bin * n_cols + j] += v;
-                    counts[bin * n_cols + j] += 1;
-                }
-            }
-            let means: Vec<f32> = sums
-                .iter()
-                .zip(&counts)
-                .map(|(&s, &c)| {
-                    if c == 0 {
-                        f32::NAN
-                    } else {
-                        (s / c as f64) as f32
-                    }
-                })
-                .collect();
-
             let bin0 = level_base + slab_start / factor;
-            let out: ArrayD<f32> = if rank2 {
-                Array2::from_shape_vec((n_bins, n_cols), means)
-                    .map_err(|e| PbzError::Store(format!("scale: shape level slab: {e}")))?
-                    .into_dyn()
-            } else {
-                Array1::from(means).into_dyn()
-            };
-            #[allow(clippy::single_range_in_vec_init)]
-            let subset = if rank2 {
-                ArraySubset::new_with_ranges(&[bin0..bin0 + n_bins as u64, 0..n_cols as u64])
-            } else {
-                ArraySubset::new_with_ranges(&[bin0..bin0 + n_bins as u64])
-            };
-            level
-                .store_array_subset(&subset, out)
-                .map_err(|e| PbzError::Store(format!("scale: write level: {e}")))?;
+
+            let mut c0 = 0usize;
+            while c0 < n_cols {
+                let c1 = (c0 + read_width).min(n_cols);
+                let width = c1 - c0;
+                let data: ArrayD<T> = if full_width {
+                    let region = Region {
+                        contig: cid,
+                        start: slab_start,
+                        end: slab_end,
+                    };
+                    t.read_region(&region)?
+                } else {
+                    t.read_flat_columns(
+                        flat_base + slab_start..flat_base + slab_end,
+                        c0 as u64..c1 as u64,
+                    )?
+                };
+                let data = data
+                    .into_shape_with_order((rows, width))
+                    .map_err(|e| PbzError::Store(format!("scale: reshape slab: {e}")))?;
+
+                let mut sums = vec![0f64; n_bins * width];
+                let mut counts = vec![0i64; n_bins * width];
+                for (i, row) in data.outer_iter().enumerate() {
+                    let bin = i / factor as usize;
+                    for (j, &v) in row.iter().enumerate() {
+                        let v = to_f64(v);
+                        if nan_aware && v.is_nan() {
+                            continue;
+                        }
+                        sums[bin * width + j] += v;
+                        counts[bin * width + j] += 1;
+                    }
+                }
+                let means: Vec<f32> = sums
+                    .iter()
+                    .zip(&counts)
+                    .map(|(&s, &c)| {
+                        if c == 0 {
+                            f32::NAN
+                        } else {
+                            (s / c as f64) as f32
+                        }
+                    })
+                    .collect();
+
+                let out: ArrayD<f32> = if rank2 {
+                    Array2::from_shape_vec((n_bins, width), means)
+                        .map_err(|e| PbzError::Store(format!("scale: shape level slab: {e}")))?
+                        .into_dyn()
+                } else {
+                    Array1::from(means).into_dyn()
+                };
+                #[allow(clippy::single_range_in_vec_init)]
+                let subset = if rank2 {
+                    ArraySubset::new_with_ranges(&[
+                        bin0..bin0 + n_bins as u64,
+                        c0 as u64..c1 as u64,
+                    ])
+                } else {
+                    ArraySubset::new_with_ranges(&[bin0..bin0 + n_bins as u64])
+                };
+                level
+                    .store_array_subset(&subset, out)
+                    .map_err(|e| PbzError::Store(format!("scale: write level: {e}")))?;
+                c0 = c1;
+            }
 
             slab_start = slab_end;
         }
