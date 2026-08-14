@@ -12,7 +12,8 @@ use zarrs::array::FillValue;
 use zarrs::array::data_type;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::{
-    ListableStorageTraits, ReadableWritableListableStorage, StoreKey, StorePrefix,
+    ListableStorageTraits, ReadableStorageTraits, ReadableWritableListableStorage, StoreKey,
+    StorePrefix, WritableStorageTraits,
 };
 
 use zarrs::array::ChunkGrid;
@@ -439,13 +440,128 @@ impl PbzStore {
 
     /// Refresh the store-root consolidated metadata (zarr-python v3 flavor).
     ///
-    /// TODO(Task 2): currently a no-op stub. `pbzarr::scale` calls it as the
-    /// final publication step; Task 2 fills in the actual implementation
-    /// (enumerate every node, inline each `zarr.json` under the root's
-    /// `consolidated_metadata` field).
+    /// Walks every node under the root, inlines each node's `zarr.json`
+    /// verbatim into a flat `{<store-relative path>: <document>}` map, and
+    /// rewrites the root `zarr.json` with a top-level `consolidated_metadata`
+    /// field. The rest of the root document (attributes, `zarr_conventions`)
+    /// is preserved; a stale `consolidated_metadata` is replaced wholesale.
+    ///
+    /// The consolidated copy is advisory: the per-node `zarr.json` documents
+    /// stay authoritative and are not modified.
     pub fn consolidate_metadata(&self) -> Result<()> {
+        let mut nodes = Vec::new();
+        collect_nodes(&self.storage, &StorePrefix::root(), "", &mut nodes)?;
+        // zarr-python orders the flat map by depth, then case-folded path.
+        nodes.sort_by(|(a, _), (b, _)| {
+            a.matches('/')
+                .count()
+                .cmp(&b.matches('/').count())
+                .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+        });
+        let mut metadata = serde_json::Map::with_capacity(nodes.len());
+        for (path, doc) in nodes {
+            metadata.insert(path, doc);
+        }
+
+        let root_key = zarr_json_key("")?;
+        let bytes = self
+            .storage
+            .get(&root_key)
+            .map_err(|e| PbzError::Store(e.to_string()))?
+            .ok_or_else(|| PbzError::Metadata("store root has no zarr.json".into()))?;
+        let mut root: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| PbzError::Metadata(format!("store root: invalid zarr.json: {e}")))?;
+        root.as_object_mut()
+            .ok_or_else(|| PbzError::Metadata("store root zarr.json is not an object".into()))?
+            .insert(
+                "consolidated_metadata".to_owned(),
+                consolidated_field(metadata),
+            );
+        let encoded = serde_json::to_vec_pretty(&root)
+            .map_err(|e| PbzError::Metadata(format!("store root: encode zarr.json: {e}")))?;
+        self.storage
+            .set(&root_key, encoded.into())
+            .map_err(|e| PbzError::Store(e.to_string()))?;
         Ok(())
     }
+}
+
+/// The `zarr.json` store key of the node at store-relative `path` (empty for
+/// the store root).
+fn zarr_json_key(path: &str) -> Result<StoreKey> {
+    let key = if path.is_empty() {
+        "zarr.json".to_owned()
+    } else {
+        format!("{path}/zarr.json")
+    };
+    StoreKey::new(key).map_err(|e| PbzError::Metadata(e.to_string()))
+}
+
+/// A `consolidated_metadata` field value wrapping `metadata`.
+fn consolidated_field(metadata: serde_json::Map<String, Value>) -> Value {
+    json!({
+        "kind": "inline",
+        "must_understand": false,
+        "metadata": metadata,
+    })
+}
+
+/// Collect `(store-relative path, zarr.json document)` for every node below
+/// `prefix`, depth first.
+///
+/// Arrays terminate the walk: everything under an array prefix is chunk data,
+/// not nodes. A directory without a `zarr.json` is not a node (leftover junk,
+/// or a chunk directory) and is skipped without descending.
+fn collect_nodes(
+    storage: &ReadableWritableListableStorage,
+    prefix: &StorePrefix,
+    path: &str,
+    out: &mut Vec<(String, Value)>,
+) -> Result<()> {
+    let listing = storage
+        .list_dir(prefix)
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+    for child in listing.prefixes() {
+        let name = child.as_str().trim_end_matches('/').rsplit('/').next();
+        let Some(name) = name.filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        let node_path = if path.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{path}/{name}")
+        };
+        let Some(bytes) = storage
+            .get(&zarr_json_key(&node_path)?)
+            .map_err(|e| PbzError::Store(e.to_string()))?
+        else {
+            continue;
+        };
+        let mut doc: Value = serde_json::from_slice(&bytes).map_err(|e| {
+            PbzError::Metadata(format!("node '{node_path}': invalid zarr.json: {e}"))
+        })?;
+        let obj = doc.as_object_mut().ok_or_else(|| {
+            PbzError::Metadata(format!("node '{node_path}': zarr.json is not an object"))
+        })?;
+        let is_group = obj.get("node_type").and_then(Value::as_str) == Some("group");
+        if is_group {
+            // zarr-python stamps an empty `consolidated_metadata` on every
+            // group entry of the flat map (the nesting is rebuilt from the
+            // paths on read), so a childless group never sends a reader back
+            // to the store to list it. Match that.
+            obj.insert(
+                "consolidated_metadata".to_owned(),
+                consolidated_field(serde_json::Map::new()),
+            );
+        }
+        out.push((node_path.clone(), doc));
+        if is_group {
+            let child_prefix = StorePrefix::new(format!("{node_path}/"))
+                .map_err(|e| PbzError::Metadata(e.to_string()))?;
+            collect_nodes(storage, &child_prefix, &node_path, out)?;
+        }
+    }
+    Ok(())
 }
 
 /// Rebuild a track's `Genome` from its on-disk `contigs` and `offsets` arrays.

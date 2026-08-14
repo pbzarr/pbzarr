@@ -243,11 +243,13 @@ pub fn scale(store: &PbzStore, track: &str, config: &ScaleConfig) -> Result<Scal
         .store_metadata()
         .map_err(|e| PbzError::Store(e.to_string()))?;
 
-    // (3) Consolidated-metadata refresh (Task 2 seam; no-op stub for now).
-    store.consolidate_metadata()?;
-
-    // Seal the in-memory handle so base writes error without a reopen.
+    // The pyramid is published on disk as of the write above, so seal the
+    // live handle before anything else can fail: a consolidation error must
+    // not leave a published track still writable through this handle.
     t.seal();
+
+    // (3) Refresh the store-root consolidated metadata.
+    store.consolidate_metadata()?;
 
     Ok(ScaleReport { levels })
 }
