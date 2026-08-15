@@ -12,6 +12,7 @@ use pbzarr::Genome;
 use pbzarr::PbzStore;
 use pbzarr::import::{Config, Report, Source};
 use pbzarr::io::Dtype;
+#[allow(deprecated)]
 use pbzarr::{StackConfig, stack as rs_stack};
 use pbzarr_readers::{
     BedColumnSpec, BedSchema, DepthFilter, ImportMode, OverlapMode, column_index_by_name,
@@ -415,6 +416,7 @@ fn import_bam(
 /// the first source (each must exist in all sources).
 #[pyfunction]
 #[pyo3(signature = (sources, out, tracks=None, column_dim=None, column_chunk_size=None, workers=None))]
+#[allow(deprecated)]
 fn stack(
     py: Python<'_>,
     sources: Vec<(String, Option<String>)>,

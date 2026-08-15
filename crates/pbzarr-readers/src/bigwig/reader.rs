@@ -104,6 +104,8 @@ impl ValueReader for BigWigReader {
                 contig: contig_name.to_owned(),
             });
         }
+        // bigWig's values() is natively 0-based half-open; no conversion
+        // needed, only the narrowing cast to its u32 coordinate type.
         let start_u32 = u32::try_from(start).map_err(|_| {
             ReaderError::Other(anyhow::anyhow!(
                 "bigWig read requires start <= u32::MAX, got {} in {}",

@@ -1,5 +1,7 @@
 //! Batch stack: N single-sample stores -> one cohort store.
 
+#![allow(deprecated)]
+
 use ndarray::{Array1, ArrayD, Ix2};
 use pbzarr::genome::Contig;
 use pbzarr::io::Dtype;

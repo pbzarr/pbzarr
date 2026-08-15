@@ -1,18 +1,10 @@
-//! Dual alignment-file backend: noodles for BAM, rust-htslib for CRAM.
-//!
-//! CRAM goes through htslib because its decoder is several times faster than
-//! the pure-Rust alternative (riker measured ~3.8x); BAM stays on noodles to
-//! keep the common path free of the C boundary. `Backend` hides that split
-//! behind one `fetch`/`has_records` surface keyed on contig name, the same
-//! boundary `ValueReader::read_into` uses elsewhere in this crate.
-
 use std::fs::File;
 use std::io::Read as IoRead;
 use std::path::{Path, PathBuf};
 
 use noodles_bam as bam;
 use noodles_bgzf_bam as bgzf;
-use noodles_core::{Position, Region as NoodlesRegion};
+use noodles_core::Region as NoodlesRegion;
 use noodles_sam as sam;
 use rust_htslib::bam::Read as HtslibRead;
 use rust_htslib::bam::record::Cigar as HtslibCigar;
@@ -20,26 +12,17 @@ use rust_htslib::bam::record::Cigar as HtslibCigar;
 use pbzarr::genome::{Contig, Genome};
 use pbzarr::io::{ReaderError, Result};
 
+use crate::coords::{noodles_query_interval, pos_to_zero_based};
+
 use super::record::{AlignedRead, CigarKind};
 
 /// A BAM index, read into a concrete type rather than relying on
-/// `noodles_bam::io::IndexedReader`'s internal `Box<dyn BinningIndex>`. That
-/// trait object doesn't declare `Send` even though every concrete index
-/// noodles produces is plain owned data, which would otherwise force
-/// `Backend` (and therefore `BamReader`, which `MultiValueReader` requires to
-/// be `Send`) to hand-assert thread-safety itself. Holding the concrete
-/// `.bai`/`.csi` type instead — the same idea as `BedMultiReader` holding a
-/// concrete `noodles_tabix::Index` — keeps `Backend` auto-`Send` for free.
+/// `noodles_bam::io::IndexedReader`'s internal `Box<dyn BinningIndex>`.
 pub enum BamIndex {
     Bai(bam::bai::Index),
     Csi(noodles_csi_bam::Index),
 }
 
-/// `noodles_bam::io::Reader::query`'s `index: &I` is generic over `I:
-/// BinningIndex`, so a `BamIndex` can't be passed to it directly; this
-/// dispatches to the concrete branch. Both arms return the same `Query<'r,
-/// R>` (the index only feeds the internal chunk lookup, not the query
-/// iterator's own type), so the match unifies without a wrapper trait impl.
 fn bam_query<'r>(
     reader: &'r mut bam::io::Reader<bgzf::io::Reader<File>>,
     header: &sam::Header,
@@ -111,11 +94,6 @@ impl Backend {
 const CRAM_MAGIC: [u8; 4] = *b"CRAM";
 const BGZF_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
-/// Content-sniffs the first 4 bytes to tell CRAM from (bgzf-compressed) BAM,
-/// so a misnamed extension doesn't route the file into the wrong decoder.
-/// Falls back to the extension whenever the sniff itself is inconclusive: a
-/// read error (unreadable/too-short file, surfaced properly by the real
-/// `open_*` call that follows) or a magic that matches neither format.
 fn is_cram(path: &Path) -> bool {
     match sniff_magic(path) {
         Some(magic) if magic[..4] == CRAM_MAGIC => true,
@@ -260,8 +238,7 @@ fn open_cram(path: &Path, reference: Option<&Path>) -> Result<(Backend, Genome)>
 
 /// Builds the half-open `[start, end)` query region (0-based) as noodles'
 /// 1-based inclusive `Region`, and runs it against `index` to get a `Query`
-/// iterator. Shared by `fetch_bam` and `has_records_bam`, the read and probe
-/// paths, which otherwise duplicated this coordinate conversion verbatim.
+/// iterator. Returns `None` for an empty/inverted range instead of erroring.
 fn bam_query_region<'r>(
     reader: &'r mut bam::io::Reader<bgzf::io::Reader<File>>,
     header: &sam::Header,
@@ -269,16 +246,17 @@ fn bam_query_region<'r>(
     contig: &str,
     start: u64,
     end: u64,
-) -> Result<bam::io::reader::Query<'r, bgzf::io::Reader<File>>> {
-    let q_start = Position::try_from(start as usize + 1)
-        .map_err(|e| ReaderError::Other(anyhow::anyhow!("bad start {start}: {e}")))?;
-    let q_end = Position::try_from(end as usize)
-        .map_err(|e| ReaderError::Other(anyhow::anyhow!("bad end {end}: {e}")))?;
-    let region = NoodlesRegion::new(contig, q_start..=q_end);
+) -> Result<Option<bam::io::reader::Query<'r, bgzf::io::Reader<File>>>> {
+    let Some(interval) = noodles_query_interval(start, end)? else {
+        return Ok(None);
+    };
+    let region = NoodlesRegion::new(contig, interval);
 
-    bam_query(reader, header, index, &region).map_err(|source| {
-        ReaderError::Other(anyhow::anyhow!("query {contig}:{start}-{end}: {source}"))
-    })
+    bam_query(reader, header, index, &region)
+        .map(Some)
+        .map_err(|source| {
+            ReaderError::Other(anyhow::anyhow!("query {contig}:{start}-{end}: {source}"))
+        })
 }
 
 fn fetch_bam(
@@ -290,7 +268,9 @@ fn fetch_bam(
     end: u64,
     visit: &mut dyn FnMut(&AlignedRead) -> Result<()>,
 ) -> Result<()> {
-    let mut query = bam_query_region(reader, header, index, contig, start, end)?;
+    let Some(mut query) = bam_query_region(reader, header, index, contig, start, end)? else {
+        return Ok(());
+    };
 
     let mut record = noodles_bam::Record::default();
     let mut read = AlignedRead::default();
@@ -315,7 +295,9 @@ fn has_records_bam(
     start: u64,
     end: u64,
 ) -> Result<bool> {
-    let mut query = bam_query_region(reader, header, index, contig, start, end)?;
+    let Some(mut query) = bam_query_region(reader, header, index, contig, start, end)? else {
+        return Ok(false);
+    };
 
     let mut record = noodles_bam::Record::default();
     let n = query
@@ -330,6 +312,7 @@ fn has_records_cram(
     start: u64,
     end: u64,
 ) -> Result<bool> {
+    // htslib's fetch() is natively 0-based half-open; no conversion needed.
     reader
         .fetch((contig, start as i64, end as i64))
         .map_err(|source| {
@@ -361,7 +344,7 @@ fn decode_bam_record(record: &noodles_bam::Record, out: &mut AlignedRead) -> Res
         .alignment_start()
         .transpose()
         .map_err(|e| ReaderError::Other(anyhow::anyhow!("alignment_start: {e}")))?
-        .map(|p| (usize::from(p) - 1) as u64)
+        .map(pos_to_zero_based)
         .unwrap_or(0);
     out.start = start;
 
@@ -379,7 +362,7 @@ fn decode_bam_record(record: &noodles_bam::Record, out: &mut AlignedRead) -> Res
         .mate_alignment_start()
         .transpose()
         .map_err(|e| ReaderError::Other(anyhow::anyhow!("mate_alignment_start: {e}")))?
-        .map(|p| (usize::from(p) - 1) as i64)
+        .map(|p| pos_to_zero_based(p) as i64)
         .unwrap_or(-1);
 
     if let Some(name) = record.name() {
@@ -417,6 +400,7 @@ fn fetch_cram(
     end: u64,
     visit: &mut dyn FnMut(&AlignedRead) -> Result<()>,
 ) -> Result<()> {
+    // htslib's fetch() is natively 0-based half-open; no conversion needed.
     reader
         .fetch((contig, start as i64, end as i64))
         .map_err(|source| {
@@ -446,6 +430,8 @@ fn decode_cram_record(record: &rust_htslib::bam::Record, out: &mut AlignedRead) 
     out.flags = record.flags();
     out.paired = record.is_paired();
     out.mapq = record.mapq();
+    // htslib's pos()/mpos() are natively 0-based; no conversion needed. An
+    // unmapped record's pos() is -1, clamped to the 0 sentinel here.
     out.start = record.pos().max(0) as u64;
 
     out.mate_same_contig =

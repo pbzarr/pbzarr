@@ -1,6 +1,8 @@
-//! Single-pass, multi-column import of one tabix-indexed BED into N scalar
-//! tracks. A [`BedSchema`] names which file columns become which tracks; each
-//! BED line is parsed once and scattered into every target track's buffer.
+//! Schema-driven, single-pass import of tabix-indexed BED columns. Unique
+//! target track names create one track per BED column. Mapping every selected
+//! column to one target creates a rank-2 track with an explicitly labeled,
+//! homogeneous BED-column axis. PBZ permits only one non-position axis, so a
+//! grouped BED-column axis cannot be combined with a multi-source axis.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -9,18 +11,23 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use noodles_bgzf as bgzf;
-use noodles_core::Position;
-use noodles_core::region::Interval;
 use noodles_csi::BinningIndex;
 
 use pbzarr::genome::Genome;
-use pbzarr::import::{Config, Report, run_matrix_pipeline, run_multi_pipeline, run_wide_pipeline};
+use pbzarr::import::{
+    Config, Report, Source, run_matrix_pipeline, run_multi_pipeline, run_wide_pipeline,
+};
 use pbzarr::io::{ColumnSinkMut, Dtype, MultiValueReader, ReaderError};
-use pbzarr::{PbzError, PbzStore, Result, TrackConfig};
+use pbzarr::{
+    PbzError, PbzStore, Result, TrackConfig, validate_column_dimension_name, validate_node_name,
+};
+
+use crate::coords::noodles_query_interval;
 
 use super::import::zero_fill;
 use super::reader::column_index_by_name;
 use super::reader::open_bgzf;
+use super::schema::read_bed_layout;
 use super::schema::{BedImportOptions, ResolvedImport, resolve_sources};
 
 /// Reader-side result alias (parse/IO errors), distinct from `pbzarr::Result`.
@@ -68,12 +75,21 @@ impl BedColumnSpec {
     }
 }
 
-/// An ordered set of columns to import from one BED file.
+/// An ordered mapping from BED columns to target tracks.
+///
+/// [`plan_bed_schema`] gives columns with unique target names separate tracks.
+/// If every selected column has the same target name, it instead creates one
+/// rank-2 track whose explicitly labeled BED-column axis is homogeneous: all
+/// selected columns must share a dtype and description. Because PBZ supports
+/// only one non-position axis, that grouped layout accepts one BED source.
+/// The legacy [`from_bed_multi`] entry point continues to import one source
+/// into one scalar track per schema entry.
 pub struct BedSchema(pub Vec<BedColumnSpec>);
 
 /// A schema entry with its selector resolved to a concrete file column + name.
 pub(super) struct Resolved {
     pub file_col: usize,
+    pub column_label: String,
     pub dtype: Dtype,
     pub track_name: String,
     pub description: Option<String>,
@@ -112,14 +128,266 @@ pub(super) fn resolve(bed_gz: &Path, schema: &BedSchema) -> Result<Vec<Resolved>
                 "bed multi import: duplicate track name {track_name:?}"
             )));
         }
+        let column_label = match &spec.selector {
+            ColumnSelector::Name(name) => name.clone(),
+            ColumnSelector::Index(index) => indexed_column_label(*index)?,
+        };
         out.push(Resolved {
             file_col,
+            column_label,
             dtype: spec.dtype,
             track_name,
             description: spec.description.clone(),
         });
     }
     Ok(out)
+}
+
+/// A fully resolved and validated schema import. Construct this before
+/// opening or creating the output store, then pass it to
+/// [`execute_bed_schema_plan`]. Its internals are deliberately private so an
+/// invalid pipeline shape cannot be assembled by callers.
+pub struct BedSchemaPlan {
+    sources: Vec<pbzarr::import::Source>,
+    layout: SchemaLayout,
+    column_dim: Option<String>,
+}
+
+enum SchemaLayout {
+    PerColumn(Vec<Resolved>),
+    BedColumnAxis {
+        track_name: String,
+        dtype: Dtype,
+        columns: Vec<usize>,
+        column_labels: Vec<String>,
+        description: Option<String>,
+    },
+}
+
+/// Resolve and validate a BED schema against all input sources without
+/// touching an output store.
+pub fn plan_bed_schema(
+    sources: &[pbzarr::import::Source],
+    schema: &BedSchema,
+    config: &Config,
+) -> Result<BedSchemaPlan> {
+    let first = sources
+        .first()
+        .ok_or_else(|| PbzError::Metadata("bed schema import: no input sources".into()))?;
+    if schema.0.is_empty() {
+        return Err(PbzError::Metadata(
+            "bed schema import: empty schema selects no BED columns".into(),
+        ));
+    }
+    validate_column_dim(config.column_dim.as_deref())?;
+
+    let layout = read_bed_layout(&first.path)?;
+    for source in &sources[1..] {
+        let other = read_bed_layout(&source.path)?;
+        if other.n_cols != layout.n_cols {
+            return Err(PbzError::Metadata(format!(
+                "bed schema import: {} has {} BED columns but {} has {}",
+                source.path.display(),
+                other.n_cols,
+                first.path.display(),
+                layout.n_cols
+            )));
+        }
+        if other.header != layout.header {
+            return Err(PbzError::Metadata(format!(
+                "bed schema import: {} BED column header differs from {}",
+                source.path.display(),
+                first.path.display()
+            )));
+        }
+    }
+    let mut resolved = Vec::with_capacity(schema.0.len());
+    let mut selected_columns = HashSet::with_capacity(schema.0.len());
+    for spec in &schema.0 {
+        let (file_col, default_track, column_label, indexed_number) = match &spec.selector {
+            ColumnSelector::Name(name) => {
+                let Some(header) = layout.header.as_ref() else {
+                    return Err(PbzError::Metadata(format!(
+                        "bed schema import: named BED column {name:?} requires a #-prefixed header"
+                    )));
+                };
+                let matching = header
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, column)| *column == name)
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                let Some(&index) = matching.first() else {
+                    return Err(PbzError::Metadata(format!(
+                        "bed schema import: BED column {name:?} is not present in the header"
+                    )));
+                };
+                if matching.len() > 1 {
+                    return Err(PbzError::Metadata(format!(
+                        "bed schema import: named BED column {name:?} is ambiguous because it matches {} header columns; use a one-based numeric selector",
+                        matching.len()
+                    )));
+                }
+                (index, Some(name.clone()), name.clone(), None)
+            }
+            ColumnSelector::Index(index) => {
+                let one_based = indexed_column_number(*index)?;
+                let label = match layout.header.as_ref().and_then(|header| header.get(*index)) {
+                    Some(label) => label.clone(),
+                    None => format!("column {one_based}"),
+                };
+                (*index, None, label, Some(one_based))
+            }
+        };
+        if file_col < 3 {
+            let selector = indexed_number
+                .map(|number| format!("{number} (one-based)"))
+                .unwrap_or_else(|| format!("{column_label:?}"));
+            return Err(PbzError::Metadata(format!(
+                "bed schema import: BED column {selector} is a coordinate column (value BED columns start at 4)"
+            )));
+        }
+        if file_col >= layout.n_cols {
+            let selector = indexed_number
+                .map(|number| format!("{number} (one-based)"))
+                .unwrap_or_else(|| format!("{column_label:?}"));
+            return Err(PbzError::Metadata(format!(
+                "bed schema import: BED column {selector} is outside the {}-column input",
+                layout.n_cols
+            )));
+        }
+        if !selected_columns.insert(file_col) {
+            return Err(PbzError::Metadata(format!(
+                "bed schema import: BED column {column_label:?} is selected more than once"
+            )));
+        }
+        let track_name = spec.track_name.clone().or(default_track).ok_or_else(|| {
+            let selector = indexed_number
+                .map(|number| format!("{number} (one-based)"))
+                .unwrap_or_else(|| format!("{column_label:?}"));
+            PbzError::Metadata(format!(
+                "bed schema import: BED column {selector} needs an explicit target track name"
+            ))
+        })?;
+        validate_node_name(&track_name).map_err(|error| {
+            PbzError::Metadata(format!(
+                "bed schema import: target track name {track_name:?} is invalid: {error}"
+            ))
+        })?;
+        resolved.push(Resolved {
+            file_col,
+            column_label,
+            dtype: spec.dtype,
+            track_name,
+            description: spec.description.clone(),
+        });
+    }
+
+    let unique_tracks = resolved
+        .iter()
+        .map(|column| column.track_name.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    let layout = if unique_tracks == resolved.len() {
+        if sources.len() > 1 && config.column_dim.is_none() {
+            return Err(PbzError::Metadata(
+                "bed schema import: multiple input sources make each BED column track rank 2 (position, source); set a column dimension name"
+                    .into(),
+            ));
+        }
+        if sources.len() > 1 {
+            let mut source_labels = HashSet::with_capacity(sources.len());
+            for label in sources.iter().map(Source::label) {
+                if !source_labels.insert(label.clone()) {
+                    return Err(PbzError::Metadata(format!(
+                        "bed schema import: duplicate source-axis label {label:?}"
+                    )));
+                }
+            }
+        }
+        SchemaLayout::PerColumn(resolved)
+    } else if unique_tracks == 1 && resolved.len() >= 2 {
+        let track_name = resolved[0].track_name.clone();
+        if sources.len() > 1 {
+            let bed_axis = config.column_dim.as_deref().unwrap_or("BED column");
+            return Err(PbzError::Metadata(format!(
+                "bed schema import: {} BED columns map to track {track_name:?}, creating BED-column axis {bed_axis:?}; {} sources create a source axis. Together they require rank 3 (position, source, {bed_axis}), but PBZ supports only one non-position axis. Use one input or give every BED column a unique track name",
+                resolved.len(),
+                sources.len()
+            )));
+        }
+        if config.column_dim.is_none() {
+            return Err(PbzError::Metadata(format!(
+                "bed schema import: multiple BED columns map to track {track_name:?}, producing rank 2 (position, BED column); set a column dimension name"
+            )));
+        }
+        let dtype = resolved[0].dtype;
+        if resolved.iter().any(|column| column.dtype != dtype) {
+            return Err(PbzError::Metadata(format!(
+                "bed schema import: BED columns mapped to track {track_name:?} must share one dtype"
+            )));
+        }
+        let description = resolved[0].description.clone();
+        if resolved
+            .iter()
+            .any(|column| column.description.as_deref() != description.as_deref())
+        {
+            return Err(PbzError::Metadata(format!(
+                "bed schema import: BED columns mapped to track {track_name:?} must have descriptions that match exactly, including whether a description is present"
+            )));
+        }
+        let mut column_labels = HashSet::with_capacity(resolved.len());
+        if let Some(duplicate) = resolved
+            .iter()
+            .map(|column| column.column_label.as_str())
+            .find(|label| !column_labels.insert(*label))
+        {
+            return Err(PbzError::Metadata(format!(
+                "bed schema import: grouped track {track_name:?} has duplicate BED column label {duplicate:?}"
+            )));
+        }
+        SchemaLayout::BedColumnAxis {
+            track_name,
+            dtype,
+            columns: resolved.iter().map(|column| column.file_col).collect(),
+            column_labels: resolved
+                .iter()
+                .map(|column| column.column_label.clone())
+                .collect(),
+            description,
+        }
+    } else {
+        return Err(PbzError::Metadata(
+            "bed schema import: partially grouped BED columns are not supported; map all BED columns to one track or give every BED column a unique track name"
+                .into(),
+        ));
+    };
+
+    Ok(BedSchemaPlan {
+        sources: sources.to_vec(),
+        layout,
+        column_dim: config.column_dim.clone(),
+    })
+}
+
+fn indexed_column_label(index: usize) -> Result<String> {
+    Ok(format!("column {}", indexed_column_number(index)?))
+}
+
+fn indexed_column_number(index: usize) -> Result<usize> {
+    index.checked_add(1).ok_or_else(|| {
+        PbzError::Metadata(format!(
+            "bed schema import: BED column index {index} cannot be represented as a one-based column number"
+        ))
+    })
+}
+
+fn validate_column_dim(column_dim: Option<&str>) -> Result<()> {
+    let Some(name) = column_dim else {
+        return Ok(());
+    };
+    validate_column_dimension_name(name)
+        .map_err(|error| PbzError::Metadata(format!("bed schema import: {error}")))
 }
 
 /// Shared, thread-safe reader state: index + name→id map + resolved columns.
@@ -254,19 +522,12 @@ impl MultiValueReader for BedMultiReader {
         end: u64,
         sinks: &mut [ColumnSinkMut<'_>],
     ) -> IoResult<()> {
-        if end <= start {
+        let Some(interval) = noodles_query_interval(start, end)? else {
             return Ok(());
-        }
+        };
         let Some(&ref_id) = self.shared.ref_ids.get(contig_name) else {
             return Ok(()); // contig absent from this BED -> leave as caller's fill
         };
-
-        // tabix/csi intervals are 1-based inclusive; our range is 0-based half-open.
-        let q_start = Position::try_from(start as usize + 1)
-            .map_err(|e| ReaderError::Other(anyhow::anyhow!("bad start {start}: {e}")))?;
-        let q_end = Position::try_from(end as usize)
-            .map_err(|e| ReaderError::Other(anyhow::anyhow!("bad end {end}: {e}")))?;
-        let interval = Interval::from(q_start..=q_end);
 
         let chunks = self
             .shared
@@ -310,6 +571,80 @@ impl MultiValueReader for BedMultiReader {
             shared: Arc::clone(&self.shared),
             bgzf: Mutex::new(bgzf),
         })
+    }
+}
+
+/// Execute a plan returned by [`plan_bed_schema`]. Schema resolution is not
+/// repeated. The executor rejects a column dimension that differs from the
+/// planned value before it accesses the store.
+pub fn execute_bed_schema_plan(
+    store: &mut PbzStore,
+    plan: BedSchemaPlan,
+    genome: Genome,
+    config: Config,
+) -> Result<Report> {
+    if config.column_dim != plan.column_dim {
+        return Err(PbzError::Metadata(format!(
+            "bed schema import: column dimension changed after planning (planned {:?}, execution requested {:?})",
+            plan.column_dim, config.column_dim
+        )));
+    }
+    match plan.layout {
+        SchemaLayout::PerColumn(resolved) => {
+            let scalar = plan.sources.len() == 1 && config.column_dim.is_none();
+            let source_labels = plan.sources.iter().map(Source::label).collect::<Vec<_>>();
+            let specs = resolved
+                .iter()
+                .map(|column| {
+                    let labels = (!scalar).then(|| source_labels.clone());
+                    let mut track_config = config.track_config(
+                        column.dtype,
+                        Some(zero_fill(column.dtype)),
+                        labels,
+                        "sample",
+                    );
+                    if let Some(description) = &column.description {
+                        track_config = track_config.description(description.clone());
+                    }
+                    (column.track_name.clone(), genome.clone(), track_config)
+                })
+                .collect();
+            let reader_columns = resolved
+                .iter()
+                .map(|column| (Some(column.file_col), column.dtype))
+                .collect::<Vec<_>>();
+            let readers = open_readers(&plan.sources, &reader_columns, &genome)?;
+            run_single_or_matrix(store, specs, readers, scalar, config)
+        }
+        SchemaLayout::BedColumnAxis {
+            track_name,
+            dtype,
+            columns,
+            column_labels,
+            description,
+        } => {
+            let mut track_config = config.track_config(
+                dtype,
+                Some(zero_fill(dtype)),
+                Some(column_labels),
+                "BED column",
+            );
+            if let Some(description) = description {
+                track_config = track_config.description(description);
+            }
+            let reader_columns = columns
+                .into_iter()
+                .map(|column| (Some(column), dtype))
+                .collect();
+            let source = &plan.sources[0];
+            let reader = BedMultiReader::open(&source.path, reader_columns, genome.clone())
+                .map_err(|error| {
+                    PbzError::Store(format!("open {}: {error}", source.path.display()))
+                })?;
+            store.create_tracks_with(vec![(track_name, genome, track_config)], move |tracks| {
+                run_wide_pipeline(tracks[0], reader, &config)
+            })
+        }
     }
 }
 
@@ -523,5 +858,23 @@ mod tests {
             description: None,
         }]);
         assert!(resolve(&PathBuf::from("unused.bed.gz"), &schema).is_err());
+    }
+
+    #[test]
+    fn maximum_index_selector_returns_an_error_without_panicking() {
+        let schema = BedSchema(vec![BedColumnSpec::indexed(
+            usize::MAX,
+            Dtype::I32,
+            "impossible",
+        )]);
+        let result = std::panic::catch_unwind(|| {
+            resolve(&PathBuf::from("unused.bed.gz"), &schema)
+                .err()
+                .expect("usize::MAX must be rejected")
+                .to_string()
+        });
+        let error = result.expect("maximum index must not panic");
+        assert!(error.contains("BED column"), "{error}");
+        assert!(error.contains("one-based"), "{error}");
     }
 }

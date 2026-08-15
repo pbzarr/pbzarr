@@ -53,6 +53,24 @@ fn create_track_builds_flat_group() {
 }
 
 #[test]
+fn create_track_rejects_invalid_direct_child_names_before_writing() {
+    for invalid in ["", "__axis", "...", "nested/track"] {
+        let storage: ReadableWritableListableStorage = Arc::new(MemoryStore::new());
+        let mut store = PbzStore::create_with_storage(storage).unwrap();
+
+        let result = store.create_track(invalid, tiny_genome(), TrackConfig::new(Dtype::I32));
+        let error = match result {
+            Ok(_) => panic!("track names must be valid non-root Zarr node names"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("invalid PBZ/Zarr node name"), "{error}");
+        assert!(error.contains(&format!("{invalid:?}")), "{error}");
+        assert!(store.track_names().next().is_none());
+    }
+}
+
+#[test]
 fn open_discovers_only_conforming_groups() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");

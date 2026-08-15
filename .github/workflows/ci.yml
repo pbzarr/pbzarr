@@ -12,10 +12,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          pixi-version: v0.70.1
+          cache: true
 
-      - run: cargo test --workspace
+      - run: pixi run test
 
-      - run: cargo clippy --workspace -- -D warnings
+      - run: pixi run clippy
 
-      - run: cargo fmt --all -- --check
+      - run: pixi run fmt-check

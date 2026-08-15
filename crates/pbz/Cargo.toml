@@ -13,3 +13,6 @@ anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 pbzarr = { path = "../pbzarr" }
 pbzarr-readers = { path = "../pbzarr-readers" }
+
+[dev-dependencies]
+tempfile = "3"

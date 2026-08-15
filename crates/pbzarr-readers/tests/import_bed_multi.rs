@@ -10,7 +10,8 @@ use pbzarr::import::Config;
 use pbzarr::io::Dtype;
 use pbzarr::{PbzStore, Region};
 use pbzarr_readers::{
-    BedColumnSpec, BedImportOptions, BedSchema, Source, from_bed_matrix, from_bed_multi,
+    BedColumnSpec, BedImportOptions, BedSchema, Source, execute_bed_schema_plan, from_bed_matrix,
+    from_bed_multi, plan_bed_schema,
 };
 use tempfile::TempDir;
 
@@ -26,6 +27,689 @@ fn genome(cs: &[(&str, u64)]) -> Genome {
             .collect(),
     )
     .unwrap()
+}
+
+#[test]
+fn schema_plan_rejects_an_ambiguous_named_bed_column() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::schema_plan_rejects_an_ambiguous_named_bed_column: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "duplicate-header",
+        &["chrom", "start", "end", "value", "value"],
+        &[("chr1", 0, 8, vec!["4", "9"])],
+    );
+
+    let result = plan_bed_schema(
+        &[Source::new(bed)],
+        &BedSchema(vec![BedColumnSpec::named("value", Dtype::U16)]),
+        &Config::default(),
+    );
+    let error = match result {
+        Ok(_) => panic!("a named selector must not pick the first duplicate header"),
+        Err(error) => error.to_string(),
+    };
+
+    assert!(error.contains("BED column \"value\""), "{error}");
+    assert!(error.contains("ambiguous"), "{error}");
+    assert!(error.contains("2 header columns"), "{error}");
+}
+
+#[test]
+fn indexed_duplicate_header_labels_are_safe_for_per_column_tracks() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::indexed_duplicate_header_labels_are_safe_for_per_column_tracks: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "duplicate-header-indexed",
+        &["chrom", "start", "end", "value", "value"],
+        &[("chr1", 0, 8, vec!["4", "9"])],
+    );
+    let sources = [Source::new(bed)];
+    let schema = BedSchema(vec![
+        BedColumnSpec::indexed(3, Dtype::U16, "first"),
+        BedColumnSpec::indexed(4, Dtype::U16, "second"),
+    ]);
+
+    let plan = plan_bed_schema(&sources, &schema, &Config::default())
+        .expect("duplicate labels are not persisted by PerColumn layout");
+    let output = dir.path().join("duplicate-header-indexed.pbz");
+    let mut store = PbzStore::create(output).unwrap();
+    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 8)]), Config::default()).unwrap();
+
+    let region = Region {
+        contig: store.genome_for("first").unwrap().id("chr1").unwrap(),
+        start: 0,
+        end: 8,
+    };
+    for (track_name, expected) in [("first", 4u16), ("second", 9u16)] {
+        let values = store
+            .track(track_name)
+            .unwrap()
+            .read_region::<u16>(&region)
+            .unwrap();
+        assert!(values.iter().all(|value| *value == expected));
+    }
+}
+
+#[test]
+fn indexed_schema_without_a_target_names_the_selector_one_based() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::indexed_schema_without_a_target_names_the_selector_one_based: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "missing-target",
+        &["chrom", "start", "end", "value"],
+        &[("chr1", 0, 8, vec!["4"])],
+    );
+    let mut column = BedColumnSpec::indexed(3, Dtype::U16, "unused");
+    column.track_name = None;
+
+    let error = plan_bed_schema(
+        &[Source::new(bed)],
+        &BedSchema(vec![column]),
+        &Config::default(),
+    )
+    .err()
+    .expect("an indexed selector has no header name to use as a target")
+    .to_string();
+
+    assert!(
+        error.contains("BED column 4 (one-based) needs an explicit target track name"),
+        "{error}"
+    );
+    assert!(!error.contains("BED column 3 needs"), "{error}");
+}
+
+#[test]
+fn grouped_indexed_columns_reject_duplicate_persisted_labels() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::grouped_indexed_columns_reject_duplicate_persisted_labels: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "duplicate-grouped-labels",
+        &["chrom", "start", "end", "value", "value"],
+        &[("chr1", 0, 8, vec!["4", "9"])],
+    );
+    let schema = BedSchema(vec![
+        BedColumnSpec::indexed(3, Dtype::U16, "stats"),
+        BedColumnSpec::indexed(4, Dtype::U16, "stats"),
+    ]);
+
+    let result = plan_bed_schema(
+        &[Source::new(bed)],
+        &schema,
+        &Config {
+            column_dim: Some("metric".into()),
+            ..Config::default()
+        },
+    );
+    let error = match result {
+        Ok(_) => panic!("grouped labels are persisted and must be unique"),
+        Err(error) => error.to_string(),
+    };
+
+    assert!(error.contains("grouped track \"stats\""), "{error}");
+    assert!(
+        error.contains("duplicate BED column label \"value\""),
+        "{error}"
+    );
+}
+
+#[test]
+fn grouped_schema_requires_exactly_matching_descriptions() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::grouped_schema_requires_exactly_matching_descriptions: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "grouped-description-mismatch",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[("chr1", 0, 8, vec!["4", "9"])],
+    );
+
+    for (first_description, second_description) in
+        [(Some("shared"), None), (Some("first"), Some("second"))]
+    {
+        let mut cov = BedColumnSpec::named("cov", Dtype::U16);
+        cov.track_name = Some("stats".into());
+        cov.description = first_description.map(str::to_owned);
+        let mut mapq = BedColumnSpec::named("mapq", Dtype::U16);
+        mapq.track_name = Some("stats".into());
+        mapq.description = second_description.map(str::to_owned);
+
+        let result = plan_bed_schema(
+            &[Source::new(&bed)],
+            &BedSchema(vec![cov, mapq]),
+            &Config {
+                column_dim: Some("metric".into()),
+                ..Config::default()
+            },
+        );
+        let error = match result {
+            Ok(_) => panic!("grouped descriptions must match exactly"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("track \"stats\""), "{error}");
+        assert!(error.contains("descriptions"), "{error}");
+        assert!(error.contains("match exactly"), "{error}");
+    }
+}
+
+#[test]
+fn grouped_schema_preserves_the_matching_track_description() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::grouped_schema_preserves_the_matching_track_description: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "grouped-description",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[("chr1", 0, 8, vec!["4", "9"])],
+    );
+    let mut cov = BedColumnSpec::named("cov", Dtype::U16);
+    cov.track_name = Some("stats".into());
+    cov.description = Some("Quality statistics".into());
+    let mut mapq = BedColumnSpec::named("mapq", Dtype::U16);
+    mapq.track_name = Some("stats".into());
+    mapq.description = Some("Quality statistics".into());
+    let config = Config {
+        column_dim: Some("metric".into()),
+        ..Config::default()
+    };
+    let plan = plan_bed_schema(&[Source::new(bed)], &BedSchema(vec![cov, mapq]), &config).unwrap();
+    let output = dir.path().join("grouped-description.pbz");
+    let mut store = PbzStore::create(&output).unwrap();
+    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 8)]), config).unwrap();
+
+    let metadata = std::fs::read_to_string(output.join("stats").join("zarr.json")).unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(
+        metadata["attributes"]["perbase:description"],
+        "Quality statistics"
+    );
+}
+
+#[test]
+fn grouped_schema_one_source_preserves_bed_column_order() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::grouped_schema_one_source_preserves_bed_column_order: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "s1",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[
+            ("chr1", 0, 4, vec!["4", "60"]),
+            ("chr1", 4, 8, vec!["9", "30"]),
+        ],
+    );
+    let sources = [Source::new(bed)];
+    let mut mapq = BedColumnSpec::named("mapq", Dtype::U16);
+    mapq.track_name = Some("stats".into());
+    let mut cov = BedColumnSpec::named("cov", Dtype::U16);
+    cov.track_name = Some("stats".into());
+    let schema = BedSchema(vec![mapq, cov]);
+    let config = Config {
+        column_dim: Some("BED column".into()),
+        ..Config::default()
+    };
+
+    let plan = plan_bed_schema(&sources, &schema, &config).unwrap();
+    let mut store = PbzStore::create(dir.path().join("grouped.pbz")).unwrap();
+    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 8)]), config).unwrap();
+
+    let track = store.track("stats").unwrap();
+    assert_eq!(track.rank(), 2);
+    assert_eq!(track.dtype(), Dtype::U16);
+    assert_eq!(track.column_dim(), Some("BED column"));
+    assert_eq!(track.columns_count().unwrap(), 2);
+    assert_eq!(
+        track.column_labels().unwrap(),
+        vec!["mapq".to_owned(), "cov".to_owned()]
+    );
+
+    let region = Region {
+        contig: store.genome_for("stats").unwrap().id("chr1").unwrap(),
+        start: 0,
+        end: 8,
+    };
+    let values = track
+        .read_region::<u16>(&region)
+        .unwrap()
+        .into_dimensionality::<Ix2>()
+        .unwrap();
+    for (index, row) in values.rows().into_iter().enumerate() {
+        assert_eq!(
+            row.to_vec(),
+            if index < 4 { vec![60, 4] } else { vec![30, 9] }
+        );
+    }
+}
+
+#[test]
+fn unique_schema_two_sources_uses_labeled_source_axis_per_track() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::unique_schema_two_sources_uses_labeled_source_axis_per_track: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let first = write_bed_bgzip_tabix(
+        dir.path(),
+        "first",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[("chr1", 0, 8, vec!["4", "60"])],
+    );
+    let second = write_bed_bgzip_tabix(
+        dir.path(),
+        "second",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[("chr1", 0, 8, vec!["9", "30"])],
+    );
+    let sources = [
+        Source::labeled(first, "tumor"),
+        Source::labeled(second, "normal"),
+    ];
+    let schema = BedSchema(vec![
+        BedColumnSpec::named("mapq", Dtype::U16),
+        BedColumnSpec::named("cov", Dtype::U16),
+    ]);
+    let config = Config {
+        column_dim: Some("sample".into()),
+        ..Config::default()
+    };
+    let plan = plan_bed_schema(&sources, &schema, &config).unwrap();
+    let mut store = PbzStore::create(dir.path().join("unique.pbz")).unwrap();
+    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 8)]), config).unwrap();
+
+    let region = Region {
+        contig: store.genome_for("mapq").unwrap().id("chr1").unwrap(),
+        start: 0,
+        end: 8,
+    };
+    for (track_name, expected) in [("mapq", vec![60, 30]), ("cov", vec![4, 9])] {
+        let track = store.track(track_name).unwrap();
+        assert_eq!(track.rank(), 2);
+        assert_eq!(track.dtype(), Dtype::U16);
+        assert_eq!(track.column_dim(), Some("sample"));
+        assert_eq!(
+            track.column_labels().unwrap(),
+            vec!["tumor".to_owned(), "normal".to_owned()]
+        );
+        let values = track
+            .read_region::<u16>(&region)
+            .unwrap()
+            .into_dimensionality::<Ix2>()
+            .unwrap();
+        assert!(
+            values
+                .rows()
+                .into_iter()
+                .all(|row| row.to_vec() == expected)
+        );
+    }
+}
+
+#[test]
+fn grouped_schema_two_sources_reports_rank_three_before_track_creation() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::grouped_schema_two_sources_reports_rank_three_before_track_creation: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let first = write_bed_bgzip_tabix(
+        dir.path(),
+        "first",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[("chr1", 0, 8, vec!["4", "60"])],
+    );
+    let second = write_bed_bgzip_tabix(
+        dir.path(),
+        "second",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[("chr1", 0, 8, vec!["9", "30"])],
+    );
+    let sources = [Source::new(first), Source::new(second)];
+    let mut cov = BedColumnSpec::named("cov", Dtype::U16);
+    cov.track_name = Some("stats".into());
+    let mut mapq = BedColumnSpec::named("mapq", Dtype::U16);
+    mapq.track_name = Some("stats".into());
+    let schema = BedSchema(vec![cov, mapq]);
+    let config = Config {
+        column_dim: Some("metric".into()),
+        ..Config::default()
+    };
+
+    let error = plan_bed_schema(&sources, &schema, &config)
+        .err()
+        .expect("grouped multi-source schema must fail")
+        .to_string();
+    assert!(
+        error.contains("2 BED columns map to track \"stats\""),
+        "{error}"
+    );
+    assert!(error.contains("BED-column axis \"metric\""), "{error}");
+    assert!(error.contains("2 sources create a source axis"), "{error}");
+    assert!(
+        error.contains("rank 3 (position, source, metric)"),
+        "{error}"
+    );
+    assert!(
+        error.contains("PBZ supports only one non-position axis"),
+        "{error}"
+    );
+    assert!(
+        error.contains("Use one input or give every BED column a unique track name"),
+        "{error}"
+    );
+
+    let store = PbzStore::create(dir.path().join("rank3.pbz")).unwrap();
+    assert!(store.track_names().next().is_none());
+}
+
+#[test]
+fn unique_schema_two_sources_requires_column_dimension() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::unique_schema_two_sources_requires_column_dimension: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let first = write_bed_bgzip_tabix(
+        dir.path(),
+        "first",
+        &["chrom", "start", "end", "cov"],
+        &[("chr1", 0, 8, vec!["4"])],
+    );
+    let second = write_bed_bgzip_tabix(
+        dir.path(),
+        "second",
+        &["chrom", "start", "end", "cov"],
+        &[("chr1", 0, 8, vec!["9"])],
+    );
+    let error = plan_bed_schema(
+        &[Source::new(first), Source::new(second)],
+        &BedSchema(vec![BedColumnSpec::named("cov", Dtype::U16)]),
+        &Config::default(),
+    )
+    .err()
+    .expect("multi-source per-BED-column layout must require an axis name")
+    .to_string();
+    assert!(error.contains("BED column"), "{error}");
+    assert!(error.contains("rank 2 (position, source)"), "{error}");
+    assert!(error.contains("column dimension name"), "{error}");
+}
+
+#[test]
+fn partially_grouped_schema_is_rejected() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::partially_grouped_schema_is_rejected: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "one",
+        &["chrom", "start", "end", "cov", "mapq", "score"],
+        &[("chr1", 0, 8, vec!["4", "60", "1.5"])],
+    );
+    let mut cov = BedColumnSpec::named("cov", Dtype::U16);
+    cov.track_name = Some("stats".into());
+    let mut mapq = BedColumnSpec::named("mapq", Dtype::U16);
+    mapq.track_name = Some("stats".into());
+    let schema = BedSchema(vec![cov, mapq, BedColumnSpec::named("score", Dtype::F32)]);
+    let error = plan_bed_schema(
+        &[Source::new(bed)],
+        &schema,
+        &Config {
+            column_dim: Some("metric".into()),
+            ..Config::default()
+        },
+    )
+    .err()
+    .expect("partial grouping must fail")
+    .to_string();
+    assert!(error.contains("partially grouped BED columns"), "{error}");
+    assert!(error.contains("all BED columns to one track"), "{error}");
+    assert!(error.contains("unique track name"), "{error}");
+}
+
+#[test]
+fn schema_plan_errors_are_shape_aware_and_preflighted() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::schema_plan_errors_are_shape_aware_and_preflighted: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "one",
+        &["chrom", "start", "end", "cov", "mapq", "score"],
+        &[("chr1", 0, 8, vec!["4", "60", "1.5"])],
+    );
+    let sources = [Source::new(&bed)];
+
+    let mut cov = BedColumnSpec::named("cov", Dtype::U16);
+    cov.track_name = Some("stats".into());
+    let mut mapq = BedColumnSpec::named("mapq", Dtype::U16);
+    mapq.track_name = Some("stats".into());
+    let grouped = BedSchema(vec![cov, mapq]);
+    let missing_dim = plan_bed_schema(&sources, &grouped, &Config::default())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        missing_dim.contains("multiple BED columns"),
+        "{missing_dim}"
+    );
+    assert!(missing_dim.contains("rank 2"), "{missing_dim}");
+    assert!(missing_dim.contains("column dimension"), "{missing_dim}");
+
+    let mut cov = BedColumnSpec::named("cov", Dtype::U16);
+    cov.track_name = Some("stats".into());
+    let mut score = BedColumnSpec::named("score", Dtype::F32);
+    score.track_name = Some("stats".into());
+    let mixed = BedSchema(vec![cov, score]);
+    let mixed_dtype = plan_bed_schema(
+        &sources,
+        &mixed,
+        &Config {
+            column_dim: Some("metric".into()),
+            ..Config::default()
+        },
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(mixed_dtype.contains("BED columns"), "{mixed_dtype}");
+    assert!(mixed_dtype.contains("track \"stats\""), "{mixed_dtype}");
+    assert!(mixed_dtype.contains("share one dtype"), "{mixed_dtype}");
+}
+
+#[test]
+fn unique_schema_rejects_duplicate_source_axis_labels() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::unique_schema_rejects_duplicate_source_axis_labels: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let first = write_bed_bgzip_tabix(
+        dir.path(),
+        "first",
+        &["chrom", "start", "end", "cov"],
+        &[("chr1", 0, 8, vec!["4"])],
+    );
+    let second = write_bed_bgzip_tabix(
+        dir.path(),
+        "second",
+        &["chrom", "start", "end", "cov"],
+        &[("chr1", 0, 8, vec!["9"])],
+    );
+    let sources = [
+        Source::labeled(first, "duplicate"),
+        Source::labeled(second, "duplicate"),
+    ];
+    let error = plan_bed_schema(
+        &sources,
+        &BedSchema(vec![BedColumnSpec::named("cov", Dtype::U16)]),
+        &Config {
+            column_dim: Some("sample".into()),
+            ..Config::default()
+        },
+    )
+    .err()
+    .expect("duplicate source-axis labels must fail")
+    .to_string();
+    assert!(error.contains("duplicate"), "{error}");
+    assert!(error.contains("label"), "{error}");
+}
+
+#[test]
+fn schema_execution_rejects_a_column_dimension_changed_after_planning() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::schema_execution_rejects_a_column_dimension_changed_after_planning: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "one",
+        &["chrom", "start", "end", "cov"],
+        &[("chr1", 0, 8, vec!["4"])],
+    );
+    let sources = [Source::new(bed)];
+    let plan = plan_bed_schema(
+        &sources,
+        &BedSchema(vec![BedColumnSpec::named("cov", Dtype::U16)]),
+        &Config::default(),
+    )
+    .unwrap();
+    let mut store = PbzStore::create(dir.path().join("changed-config.pbz")).unwrap();
+
+    let error = execute_bed_schema_plan(
+        &mut store,
+        plan,
+        genome(&[("chr1", 8)]),
+        Config {
+            column_dim: Some("sample".into()),
+            ..Config::default()
+        },
+    )
+    .err()
+    .expect("execution must not change the planned rank")
+    .to_string();
+    assert!(error.contains("column dimension"), "{error}");
+    assert!(error.contains("planning"), "{error}");
+    assert!(store.track_names().next().is_none());
+}
+
+#[test]
+fn schema_plan_rejects_invalid_column_dimension_names() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::schema_plan_rejects_invalid_column_dimension_names: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "one",
+        &["chrom", "start", "end", "cov"],
+        &[("chr1", 0, 8, vec!["4"])],
+    );
+    let sources = [Source::new(bed)];
+    let schema = BedSchema(vec![BedColumnSpec::named("cov", Dtype::U16)]);
+
+    for invalid in ["", "   ", "sample/group", "position", "values"] {
+        let error = plan_bed_schema(
+            &sources,
+            &schema,
+            &Config {
+                column_dim: Some(invalid.into()),
+                ..Config::default()
+            },
+        )
+        .err()
+        .unwrap_or_else(|| panic!("column dimension {invalid:?} must fail"))
+        .to_string();
+        assert!(error.contains("column dimension"), "{error}");
+        assert!(error.contains("invalid"), "{error}");
+    }
+}
+
+#[test]
+fn schema_plan_rejects_maximum_index_without_panicking() {
+    if !htslib_available() {
+        eprintln!(
+            "skip import_bed_multi::schema_plan_rejects_maximum_index_without_panicking: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "one",
+        &["chrom", "start", "end", "cov"],
+        &[("chr1", 0, 8, vec!["4"])],
+    );
+    let sources = [Source::new(bed)];
+    let schema = BedSchema(vec![BedColumnSpec::indexed(usize::MAX, Dtype::U16, "cov")]);
+
+    let result = std::panic::catch_unwind(|| {
+        plan_bed_schema(&sources, &schema, &Config::default())
+            .err()
+            .expect("usize::MAX must be rejected")
+            .to_string()
+    });
+    let error = result.expect("maximum index must not panic");
+    assert!(error.contains("BED column"), "{error}");
+    assert!(error.contains("one-based"), "{error}");
 }
 
 #[test]
@@ -443,6 +1127,25 @@ fn reordered_headers_are_rejected() {
     );
     let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
     let sources = [Source::new(a), Source::new(b)];
+    let schema_error = plan_bed_schema(
+        &sources,
+        &BedSchema(vec![
+            BedColumnSpec::named("coverage", Dtype::U16),
+            BedColumnSpec::named("score", Dtype::F32),
+        ]),
+        &Config {
+            column_dim: Some("sample".into()),
+            ..Config::default()
+        },
+    )
+    .err()
+    .expect("schema planning must reject reordered source headers")
+    .to_string();
+    assert!(
+        schema_error.contains("BED column header differs"),
+        "{schema_error}"
+    );
+    assert!(store.track_names().next().is_none());
     let result = from_bed_matrix(
         &mut store,
         &sources,
@@ -663,5 +1366,11 @@ fn wide_track_rejects_word_bool_field_before_creating_tracks() {
         Ok(_) => panic!("wide import with a word-bool field should fail"),
     };
     assert!(error.contains("is_local_max"), "unexpected error: {error}");
+    assert!(error.contains("BED column(s)"), "unexpected error: {error}");
+    assert!(
+        error.contains("`--field` selection"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.contains("field(s)"), "unexpected error: {error}");
     assert!(store.track("stats").is_none());
 }

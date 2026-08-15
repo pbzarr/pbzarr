@@ -3,15 +3,15 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use pbzarr::import::Config;
 use pbzarr::io::Dtype;
 use pbzarr::{Genome, PbzStore};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
-    OverlapMode, column_index_by_name, from_bam, from_bed_matrix, from_bed_multi, infer_bed_dtypes,
-    read_bed_layout,
+    OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam, from_bed_matrix,
+    infer_bed_dtypes, infer_bed_dtypes_for_sources, plan_bed_schema, read_bed_layout,
 };
 
 #[derive(Debug, Parser)]
@@ -56,7 +56,7 @@ enum ImportCommand {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth -c sample s1.bed.gz s2.bed.gz\n  pbz import bed -o mask.pbz --genome genome.fai --track callable regions.bed.gz\n  pbz import bed -o stats.pbz --genome genome.fai --schema schema.tsv wide.bed.gz"
+    after_help = "Examples:\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth -c sample s1.bed.gz s2.bed.gz\n  pbz import bed -o mask.pbz --genome genome.fai --track callable regions.bed.gz\n  pbz import bed -o stats.pbz --genome genome.fai -c metric --schema schema.tsv wide.bed.gz"
 )]
 struct BedArgs {
     #[command(flatten)]
@@ -92,7 +92,7 @@ struct ImportOptions {
     #[arg(long)]
     shard_column_size: Option<usize>,
     /// Name for the column dimension of a 2D track (required whenever the
-    /// output is 2D: several sources, or several fields from one source).
+    /// output is 2D: several sources, or several BED columns in one track).
     #[arg(short = 'c', long)]
     column_dim: Option<String>,
 }
@@ -210,23 +210,26 @@ struct BedOptions {
     /// FAI or chromosome-sizes file defining the genome.
     #[arg(long, required_unless_present = "emit_schema")]
     genome: Option<PathBuf>,
-    /// Header field to import (requires a `#`-prefixed header). Repeating
-    /// selects several fields; omit to import all value fields.
+    /// BED header column to import (requires a `#`-prefixed header). Repeating
+    /// selects several BED columns; omit to import all BED value columns.
     #[arg(long = "field", conflicts_with = "schema")]
     fields: Vec<String>,
     /// Output track name. Required for BED3, headerless BED4, and when several
-    /// fields from one source form one wide track.
+    /// BED columns from one source form one wide track.
     #[arg(long, conflicts_with = "schema")]
     track: Option<String>,
     /// Value dtype for headerless BED4 input (inferred when omitted).
     #[arg(long, conflicts_with = "schema")]
     dtype: Option<String>,
-    /// TSV schema: FIELD<TAB>[TRACK]<TAB>[DTYPE] per row; each row becomes its
-    /// own scalar track. FIELD is a header name or 1-based column index.
+    /// TSV schema mapping BED columns to target tracks. Unique target names
+    /// create one track per BED column; repeated one-target rows create a
+    /// single BED-column-axis track. A BED column is a header name or 1-based
+    /// column index.
     #[arg(long, value_name = "PATH")]
     schema: Option<PathBuf>,
-    /// Print a schema TSV for one BED source (field, track, inferred dtype) to
-    /// stdout and exit without importing. Edit it and feed it back via --schema.
+    /// Print a schema TSV for one BED source (BED column, target track,
+    /// inferred dtype) to stdout and exit without importing. Edit it and feed
+    /// it back via --schema.
     #[arg(long, conflicts_with_all = ["schema", "fields", "track", "dtype"])]
     emit_schema: bool,
     /// Records sampled for dtype inference, or `all`. A sample infers
@@ -354,22 +357,25 @@ fn import_bed(args: BedArgs) -> Result<()> {
         column_dim: args.import.column_dim,
         ..Config::default()
     };
-    let mut store = if output.exists() {
-        PbzStore::open(&output)
-            .with_context(|| format!("open output store {}", output.display()))?
-    } else {
-        PbzStore::create(&output)
-            .with_context(|| format!("create output store {}", output.display()))?
-    };
-
     if let Some(schema_path) = &args.bed.schema {
-        if sources.len() != 1 {
-            bail!("--schema requires exactly one BED source");
-        }
-        let schema = load_schema(schema_path, &sources[0].path, infer_rows)?;
-        from_bed_multi(&mut store, &sources[0].path, &schema, genome, config)
-            .context("import BED schema")?;
+        let schema = load_schema(schema_path, &sources, infer_rows)?;
+        let plan = plan_bed_schema(&sources, &schema, &config).context("plan BED schema")?;
+        let mut store = if output.exists() {
+            PbzStore::open(&output)
+                .with_context(|| format!("open output store {}", output.display()))?
+        } else {
+            PbzStore::create(&output)
+                .with_context(|| format!("create output store {}", output.display()))?
+        };
+        execute_bed_schema_plan(&mut store, plan, genome, config).context("import BED schema")?;
     } else {
+        let mut store = if output.exists() {
+            PbzStore::open(&output)
+                .with_context(|| format!("open output store {}", output.display()))?
+        } else {
+            PbzStore::create(&output)
+                .with_context(|| format!("create output store {}", output.display()))?
+        };
         let options = BedImportOptions {
             fields: (!args.bed.fields.is_empty()).then_some(args.bed.fields),
             track: args.bed.track,
@@ -384,7 +390,7 @@ fn import_bed(args: BedArgs) -> Result<()> {
             ..BedImportOptions::default()
         };
         from_bed_matrix(&mut store, &sources, genome, &options, config)
-            .context("import BED fields")?;
+            .context("import BED columns")?;
     }
     Ok(())
 }
@@ -460,7 +466,7 @@ fn import_bam(args: BamArgs) -> Result<()> {
 }
 
 struct SchemaRow {
-    field: String,
+    bed_column: String,
     track: Option<String>,
     dtype: Option<Dtype>,
 }
@@ -475,7 +481,7 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<SchemaRow>> {
         let cells = record.split('\t').collect::<Vec<_>>();
         if cells.len() > 3 || cells[0].is_empty() {
             bail!(
-                "schema {} line {} must be FIELD[<TAB>TRACK[<TAB>DTYPE]]",
+                "schema {} line {} must be BED_COLUMN[<TAB>TARGET_TRACK[<TAB>DTYPE]]",
                 path.display(),
                 index + 1
             );
@@ -487,7 +493,7 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<SchemaRow>> {
             .transpose()
             .with_context(|| format!("schema {} line {}", path.display(), index + 1))?;
         rows.push(SchemaRow {
-            field: cells[0].to_owned(),
+            bed_column: cells[0].to_owned(),
             track: cells
                 .get(1)
                 .filter(|t| !t.is_empty())
@@ -496,28 +502,28 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<SchemaRow>> {
         });
     }
     if rows.is_empty() {
-        bail!("schema {} selects no fields", path.display());
+        bail!("schema {} selects no BED columns", path.display());
     }
     Ok(rows)
 }
 
-/// Print a schema TSV scaffold for `bed` to stdout: one row per value field
-/// with its inferred dtype, ready to edit and feed back through `--schema`.
-/// Headerless files get 1-based index selectors with `fieldN` placeholder
-/// track names.
+/// Print a schema TSV scaffold for `bed` to stdout: one row per BED value
+/// column mapped to a target track, with its inferred dtype. Unique target
+/// names create per-BED-column tracks; repeating one target creates a single
+/// BED-column-axis track. Headerless files use 1-based column selectors.
 fn emit_schema(bed: &Path, infer_rows: InferRows) -> Result<()> {
     let layout =
         read_bed_layout(bed).with_context(|| format!("read layout of {}", bed.display()))?;
     if layout.n_cols == 3 {
         bail!(
-            "{} is BED3; it has no value fields (import it directly with --track)",
+            "{} is BED3; it has no BED value columns (import it directly with --track)",
             bed.display()
         );
     }
     let columns: Vec<usize> = (3..layout.n_cols).collect();
     let dtypes = infer_bed_dtypes(bed, &columns, infer_rows)
         .with_context(|| format!("infer dtypes for {}", bed.display()))?;
-    println!("# field\ttrack\tdtype");
+    println!("# BED column\ttarget track\tdtype");
     match &layout.header {
         Some(names) => {
             for (name, dtype) in names[3..].iter().zip(&dtypes) {
@@ -534,29 +540,44 @@ fn emit_schema(bed: &Path, infer_rows: InferRows) -> Result<()> {
 }
 
 /// Build a `BedSchema` from a TSV schema file, resolving name selectors against
-/// the BED header and inferring any dtype the schema leaves blank.
-fn load_schema(schema_path: &Path, bed: &Path, infer_rows: InferRows) -> Result<BedSchema> {
+/// the first BED header and inferring omitted dtypes across every source.
+fn load_schema(
+    schema_path: &Path,
+    sources: &[pbzarr::import::Source],
+    infer_rows: InferRows,
+) -> Result<BedSchema> {
     let text = std::fs::read_to_string(schema_path)
         .with_context(|| format!("read schema {}", schema_path.display()))?;
     let rows = read_schema_rows(&text, schema_path)?;
+    let first = sources
+        .first()
+        .context("schema import requires a BED source")?;
 
     let mut specs = Vec::with_capacity(rows.len());
     let mut file_cols = Vec::with_capacity(rows.len());
     for row in &rows {
-        let (selector, file_col) = if let Ok(index) = row.field.parse::<usize>() {
+        let (selector, file_col) = if row.bed_column.bytes().all(|byte| byte.is_ascii_digit()) {
+            let index = row.bed_column.parse::<usize>().map_err(|_| {
+                anyhow!(
+                    "invalid numeric BED-column selector {:?}: value overflows usize",
+                    row.bed_column
+                )
+            })?;
             if index < 4 {
                 bail!(
-                    "schema column {index} is a coordinate column (indices are 1-based; value fields start at 4)"
+                    "schema BED column {index} is a coordinate column (indices are 1-based; value BED columns start at 4)"
                 );
             }
             if row.track.is_none() {
-                bail!("schema column {index} needs a track name (no header name to default to)");
+                bail!(
+                    "schema BED column {index} needs a target track name (no header name is available as a default)"
+                );
             }
             (ColumnSelector::Index(index - 1), index - 1)
         } else {
-            let file_col = column_index_by_name(bed, &row.field)
-                .with_context(|| format!("resolve schema field {:?}", row.field))?;
-            (ColumnSelector::Name(row.field.clone()), file_col)
+            let file_col = column_index_by_name(&first.path, &row.bed_column)
+                .with_context(|| format!("resolve schema BED column {:?}", row.bed_column))?;
+            (ColumnSelector::Name(row.bed_column.clone()), file_col)
         };
         file_cols.push(file_col);
         specs.push(BedColumnSpec {
@@ -574,8 +595,8 @@ fn load_schema(schema_path: &Path, bed: &Path, infer_rows: InferRows) -> Result<
         .map(|(_, col)| *col)
         .collect();
     if !missing.is_empty() {
-        let inferred = infer_bed_dtypes(bed, &missing, infer_rows)
-            .with_context(|| format!("infer dtypes for {}", bed.display()))?;
+        let inferred = infer_bed_dtypes_for_sources(sources, &missing, infer_rows)
+            .context("infer schema BED column dtypes across input sources")?;
         let mut inferred = inferred.into_iter();
         for (spec, row) in specs.iter_mut().zip(&rows) {
             if row.dtype.is_none() {
@@ -607,14 +628,13 @@ mod tests {
 
     #[test]
     fn schema_rows_parse_selectors_tracks_and_dtypes() {
-        let text =
-            "# field\ttrack\tdtype\n4\tdepth\tint32\nmapq\n\ncallable\tcallable_mask\tbool\n";
+        let text = "# BED column\ttarget track\tdtype\n4\tdepth\tint32\nmapq\n\ncallable\tcallable_mask\tbool\n";
         let rows = read_schema_rows(text, Path::new("schema.tsv")).unwrap();
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].field, "4");
+        assert_eq!(rows[0].bed_column, "4");
         assert_eq!(rows[0].track.as_deref(), Some("depth"));
         assert_eq!(rows[0].dtype, Some(Dtype::I32));
-        assert_eq!(rows[1].field, "mapq");
+        assert_eq!(rows[1].bed_column, "mapq");
         assert!(rows[1].track.is_none());
         assert!(rows[1].dtype.is_none());
         assert_eq!(rows[2].track.as_deref(), Some("callable_mask"));

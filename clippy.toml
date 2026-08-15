@@ -1,0 +1,9 @@
+# Coordinate conversions between pbzarr's internal 0-based half-open `u64`
+# convention and noodles' 1-based inclusive `Position`/`Interval` must go
+# through crates/pbzarr-readers/src/coords.rs, the sole allowed caller
+# (marked with #[allow(clippy::disallowed_types)] there). Everywhere else,
+# hand-rolling the +1/-1 is a lint error.
+disallowed-types = [
+    { path = "noodles_core::position::Position", reason = "convert via pbzarr_readers::coords::{noodles_query_interval,pos_to_zero_based} instead of hand-rolling the +1/-1" },
+    { path = "noodles_core::region::interval::Interval", reason = "convert via pbzarr_readers::coords::noodles_query_interval instead of hand-rolling the +1/-1" },
+]

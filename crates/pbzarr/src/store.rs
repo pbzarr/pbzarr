@@ -16,12 +16,46 @@ use zarrs::storage::{
 
 use zarrs::array::codec::api::BytesToBytesCodecTraits;
 use zarrs::array::codec::{BloscCodec, BloscCompressionLevel, BloscCompressor, BloscShuffleMode};
+use zarrs::node::NodeName;
 
 use crate::error::PbzError;
 use crate::genome::{Contig, Genome};
 use crate::io::Dtype;
 use crate::track::{PendingTrack, PerbaseTrackAttrs, Track, TrackConfig};
 use crate::{PERBASE_CONVENTION_NAME, PERBASE_CONVENTION_UUID, Result};
+
+/// Validate a non-root PBZ/Zarr hierarchy node name using zarrs' canonical
+/// Zarr v3 rules.
+pub fn validate_node_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(PbzError::Metadata(
+            "invalid PBZ/Zarr node name \"\": direct-child names cannot be empty".into(),
+        ));
+    }
+    NodeName::new(name.to_owned()).map(|_| ()).map_err(|error| {
+        PbzError::Metadata(format!("invalid PBZ/Zarr node name {name:?}: {error}"))
+    })
+}
+
+/// Validate a track's non-position dimension and coordinate-array name.
+pub fn validate_column_dimension_name(name: &str) -> Result<()> {
+    validate_node_name(name).map_err(|error| {
+        PbzError::Metadata(format!(
+            "column dimension name {name:?} is invalid: {error}"
+        ))
+    })?;
+    let reserved = matches!(
+        name,
+        "position" | "values" | "offsets" | "contigs" | "zarr.json"
+    );
+    if name.trim() != name || name.contains('\\') || name.chars().any(char::is_control) || reserved
+    {
+        return Err(PbzError::Metadata(format!(
+            "column dimension name {name:?} is invalid; use a non-empty path-safe name distinct from position, values, offsets, and contigs"
+        )));
+    }
+    Ok(())
+}
 
 /// A handle to an open PBZ store: a Zarr group containing track groups.
 pub struct PbzStore {
@@ -186,7 +220,11 @@ impl PbzStore {
         }
 
         let mut names = HashSet::with_capacity(specs.len());
-        for (name, _, _) in &specs {
+        for (name, _, config) in &specs {
+            validate_node_name(name)?;
+            if config.columns.is_some() {
+                validate_column_dimension_name(config.column_dim.as_deref().unwrap_or("column"))?;
+            }
             if !names.insert(name.clone()) || self.track_handles.contains_key(name) {
                 return Err(PbzError::Metadata(format!("track '{name}' already exists")));
             }

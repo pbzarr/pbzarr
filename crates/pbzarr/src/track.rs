@@ -297,6 +297,64 @@ impl Track {
         Ok(self.values_array()?.shape()[1] as usize)
     }
 
+    /// Read the persisted labels for a rank-2 track's non-position axis.
+    pub fn column_labels(&self) -> Result<Vec<String>> {
+        if self.rank != 2 {
+            return Err(PbzError::Metadata(format!(
+                "track {:?} is rank {}, not rank 2",
+                self.name, self.rank
+            )));
+        }
+        let dimension = self.column_dim.as_deref().ok_or_else(|| {
+            PbzError::Metadata(format!("track {:?} has no column axis", self.name))
+        })?;
+        let values = self.values_array()?;
+        let values_shape = values.shape();
+        if values_shape.len() != 2 {
+            return Err(PbzError::Metadata(format!(
+                "track {:?} values must be rank 2, found rank {}",
+                self.name,
+                values_shape.len()
+            )));
+        }
+        let width = values_shape[1];
+        let path = format!("/{}/{dimension}", self.name);
+        let labels = Array::open(Arc::clone(&self.storage), &path)
+            .map_err(|error| PbzError::Store(format!("open {path}: {error}")))?;
+        let label_shape = labels.shape();
+        if label_shape.len() != 1 {
+            return Err(PbzError::Metadata(format!(
+                "track {:?} column coordinate {dimension:?} must be rank 1, found rank {}",
+                self.name,
+                label_shape.len()
+            )));
+        }
+        let expected_dimension_names = Some(vec![Some(dimension.to_owned())]);
+        if labels.dimension_names() != &expected_dimension_names {
+            return Err(PbzError::Metadata(format!(
+                "track {:?} column coordinate {dimension:?} has dimension_names {:?}, expected {:?} to match the track column dimension",
+                self.name,
+                labels.dimension_names(),
+                expected_dimension_names
+            )));
+        }
+        let label_count = label_shape[0];
+        if label_count != width {
+            return Err(PbzError::Metadata(format!(
+                "track {:?} column coordinate {dimension:?} has {label_count} labels for {width} columns",
+                self.name
+            )));
+        }
+        if label_count == 0 {
+            return Ok(Vec::new());
+        }
+        let subset = ArraySubset::new_with_shape(label_shape.to_vec());
+        labels
+            .retrieve_array_subset::<ArrayD<String>>(&subset)
+            .map(|array| array.into_raw_vec_and_offset().0)
+            .map_err(|error| PbzError::Store(format!("read {path}: {error}")))
+    }
+
     /// Shape of one independently writable outer unit: a regular chunk, or a
     /// shard when sharding is configured.
     pub(crate) fn write_unit_shape(&self) -> Result<Vec<usize>> {
