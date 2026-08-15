@@ -1,8 +1,13 @@
+use std::sync::Arc;
+
 use ndarray::{Array1, ArrayD};
 use pbzarr::genome::Contig;
 use pbzarr::io::Dtype;
 use pbzarr::{Genome, PbzStore, TrackConfig};
 use tempfile::TempDir;
+use zarrs::array::{ArrayBuilder, data_type};
+use zarrs::filesystem::FilesystemStore;
+use zarrs::storage::ReadableWritableListableStorage;
 
 fn two_contig_store(path: &std::path::Path) -> PbzStore {
     let g = Genome::new(vec![
@@ -76,6 +81,10 @@ fn cohort_track_roundtrips_columns() {
     assert_eq!(track.rank(), 2);
     assert_eq!(track.column_dim(), Some("sample"));
     assert_eq!(track.columns_count().unwrap(), 3);
+    assert_eq!(
+        track.column_labels().unwrap(),
+        vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+    );
 
     let region = store
         .genome_for("depth")
@@ -88,6 +97,202 @@ fn cohort_track_roundtrips_columns() {
     track.write_region(&region, data.clone()).unwrap();
     let got: ArrayD<i32> = track.read_region(&region).unwrap();
     assert_eq!(got, data);
+}
+
+#[test]
+fn reopened_track_reads_column_labels_across_coordinate_chunks() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("multi_chunk_labels.pbz");
+    let g = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 8,
+    }])
+    .unwrap();
+    {
+        let mut store = PbzStore::create(&path).unwrap();
+        store
+            .create_track(
+                "depth",
+                g,
+                TrackConfig::new(Dtype::I32)
+                    .columns(vec![
+                        "a".into(),
+                        "b".into(),
+                        "c".into(),
+                        "d".into(),
+                        "e".into(),
+                    ])
+                    .column_dim("sample"),
+            )
+            .unwrap();
+    }
+
+    let storage: ReadableWritableListableStorage = Arc::new(FilesystemStore::new(&path).unwrap());
+    let labels = ArrayBuilder::new(vec![5], vec![2], data_type::string(), "")
+        .dimension_names(["sample"].into())
+        .build(storage, "/depth/sample")
+        .unwrap();
+    labels.store_metadata().unwrap();
+    labels
+        .store_chunk(
+            &[0],
+            Array1::from(vec!["a".to_owned(), "b".to_owned()]).into_dyn(),
+        )
+        .unwrap();
+    labels
+        .store_chunk(
+            &[1],
+            Array1::from(vec!["c".to_owned(), "d".to_owned()]).into_dyn(),
+        )
+        .unwrap();
+    labels
+        .store_chunk(
+            &[2],
+            Array1::from(vec!["e".to_owned(), String::new()]).into_dyn(),
+        )
+        .unwrap();
+
+    let store = PbzStore::open(&path).unwrap();
+    assert_eq!(
+        store.track("depth").unwrap().column_labels().unwrap(),
+        vec![
+            "a".to_owned(),
+            "b".to_owned(),
+            "c".to_owned(),
+            "d".to_owned(),
+            "e".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn column_labels_rejects_a_rank_zero_coordinate_array() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("rank_zero_labels.pbz");
+    let g = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 8,
+    }])
+    .unwrap();
+    {
+        let mut store = PbzStore::create(&path).unwrap();
+        store
+            .create_track(
+                "depth",
+                g,
+                TrackConfig::new(Dtype::I32)
+                    .columns(vec!["a".into(), "b".into()])
+                    .column_dim("sample"),
+            )
+            .unwrap();
+    }
+    let storage: ReadableWritableListableStorage = Arc::new(FilesystemStore::new(&path).unwrap());
+    ArrayBuilder::new(
+        Vec::<u64>::new(),
+        Vec::<u64>::new(),
+        data_type::string(),
+        "",
+    )
+    .build(storage, "/depth/sample")
+    .unwrap()
+    .store_metadata()
+    .unwrap();
+
+    let store = PbzStore::open(&path).unwrap();
+    let error = store
+        .track("depth")
+        .unwrap()
+        .column_labels()
+        .expect_err("rank-zero column coordinates must return an error")
+        .to_string();
+    assert!(error.contains("rank 1"), "{error}");
+}
+
+#[test]
+fn column_labels_rejects_a_coordinate_width_different_from_values() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("wrong_width_labels.pbz");
+    let g = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 8,
+    }])
+    .unwrap();
+    {
+        let mut store = PbzStore::create(&path).unwrap();
+        store
+            .create_track(
+                "depth",
+                g,
+                TrackConfig::new(Dtype::I32)
+                    .columns(vec!["a".into(), "b".into()])
+                    .column_dim("sample"),
+            )
+            .unwrap();
+    }
+    let storage: ReadableWritableListableStorage = Arc::new(FilesystemStore::new(&path).unwrap());
+    let labels = ArrayBuilder::new(vec![1], vec![1], data_type::string(), "")
+        .dimension_names(["sample"].into())
+        .build(storage, "/depth/sample")
+        .unwrap();
+    labels.store_metadata().unwrap();
+    labels
+        .store_chunk(&[0], Array1::from(vec!["a".to_owned()]).into_dyn())
+        .unwrap();
+
+    let store = PbzStore::open(&path).unwrap();
+    let error = store
+        .track("depth")
+        .unwrap()
+        .column_labels()
+        .expect_err("column coordinate width must match values")
+        .to_string();
+    assert!(error.contains("1 labels for 2 columns"), "{error}");
+}
+
+#[test]
+fn column_labels_rejects_coordinate_dimension_names_that_do_not_match_the_track() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("wrong_dimension_name_labels.pbz");
+    let g = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 8,
+    }])
+    .unwrap();
+    {
+        let mut store = PbzStore::create(&path).unwrap();
+        store
+            .create_track(
+                "depth",
+                g,
+                TrackConfig::new(Dtype::I32)
+                    .columns(vec!["a".into(), "b".into()])
+                    .column_dim("sample"),
+            )
+            .unwrap();
+    }
+    let storage: ReadableWritableListableStorage = Arc::new(FilesystemStore::new(&path).unwrap());
+    let labels = ArrayBuilder::new(vec![2], vec![2], data_type::string(), "")
+        .dimension_names(["wrong"].into())
+        .build(storage, "/depth/sample")
+        .unwrap();
+    labels.store_metadata().unwrap();
+    labels
+        .store_chunk(
+            &[0],
+            Array1::from(vec!["a".to_owned(), "b".to_owned()]).into_dyn(),
+        )
+        .unwrap();
+
+    let store = PbzStore::open(&path).unwrap();
+    let error = store
+        .track("depth")
+        .unwrap()
+        .column_labels()
+        .expect_err("coordinate dimension_names must match the track column dimension")
+        .to_string();
+    assert!(error.contains("dimension_names"), "{error}");
+    assert!(error.contains("wrong"), "{error}");
+    assert!(error.contains("sample"), "{error}");
 }
 
 #[test]
