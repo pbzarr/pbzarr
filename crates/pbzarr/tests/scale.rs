@@ -380,3 +380,177 @@ fn default_ladder_stops_by_the_2000_bin_rule() {
     let factors: Vec<u64> = report.levels.iter().map(|l| l.factor).collect();
     assert_eq!(factors, vec![32]);
 }
+
+/// Naive per-position reference: per contig, per bin of `factor`, the mean
+/// of non-NaN values (NaN when a bin has none).
+fn naive_means(contigs: &[Vec<f64>], factor: u64) -> Vec<f32> {
+    let mut out = Vec::new();
+    for vals in contigs {
+        for chunk in vals.chunks(factor as usize) {
+            let mut s = 0f64;
+            let mut c = 0i64;
+            for &v in chunk {
+                if v.is_nan() {
+                    continue;
+                }
+                s += v;
+                c += 1;
+            }
+            out.push(if c == 0 {
+                f32::NAN
+            } else {
+                (s / c as f64) as f32
+            });
+        }
+    }
+    out
+}
+
+fn assert_f32_bins_eq(got: &[f32], expect: &[f32], ctx: &str) {
+    assert_eq!(got.len(), expect.len(), "{ctx}: length");
+    for (i, (g, e)) in got.iter().zip(expect).enumerate() {
+        assert!(
+            (g.is_nan() && e.is_nan()) || g == e,
+            "{ctx}: bin {i}: got {g}, expect {e}"
+        );
+    }
+}
+
+/// chr1 (53) and chr2 (13): divisible by none of 4, 6, 24.
+fn cascade_genome() -> Genome {
+    Genome::new(vec![
+        Contig {
+            name: "chr1".into(),
+            length: 53,
+        },
+        Contig {
+            name: "chr2".into(),
+            length: 13,
+        },
+    ])
+    .unwrap()
+}
+
+#[test]
+fn cascade_factor_set_matches_naive_binning_i32() {
+    // {4, 6, 24}: two roots (4, 6) and one child (24, parent 6); every
+    // contig ends mid-bin for every factor, and chr2 is shorter than one
+    // aligned unit (lcm(4, 6, 24) = 24).
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    let mut store = PbzStore::create(&path).unwrap();
+    store
+        .create_track("depth", cascade_genome(), TrackConfig::new(Dtype::I32))
+        .unwrap();
+
+    let track = store.track("depth").unwrap();
+    let chr1: Vec<i32> = (0..53).map(|i| (i * 7) % 23 - 5).collect();
+    let chr2: Vec<i32> = (0..13).map(|i| 100 - 9 * i).collect();
+    for (name, vals) in [("chr1", &chr1), ("chr2", &chr2)] {
+        let region = track
+            .genome()
+            .resolve(&format!("{name}:0-{}", vals.len()).parse().unwrap())
+            .unwrap();
+        track
+            .write_region(&region, Array1::from(vals.clone()).into_dyn())
+            .unwrap();
+    }
+
+    let report = scale(&store, "depth", &factors_config(vec![4, 6, 24])).unwrap();
+    let as_f64: Vec<Vec<f64>> = [&chr1, &chr2]
+        .iter()
+        .map(|v| v.iter().map(|&x| f64::from(x)).collect())
+        .collect();
+    for lvl in &report.levels {
+        let f = lvl.factor;
+        let level = open_array(&path, &format!("/depth/scales/{f}/mean"));
+        let got = read_all_f32(&level).into_raw_vec_and_offset().0;
+        let expect = naive_means(&as_f64, f);
+        assert_eq!(lvl.bins as usize, expect.len(), "factor {f}: bins");
+        assert_eq!(got, expect, "factor {f}");
+    }
+}
+
+#[test]
+fn cascade_factor_set_matches_naive_binning_f32_nan() {
+    // Same factor graph on a NaN-fill f32 track with exactly representable
+    // values; chr2's first six positions are all NaN, so factor 4's and 6's
+    // first chr2 bins are all-NaN and must yield NaN.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    let mut store = PbzStore::create(&path).unwrap();
+    store
+        .create_track("af", cascade_genome(), TrackConfig::new(Dtype::F32))
+        .unwrap();
+
+    let track = store.track("af").unwrap();
+    let chr1: Vec<f32> = (0..53)
+        .map(|i| if i % 5 == 0 { f32::NAN } else { i as f32 })
+        .collect();
+    let chr2: Vec<f32> = (0..13)
+        .map(|i| if i < 6 { f32::NAN } else { (i * 2) as f32 })
+        .collect();
+    for (name, vals) in [("chr1", &chr1), ("chr2", &chr2)] {
+        let region = track
+            .genome()
+            .resolve(&format!("{name}:0-{}", vals.len()).parse().unwrap())
+            .unwrap();
+        track
+            .write_region(&region, Array1::from(vals.clone()).into_dyn())
+            .unwrap();
+    }
+
+    let report = scale(&store, "af", &factors_config(vec![4, 6, 24])).unwrap();
+    let as_f64: Vec<Vec<f64>> = [&chr1, &chr2]
+        .iter()
+        .map(|v| v.iter().map(|&x| f64::from(x)).collect())
+        .collect();
+    for lvl in &report.levels {
+        let f = lvl.factor;
+        let level = open_array(&path, &format!("/af/scales/{f}/mean"));
+        let got = read_all_f32(&level).into_raw_vec_and_offset().0;
+        let expect = naive_means(&as_f64, f);
+        assert_f32_bins_eq(&got, &expect, &format!("factor {f}"));
+    }
+}
+
+#[test]
+fn huge_lcm_factor_set_falls_back_to_multi_pass() {
+    // Two large coprime factors: lcm(2^21, 2^21 + 1) ~ 2^42 blows the Tier A
+    // alignment cap, so the per-factor multi-pass fallback runs and must
+    // still produce correct output (one ragged bin per factor here).
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    let genome = Genome::new(vec![Contig {
+        name: "chr1".into(),
+        length: 10,
+    }])
+    .unwrap();
+    let mut store = PbzStore::create(&path).unwrap();
+    store
+        .create_track("depth", genome, TrackConfig::new(Dtype::I32))
+        .unwrap();
+
+    let track = store.track("depth").unwrap();
+    let region = track
+        .genome()
+        .resolve(&"chr1:0-10".parse().unwrap())
+        .unwrap();
+    track
+        .write_region(
+            &region,
+            Array1::from((0..10).collect::<Vec<i32>>()).into_dyn(),
+        )
+        .unwrap();
+
+    let f1 = 1u64 << 21;
+    let f2 = f1 + 1;
+    let report = scale(&store, "depth", &factors_config(vec![f1, f2])).unwrap();
+    for (lvl, f) in report.levels.iter().zip([f1, f2]) {
+        assert_eq!(lvl.factor, f);
+        assert_eq!(lvl.bins, 1);
+        let level = open_array(&path, &format!("/depth/scales/{f}/mean"));
+        let got = read_all_f32(&level).into_raw_vec_and_offset().0;
+        assert_eq!(got, vec![4.5], "factor {f}");
+    }
+}
