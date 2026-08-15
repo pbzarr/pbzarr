@@ -38,6 +38,11 @@ const LEVEL_CHUNK_LEN: u64 = 262_144;
 /// Byte budget for one slab of base data (`slab_len * n_columns * 4`).
 const SLAB_TARGET_BYTES: u64 = 64 << 20;
 
+/// Tier A cap on the slab alignment (the lcm of the factors swept from base):
+/// factor sets whose alignment exceeds this fall back to the per-factor
+/// multi-pass path (Tier B).
+const TIER_A_MAX_ALIGN: u64 = 1 << 22;
+
 /// Default ladder: start at 32, multiply by 8 while the largest sequence
 /// still contributes more than 2000 bins at the current factor.
 const LADDER_START: u64 = 32;
@@ -212,18 +217,36 @@ pub fn scale(store: &PbzStore, track: &str, config: &ScaleConfig) -> Result<Scal
         .store_metadata()
         .map_err(|e| PbzError::Store(e.to_string()))?;
 
-    let mut levels = Vec::with_capacity(factors.len());
+    let source_fill = source_fill_as_f64(t)?;
+    let nan_aware = t.dtype() == Dtype::F32 && source_fill.is_nan();
+    let mut level_arrays = Vec::with_capacity(factors.len());
     for &factor in &factors {
-        let bins = write_level(store, t, factor)?;
-        let level_prefix = StorePrefix::new(format!("{track}/scales/{factor}/"))
+        level_arrays.push(create_level(store, t, factor, source_fill)?);
+    }
+
+    let n_cols = t.columns_count()? as u64;
+    match tier_a_align(&factors, n_cols) {
+        // Tier A: one traversal of the base data feeds every factor.
+        Some(align) => compute_levels_tier_a(t, &level_arrays, align, nan_aware)?,
+        // Tier B: pathological factor set; per-factor multi-pass fallback.
+        None => {
+            for lvl in &level_arrays {
+                compute_level_tier_b(t, lvl, nan_aware)?;
+            }
+        }
+    }
+
+    let mut levels = Vec::with_capacity(factors.len());
+    for lvl in &level_arrays {
+        let level_prefix = StorePrefix::new(format!("{track}/scales/{}/", lvl.factor))
             .map_err(|e| PbzError::Store(e.to_string()))?;
         let bytes_written = store
             .storage
             .size_prefix(&level_prefix)
             .map_err(|e| PbzError::Store(e.to_string()))?;
         levels.push(LevelReport {
-            factor,
-            bins,
+            factor: lvl.factor,
+            bins: lvl.bins,
             bytes_written,
         });
     }
@@ -295,9 +318,17 @@ fn multiscales_attr(factors: &[u64]) -> Value {
     json!({"layout": layout})
 }
 
-/// Create `scales/<factor>/mean` and fill it slab by slab. Returns the level
-/// length in bins.
-fn write_level(store: &PbzStore, t: &Track, factor: u64) -> Result<u64> {
+/// A created (not yet published) level array and its geometry.
+struct Level {
+    factor: u64,
+    /// Level length: `Σ_c ceil(L_c / factor)` bins.
+    bins: u64,
+    array: Array<dyn ReadableWritableListableStorageTraits>,
+}
+
+/// Create the `scales/<factor>/mean` array (group and metadata only; no
+/// chunk data is written).
+fn create_level(store: &PbzStore, t: &Track, factor: u64, source_fill: f64) -> Result<Level> {
     let track = t.name();
     let level_len: u64 = t
         .genome()
@@ -314,8 +345,6 @@ fn write_level(store: &PbzStore, t: &Track, factor: u64) -> Result<u64> {
         .map_err(|e| PbzError::Store(e.to_string()))?;
 
     // Level fill = the mean of an all-fill bin: f32 of the source fill.
-    let source_fill = source_fill_as_f64(t)?;
-    let nan_aware = t.dtype() == Dtype::F32 && source_fill.is_nan();
     let level_fill = FillValue::from(source_fill as f32);
 
     let chunk_len = LEVEL_CHUNK_LEN.min(level_len.max(1));
@@ -344,18 +373,188 @@ fn write_level(store: &PbzStore, t: &Track, factor: u64) -> Result<u64> {
         .store_metadata()
         .map_err(|e| PbzError::Store(e.to_string()))?;
 
+    Ok(Level {
+        factor,
+        bins: level_len,
+        array: level,
+    })
+}
+
+/// Slab alignment (the lcm of the factors) for the Tier A single-pass path,
+/// or `None` when the set is pathological and the per-factor multi-pass
+/// fallback (Tier B) must run instead: the lcm exceeds [`TIER_A_MAX_ALIGN`],
+/// or one aligned slab unit at full column width overflows the slab byte
+/// budget (very wide cohorts at a large lcm).
+fn tier_a_align(factors: &[u64], n_cols: u64) -> Option<u64> {
+    let mut align = 1u64;
+    for &f in factors {
+        align = (align / gcd(align, f)).checked_mul(f)?;
+        if align > TIER_A_MAX_ALIGN {
+            return None;
+        }
+    }
+    if align.checked_mul(4 * n_cols.max(1))? > SLAB_TARGET_BYTES {
+        return None;
+    }
+    Some(align)
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// Tier A dispatch on the source dtype.
+fn compute_levels_tier_a(t: &Track, levels: &[Level], align: u64, nan_aware: bool) -> Result<()> {
     match t.dtype() {
-        Dtype::I32 => compute_level::<i32>(t, &level, factor, false, |v| v as f64),
-        Dtype::F32 => compute_level::<f32>(t, &level, factor, nan_aware, |v| v as f64),
+        Dtype::I32 => compute_levels_single_pass::<i32>(t, levels, align, false, |v| v as f64),
+        Dtype::F32 => compute_levels_single_pass::<f32>(t, levels, align, nan_aware, |v| v as f64),
         Dtype::Bool => {
-            compute_level::<bool>(t, &level, factor, false, |v| if v { 1.0 } else { 0.0 })
+            compute_levels_single_pass::<bool>(
+                t,
+                levels,
+                align,
+                false,
+                |v| {
+                    if v { 1.0 } else { 0.0 }
+                },
+            )
         }
         other => Err(PbzError::InvalidDtype {
             dtype: format!("scale: unsupported source dtype {other}"),
         }),
-    }?;
+    }
+}
 
-    Ok(level_len)
+/// Tier B dispatch on the source dtype (per-factor multi-pass fallback).
+fn compute_level_tier_b(t: &Track, lvl: &Level, nan_aware: bool) -> Result<()> {
+    match t.dtype() {
+        Dtype::I32 => compute_level::<i32>(t, &lvl.array, lvl.factor, false, |v| v as f64),
+        Dtype::F32 => compute_level::<f32>(t, &lvl.array, lvl.factor, nan_aware, |v| v as f64),
+        Dtype::Bool => {
+            compute_level::<bool>(
+                t,
+                &lvl.array,
+                lvl.factor,
+                false,
+                |v| if v { 1.0 } else { 0.0 },
+            )
+        }
+        other => Err(PbzError::InvalidDtype {
+            dtype: format!("scale: unsupported source dtype {other}"),
+        }),
+    }
+}
+
+/// Fill every level array in one traversal of the base data (Tier A).
+///
+/// Slabs start on multiples of `align` (a multiple of every factor), so each
+/// factor's bins complete within the slab window and nothing carries across
+/// slabs; the final slab of a sequence clips at the sequence end, which
+/// completes all bins by the clip rule.
+fn compute_levels_single_pass<T: Numeric>(
+    t: &Track,
+    levels: &[Level],
+    align: u64,
+    nan_aware: bool,
+    to_f64: impl Fn(T) -> f64,
+) -> Result<()> {
+    let rank2 = t.rank() == 2;
+    let n_cols = t.columns_count()?;
+    let per_pos_bytes = 4 * n_cols.max(1) as u64;
+    // Tier A guarantees one aligned unit fits the budget.
+    let slab = ((SLAB_TARGET_BYTES / per_pos_bytes) / align).max(1) * align;
+
+    let genome = Arc::clone(t.genome());
+    let mut level_bases = vec![0u64; levels.len()];
+    for (cid, contig) in genome.iter() {
+        let len = contig.length;
+        let mut slab_start = 0u64;
+        while slab_start < len {
+            let slab_end = (slab_start + slab).min(len);
+            let rows = (slab_end - slab_start) as usize;
+            let region = Region {
+                contig: cid,
+                start: slab_start,
+                end: slab_end,
+            };
+            let data: ArrayD<T> = t.read_region(&region)?;
+            let data = data
+                .into_shape_with_order((rows, n_cols))
+                .map_err(|e| PbzError::Store(format!("scale: reshape slab: {e}")))?;
+
+            for (li, lvl) in levels.iter().enumerate() {
+                let factor = lvl.factor;
+                let n_bins = (slab_end - slab_start).div_ceil(factor) as usize;
+                let mut sums = vec![0f64; n_bins * n_cols];
+                let mut counts = vec![0i64; n_bins * n_cols];
+                for (i, row) in data.outer_iter().enumerate() {
+                    let bin = i / factor as usize;
+                    for (j, &v) in row.iter().enumerate() {
+                        let v = to_f64(v);
+                        if nan_aware && v.is_nan() {
+                            continue;
+                        }
+                        sums[bin * n_cols + j] += v;
+                        counts[bin * n_cols + j] += 1;
+                    }
+                }
+                let bin0 = level_bases[li] + slab_start / factor;
+                write_mean_bins(&lvl.array, rank2, bin0, n_cols, &sums, &counts)?;
+            }
+            slab_start = slab_end;
+        }
+        for (li, lvl) in levels.iter().enumerate() {
+            level_bases[li] += len.div_ceil(lvl.factor);
+        }
+    }
+    Ok(())
+}
+
+/// Write `sums`/`counts` (`n_bins x n_cols`, row-major) as f32 means at
+/// level bins `[bin0, bin0 + n_bins)`, full column width. Empty ranges are
+/// a no-op.
+fn write_mean_bins(
+    level: &Array<dyn ReadableWritableListableStorageTraits>,
+    rank2: bool,
+    bin0: u64,
+    n_cols: usize,
+    sums: &[f64],
+    counts: &[i64],
+) -> Result<()> {
+    let n_bins = sums.len() / n_cols.max(1);
+    if n_bins == 0 {
+        return Ok(());
+    }
+    let means: Vec<f32> = sums
+        .iter()
+        .zip(counts)
+        .map(|(&s, &c)| {
+            if c == 0 {
+                f32::NAN
+            } else {
+                (s / c as f64) as f32
+            }
+        })
+        .collect();
+    let out: ArrayD<f32> = if rank2 {
+        Array2::from_shape_vec((n_bins, n_cols), means)
+            .map_err(|e| PbzError::Store(format!("scale: shape level slab: {e}")))?
+            .into_dyn()
+    } else {
+        Array1::from(means).into_dyn()
+    };
+    #[allow(clippy::single_range_in_vec_init)]
+    let subset = if rank2 {
+        ArraySubset::new_with_ranges(&[bin0..bin0 + n_bins as u64, 0..n_cols as u64])
+    } else {
+        ArraySubset::new_with_ranges(&[bin0..bin0 + n_bins as u64])
+    };
+    level
+        .store_array_subset(&subset, out)
+        .map_err(|e| PbzError::Store(format!("scale: write level: {e}")))
 }
 
 /// The base `values` fill value as f64 (NaN for NaN-fill float tracks).
@@ -384,8 +583,10 @@ fn slab_len(factor: u64, n_cols: u64) -> u64 {
     (max_positions / factor).max(1) * factor
 }
 
-/// Fill one level array with per-bin means, sequence by sequence, slab by
-/// slab. Slabs start on bin boundaries and each bin is contained in exactly
+/// Tier B fallback: fill one level array with per-bin means, sequence by
+/// sequence, slab by slab (one full base traversal per factor).
+///
+/// Slabs start on bin boundaries and each bin is contained in exactly
 /// one slab, so nothing carries across slabs along the position axis. When a
 /// single full-width bin would exceed the slab budget (wide cohorts at large
 /// factors), the column axis is slabbed instead: each read covers whole bins
