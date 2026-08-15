@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -10,7 +11,7 @@ use log::{LevelFilter, debug, info, warn};
 use pbzarr::import::Config;
 use pbzarr::import::progress::{self, make_sink};
 use pbzarr::io::Dtype;
-use pbzarr::{ExplicitArraySpec, Genome, PbzStore};
+use pbzarr::{ExplicitArraySpec, Genome, PbzStore, ScaleConfig};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
     OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam, from_bed_matrix,
@@ -30,6 +31,8 @@ enum Command {
     View(ViewArgs),
     /// Import data into a PBZ store.
     Import(Box<ImportArgs>),
+    /// Compute and publish a multiscale pyramid for a track.
+    Scale(ScaleArgs),
 }
 
 #[derive(Debug, Args)]
@@ -46,6 +49,22 @@ struct ViewArgs {
 struct ImportArgs {
     #[command(subcommand)]
     format: ImportCommand,
+}
+
+#[derive(Debug, Args)]
+struct ScaleArgs {
+    #[command(flatten)]
+    global: GlobalOptions,
+    /// PBZ store containing the track.
+    #[arg(short('z'), long, value_name = "PATH")]
+    pbz: PathBuf,
+    /// Track to build a pyramid for.
+    #[arg(short('t'), long, value_name = "NAME")]
+    track: String,
+    /// Comma-separated downsampling factors (e.g. 8,64,512), strictly
+    /// ascending with no duplicates. Defaults to the built-in ladder.
+    #[arg(short('s'), long, value_name = "LIST")]
+    scales: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -404,12 +423,71 @@ fn main() -> Result<()> {
             ImportCommand::Bed(args) => import_bed(args),
             ImportCommand::Bam(args) => import_bam(args),
         },
+        Command::Scale(args) => scale_cmd(args),
     }
 }
 
 fn view(args: ViewArgs) -> Result<()> {
     init_logging(&args.global);
     bail!("view is not implemented yet for {}", args.store.display())
+}
+
+fn scale_cmd(args: ScaleArgs) -> Result<()> {
+    let _ = args.global.verbose;
+    let factors = args.scales.as_deref().map(parse_scales).transpose()?;
+
+    let store =
+        PbzStore::open(&args.pbz).with_context(|| format!("open store {}", args.pbz.display()))?;
+    let config = ScaleConfig {
+        factors,
+        ..ScaleConfig::default()
+    };
+
+    let start = Instant::now();
+    let report = pbzarr::scale(&store, &args.track, &config)
+        .with_context(|| format!("scale track {:?} in {}", args.track, args.pbz.display()))?;
+    let elapsed = start.elapsed();
+
+    println!(
+        "scaled '{}' in {} ({} level{}):",
+        args.track,
+        args.pbz.display(),
+        report.levels.len(),
+        if report.levels.len() == 1 { "" } else { "s" }
+    );
+    for level in &report.levels {
+        println!(
+            "  factor {:>6}: {:>10} bins, {:>12} bytes",
+            level.factor, level.bins, level.bytes_written
+        );
+    }
+    println!("done in {:.2}s", elapsed.as_secs_f64());
+    Ok(())
+}
+
+/// Parse a comma-separated `--scales` list into factors. Enforces strictly
+/// ascending, duplicate-free order here with a clear message; the rest of
+/// `ScaleConfig` validation (`>= 2`, non-empty) is left to `pbzarr::scale`.
+fn parse_scales(text: &str) -> Result<Vec<u64>> {
+    let mut factors = Vec::new();
+    let mut prev: Option<u64> = None;
+    for part in text.split(',') {
+        let part = part.trim();
+        let value: u64 = part.parse().with_context(|| {
+            format!("invalid --scales value {part:?}: expected a non-negative integer")
+        })?;
+        if let Some(prev) = prev {
+            if value == prev {
+                bail!("--scales values must be unique (duplicate {value})");
+            }
+            if value < prev {
+                bail!("--scales values must be strictly ascending (found {value} after {prev})");
+            }
+        }
+        prev = Some(value);
+        factors.push(value);
+    }
+    Ok(factors)
 }
 
 fn import_bed(args: BedArgs) -> Result<()> {
@@ -761,5 +839,37 @@ mod tests {
         ])
         .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn scales_parse_ascending_list() {
+        assert_eq!(parse_scales("8,64,512").unwrap(), vec![8, 64, 512]);
+    }
+
+    #[test]
+    fn scales_parse_trims_whitespace() {
+        assert_eq!(parse_scales(" 8 , 64 , 512 ").unwrap(), vec![8, 64, 512]);
+    }
+
+    #[test]
+    fn scales_parse_single_value() {
+        assert_eq!(parse_scales("8").unwrap(), vec![8]);
+    }
+
+    #[test]
+    fn scales_reject_duplicates() {
+        let err = parse_scales("8,8,64").unwrap_err().to_string();
+        assert!(err.contains("unique"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn scales_reject_non_ascending() {
+        let err = parse_scales("64,8").unwrap_err().to_string();
+        assert!(err.contains("ascending"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn scales_reject_non_integer() {
+        assert!(parse_scales("8,abc").is_err());
     }
 }
