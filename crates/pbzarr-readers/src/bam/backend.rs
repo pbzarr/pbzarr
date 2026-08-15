@@ -1,11 +1,3 @@
-//! Dual alignment-file backend: noodles for BAM, rust-htslib for CRAM.
-//!
-//! CRAM goes through htslib because its decoder is several times faster than
-//! the pure-Rust alternative (riker measured ~3.8x); BAM stays on noodles to
-//! keep the common path free of the C boundary. `Backend` hides that split
-//! behind one `fetch`/`has_records` surface keyed on contig name, the same
-//! boundary `ValueReader::read_into` uses elsewhere in this crate.
-
 use std::fs::File;
 use std::io::Read as IoRead;
 use std::path::{Path, PathBuf};
@@ -25,23 +17,13 @@ use crate::coords::{noodles_query_interval, pos_to_zero_based};
 use super::record::{AlignedRead, CigarKind};
 
 /// A BAM index, read into a concrete type rather than relying on
-/// `noodles_bam::io::IndexedReader`'s internal `Box<dyn BinningIndex>`. That
-/// trait object doesn't declare `Send` even though every concrete index
-/// noodles produces is plain owned data, which would otherwise force
-/// `Backend` (and therefore `BamReader`, which `MultiValueReader` requires to
-/// be `Send`) to hand-assert thread-safety itself. Holding the concrete
-/// `.bai`/`.csi` type instead — the same idea as `BedMultiReader` holding a
-/// concrete `noodles_tabix::Index` — keeps `Backend` auto-`Send` for free.
+/// `noodles_bam::io::IndexedReader`'s internal `Box<dyn BinningIndex>`.
 pub enum BamIndex {
     Bai(bam::bai::Index),
     Csi(noodles_csi_bam::Index),
 }
 
-/// `noodles_bam::io::Reader::query`'s `index: &I` is generic over `I:
-/// BinningIndex`, so a `BamIndex` can't be passed to it directly; this
-/// dispatches to the concrete branch. Both arms return the same `Query<'r,
-/// R>` (the index only feeds the internal chunk lookup, not the query
-/// iterator's own type), so the match unifies without a wrapper trait impl.
+
 fn bam_query<'r>(
     reader: &'r mut bam::io::Reader<bgzf::io::Reader<File>>,
     header: &sam::Header,
@@ -113,11 +95,6 @@ impl Backend {
 const CRAM_MAGIC: [u8; 4] = *b"CRAM";
 const BGZF_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
-/// Content-sniffs the first 4 bytes to tell CRAM from (bgzf-compressed) BAM,
-/// so a misnamed extension doesn't route the file into the wrong decoder.
-/// Falls back to the extension whenever the sniff itself is inconclusive: a
-/// read error (unreadable/too-short file, surfaced properly by the real
-/// `open_*` call that follows) or a magic that matches neither format.
 fn is_cram(path: &Path) -> bool {
     match sniff_magic(path) {
         Some(magic) if magic[..4] == CRAM_MAGIC => true,
@@ -263,8 +240,6 @@ fn open_cram(path: &Path, reference: Option<&Path>) -> Result<(Backend, Genome)>
 /// Builds the half-open `[start, end)` query region (0-based) as noodles'
 /// 1-based inclusive `Region`, and runs it against `index` to get a `Query`
 /// iterator. Returns `None` for an empty/inverted range instead of erroring.
-/// Shared by `fetch_bam` and `has_records_bam`, the read and probe paths,
-/// which otherwise duplicated this coordinate conversion verbatim.
 fn bam_query_region<'r>(
     reader: &'r mut bam::io::Reader<bgzf::io::Reader<File>>,
     header: &sam::Header,
