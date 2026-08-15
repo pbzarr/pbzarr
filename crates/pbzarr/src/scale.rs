@@ -147,7 +147,9 @@ pub struct ScaleReport {
 /// Errors if the track already has a published pyramid (unpublish/rescale is
 /// not implemented), or if its dtype is not int32/float32/bool. A leftover
 /// `scales/` subtree without a published `multiscales` attr (crashed prior
-/// run) is deleted and rewritten idempotently.
+/// run) is deleted and rewritten idempotently. The already-published error
+/// still refreshes the store-root consolidated metadata first, so retrying
+/// after a crash between publication and consolidation heals the root map.
 pub fn scale(store: &PbzStore, track: &str, config: &ScaleConfig) -> Result<ScaleReport> {
     config.validate()?;
     let t = store
@@ -167,6 +169,13 @@ pub fn scale(store: &PbzStore, track: &str, config: &ScaleConfig) -> Result<Scal
     let group = zarrs::group::Group::open(store.storage.clone(), &format!("/{track}"))
         .map_err(|e| PbzError::Store(e.to_string()))?;
     if group.attributes().contains_key("multiscales") {
+        // Recovery path: a crash between the publication write (2) and the
+        // consolidation refresh (3) leaves the pyramid published on disk but
+        // hidden from the root map, and this is the branch a retry lands in.
+        // Refuse the rescale, but heal the map first so the retry is not a
+        // no-op that leaves the store stale until some later publication.
+        drop(group);
+        store.consolidate_metadata()?;
         return Err(PbzError::Metadata(format!(
             "scale: track {track:?} already has a published pyramid; unpublish/rescale is not implemented"
         )));

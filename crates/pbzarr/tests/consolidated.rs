@@ -250,6 +250,52 @@ fn track_creation_after_scale_refreshes_the_root_metadata() {
     );
 }
 
+/// A crash between the pyramid publication write and the consolidation
+/// refresh leaves the pyramid on disk but hidden from the root map. Retrying
+/// `scale` lands in the already-published branch: it must still refuse the
+/// rescale, but heal the root map on the way out, or the store stays stale
+/// until some unrelated publication event.
+#[test]
+fn rescale_refusal_still_heals_a_stale_root_metadata() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    scaled_fixture(&path);
+
+    // Simulate the crash: the pyramid is published, the root map is not.
+    let mut root = root_metadata(&path);
+    root.as_object_mut()
+        .unwrap()
+        .remove("consolidated_metadata");
+    std::fs::write(path.join("zarr.json"), serde_json::to_vec(&root).unwrap()).unwrap();
+    assert!(root_metadata(&path).get("consolidated_metadata").is_none());
+
+    let store = PbzStore::open(&path).unwrap();
+    let err = scale(
+        &store,
+        "af",
+        &ScaleConfig {
+            factors: Some(vec![4, 8]),
+            ..ScaleConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("unpublish/rescale"), "{err}");
+
+    // The refusal refreshed the root map anyway: the published levels are
+    // visible again to a reader resolving solely from it.
+    let metadata = root_metadata(&path)["consolidated_metadata"]["metadata"]
+        .as_object()
+        .unwrap()
+        .clone();
+    for node in EXPECTED_NODES {
+        assert!(metadata.contains_key(*node), "{node} missing after heal");
+    }
+    assert_eq!(
+        metadata["af/scales/4/mean"]["shape"],
+        serde_json::json!([5, 2])
+    );
+}
+
 /// A fresh store carries consolidated metadata as soon as its first track is
 /// published, without any pyramid.
 #[test]
