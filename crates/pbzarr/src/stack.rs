@@ -6,6 +6,8 @@
 //! a time. Growing an existing cohort (incremental sample append) is a separate
 //! concern and not handled here.
 
+#![allow(deprecated)]
+
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -20,6 +22,7 @@ use crate::{PbzError, PbzStore, Result, Track, TrackConfig};
 /// A `ValueReader` over one scalar track of an already-written pbz store. Used
 /// as a stack source: each `read_into` reads the track's region and copies it
 /// into the caller's single-column buffer.
+#[deprecated(note = "stack is being removed; import all samples in one cohort import instead")]
 pub struct PbzTrackReader<T> {
     store: Arc<PbzStore>,
     track: String,
@@ -103,6 +106,7 @@ impl<T: Numeric> ValueReader for PbzTrackReader<T> {
 }
 
 /// Configuration for [`stack`].
+#[deprecated(note = "stack is being removed; import all samples in one cohort import instead")]
 pub struct StackConfig {
     /// Tracks to stack. `None` stacks every track of the first source; each
     /// selected track must exist (scalar, same dtype, same genome) in all sources.
@@ -130,6 +134,7 @@ impl Default for StackConfig {
 /// store `out`. Every stacked track must be scalar (rank 1), share a dtype, and
 /// share a genome (`genome_checksum`) across all sources. Each becomes a
 /// `(ΣL, N)` cohort track whose column labels are the source labels.
+#[deprecated(note = "stack is being removed; import all samples in one cohort import instead")]
 pub fn stack(
     sources: Vec<(PbzStore, String)>,
     out: &mut PbzStore,

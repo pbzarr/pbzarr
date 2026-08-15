@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 import os
+import warnings
 from typing import TypeAlias
 
 from . import _native
@@ -299,7 +300,18 @@ def stack(
     column_chunk_size: int | None = None,
     workers: int | None = None,
 ) -> None:
-    """Stack scalar tracks from PBZ collections into a new cohort collection."""
+    """Stack scalar tracks from PBZ collections into a new cohort collection.
+
+    .. deprecated::
+        ``stack`` is being removed; import all samples in one cohort import
+        instead.
+    """
+    warnings.warn(
+        "pbzarr.stack is deprecated and will be removed; "
+        "import all samples in one cohort import instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     normalized_sources = _sources(sources)
     destination_path = _path(destination, "destination")
     _require_absent(destination_path)
