@@ -23,7 +23,6 @@ pub enum BamIndex {
     Csi(noodles_csi_bam::Index),
 }
 
-
 fn bam_query<'r>(
     reader: &'r mut bam::io::Reader<bgzf::io::Reader<File>>,
     header: &sam::Header,
