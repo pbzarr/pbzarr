@@ -178,7 +178,7 @@ fn scale_consolidates_every_node_into_the_root_metadata() {
 }
 
 #[test]
-fn consolidate_metadata_is_idempotent_and_replaces_stale_entries() {
+fn consolidate_metadata_is_idempotent() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");
     scaled_fixture(&path);
@@ -188,9 +188,18 @@ fn consolidate_metadata_is_idempotent_and_replaces_stale_entries() {
     store.consolidate_metadata().unwrap();
     let second = root_metadata(&path);
     assert_eq!(first, second, "re-consolidation is a no-op");
+}
 
-    // A node added after consolidation appears on the next refresh, and the
-    // previous consolidated field is replaced rather than nested.
+/// Track completion is a publication event, so a track created *after* a
+/// pyramid publish must not be left out of the root map: zarr-python resolves
+/// solely from the map when it is present, which would make the new track
+/// silently invisible.
+#[test]
+fn track_creation_after_scale_refreshes_the_root_metadata() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    scaled_fixture(&path);
+
     let mut store = PbzStore::open(&path).unwrap();
     store
         .create_track(
@@ -203,23 +212,72 @@ fn consolidate_metadata_is_idempotent_and_replaces_stale_entries() {
             TrackConfig::new(Dtype::I32),
         )
         .unwrap();
-    store.consolidate_metadata().unwrap();
+    // No explicit consolidate_metadata() call: create_track must refresh it.
 
     let root = root_metadata(&path);
     let metadata = root["consolidated_metadata"]["metadata"]
         .as_object()
         .unwrap();
-    assert!(metadata.contains_key("extra/values"));
-    assert!(metadata.contains_key("af/scales/8/mean"));
+    for node in ["extra", "extra/values", "extra/contigs", "extra/offsets"] {
+        assert!(
+            metadata.contains_key(node),
+            "{node} missing from {metadata:?}"
+        );
+    }
+    assert_eq!(metadata["extra/values"]["shape"], serde_json::json!([4]));
+    // The scaled track survives the refresh, and the previous consolidated
+    // field was replaced rather than nested.
+    for node in EXPECTED_NODES {
+        assert!(metadata.contains_key(*node), "{node} lost on refresh");
+    }
     assert!(
-        metadata["extra"]
-            .get("consolidated_metadata")
-            .unwrap()
-            .get("metadata")
-            .unwrap()
+        metadata["extra"]["consolidated_metadata"]["metadata"]
             .as_object()
             .unwrap()
             .is_empty()
+    );
+
+    // ...and zarr-python still resolves the whole store from the root map.
+    let expected: Vec<String> = EXPECTED_NODES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .chain(["extra".into(), "extra/values".into()])
+        .collect();
+    run_python_validator(
+        &path,
+        &expected,
+        "track_creation_after_scale_refreshes_the_root_metadata",
+    );
+}
+
+/// A fresh store carries consolidated metadata as soon as its first track is
+/// published, without any pyramid.
+#[test]
+fn track_creation_consolidates_an_unscaled_store() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    let mut store = PbzStore::create(&path).unwrap();
+    store
+        .create_track(
+            "depth",
+            Genome::new(vec![Contig {
+                name: "chr1".into(),
+                length: 4,
+            }])
+            .unwrap(),
+            TrackConfig::new(Dtype::I32),
+        )
+        .unwrap();
+
+    let root = root_metadata(&path);
+    let metadata = root["consolidated_metadata"]["metadata"]
+        .as_object()
+        .unwrap();
+    let mut got: Vec<&str> = metadata.keys().map(String::as_str).collect();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        ["depth", "depth/contigs", "depth/offsets", "depth/values"]
     );
 }
 
@@ -242,30 +300,39 @@ fn pixi_zarr_available(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-#[test]
-fn zarr_python_reads_every_node_from_the_consolidated_metadata() {
+/// Assert released zarr-python resolves `expected` from `store`'s consolidated
+/// metadata alone. Skips (loudly) when pixi or zarr is unavailable.
+fn run_python_validator(store: &Path, expected: &[String], test: &str) {
     let root = workspace_root();
     if !pixi_zarr_available(&root) {
-        eprintln!(
-            "skip zarr_python_reads_every_node_from_the_consolidated_metadata: pixi/zarr unavailable"
-        );
+        eprintln!("skip {test} python validation: pixi/zarr unavailable");
         return;
     }
-
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("s.pbz");
-    scaled_fixture(&path);
-
-    let mut cmd = Command::new("pixi");
-    cmd.current_dir(&root)
+    let out = Command::new("pixi")
+        .current_dir(&root)
         .args(["run", "python", "scripts/validate_consolidated.py"])
-        .arg(&path)
-        .args(EXPECTED_NODES);
-    let out = cmd.output().unwrap();
+        .arg(store)
+        .args(expected)
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "validate_consolidated.py failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn zarr_python_reads_every_node_from_the_consolidated_metadata() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    scaled_fixture(&path);
+
+    let expected: Vec<String> = EXPECTED_NODES.iter().map(|s| (*s).to_owned()).collect();
+    run_python_validator(
+        &path,
+        &expected,
+        "zarr_python_reads_every_node_from_the_consolidated_metadata",
     );
 }
