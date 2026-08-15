@@ -134,3 +134,25 @@ fn column_index_by_name_reads_header() {
         4
     );
 }
+
+#[test]
+fn column_index_by_name_returns_the_first_duplicate_header_name() {
+    if !htslib_available() {
+        eprintln!(
+            "skip bed_reader::column_index_by_name_returns_the_first_duplicate_header_name: bgzip/tabix not on PATH"
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "duplicates",
+        &["chrom", "start", "end", "value", "value"],
+        &[("chr1", 0, 10, vec!["1", "2"])],
+    );
+
+    assert_eq!(
+        pbzarr_readers::column_index_by_name(&bed, "value").unwrap(),
+        3
+    );
+}

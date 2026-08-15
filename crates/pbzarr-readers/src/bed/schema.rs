@@ -155,7 +155,7 @@ pub(super) fn resolve_sources(
     if layout.n_cols == 3 {
         if options.fields.is_some() {
             return Err(PbzError::Metadata(
-                "bed import: BED3 input has no value fields to select".into(),
+                "bed import: BED3 input has no BED value columns to select".into(),
             ));
         }
         if options.dtype.is_some() {
@@ -175,14 +175,14 @@ pub(super) fn resolve_sources(
     let Some(header) = &layout.header else {
         if layout.n_cols > 4 {
             return Err(PbzError::Metadata(format!(
-                "bed import: {} has {} value fields and no header; add a header line or use a schema",
+                "bed import: {} has {} BED value columns and no header; add a header line or use a schema",
                 first.path.display(),
                 layout.n_cols - 3
             )));
         }
         if options.fields.is_some() {
             return Err(PbzError::Metadata(
-                "bed import: field selection requires a #-prefixed header".into(),
+                "bed import: `--field` selection requires a #-prefixed header".into(),
             ));
         }
         reject_overrides(options)?;
@@ -217,13 +217,13 @@ pub(super) fn resolve_sources(
         .unwrap_or_else(|| header[3..].to_vec());
     if selected.is_empty() {
         return Err(PbzError::Metadata(
-            "bed import: no value fields selected".into(),
+            "bed import: no BED value columns selected".into(),
         ));
     }
     let mut seen = HashSet::new();
     if selected.iter().any(|name| !seen.insert(name.clone())) {
         return Err(PbzError::Metadata(
-            "bed import: duplicate selected field".into(),
+            "bed import: duplicate selected BED column".into(),
         ));
     }
     let columns = selected
@@ -235,7 +235,7 @@ pub(super) fn resolve_sources(
                 .filter(|index| *index >= 3)
                 .ok_or_else(|| {
                     PbzError::Metadata(format!(
-                        "bed import: field {name:?} is not a value field of the header"
+                        "bed import: BED column {name:?} is not a value BED column of the header"
                     ))
                 })
         })
@@ -264,13 +264,13 @@ pub(super) fn resolve_sources(
                 .map(|(name, _)| format!("{name:?}"))
                 .collect::<Vec<_>>();
             return Err(PbzError::Metadata(format!(
-                "bed import: field(s) {} hold true/false and cannot join a numeric wide track; drop them with a field selection or import them via a schema",
+                "bed import: BED column(s) {} hold true/false and cannot join a numeric wide track; drop them with a `--field` selection or import them via a schema",
                 word_bool_fields.join(", ")
             )));
         }
         let dtype = joint.finish(exact)?;
         return Ok(ResolvedImport::Wide {
-            track: required_track(options, "when several fields form one wide track")?,
+            track: required_track(options, "when several BED columns form one wide track")?,
             dtype,
             columns,
             column_labels: selected,
@@ -279,7 +279,7 @@ pub(super) fn resolve_sources(
 
     if options.track.is_some() {
         return Err(PbzError::Metadata(
-            "bed import: a track name only applies to single-track imports; fields name their own tracks"
+            "bed import: a track name only applies to single-track imports; BED columns name their own tracks"
                 .into(),
         ));
     }
@@ -315,7 +315,8 @@ fn reject_overrides(options: &BedImportOptions) -> Result<()> {
         Ok(())
     } else {
         Err(PbzError::Metadata(
-            "bed import: per-field dtype overrides only apply to headered per-field imports".into(),
+            "bed import: per-BED-column dtype overrides only apply to headered per-BED-column imports"
+                .into(),
         ))
     }
 }
@@ -349,6 +350,23 @@ pub fn infer_bed_dtypes(
         .collect()
 }
 
+/// Sample every BED source into one inference state per file column.
+///
+/// Observations are combined before choosing each dtype, so the result covers
+/// values from every source rather than promoting independently inferred
+/// dtypes after the fact.
+pub fn infer_bed_dtypes_for_sources(
+    sources: &[Source],
+    columns: &[usize],
+    infer_rows: InferRows,
+) -> Result<Vec<Dtype>> {
+    let (states, exact) = infer_states(sources, columns, infer_rows)?;
+    states
+        .into_iter()
+        .map(|state| state.finish(exact))
+        .collect()
+}
+
 /// Returns true when the scan reached EOF (saw every record) rather than
 /// stopping at the sample limit.
 fn sample_columns(
@@ -370,9 +388,22 @@ fn sample_columns(
                 .map_err(|error| PbzError::Metadata(error.to_string()))?;
             let cells = text.trim_end().split('\t').collect::<Vec<_>>();
             for (field, column) in columns.iter().enumerate() {
-                inference[field].observe(cells.get(*column).ok_or_else(|| {
-                    PbzError::Metadata(format!("BED {} has no column {column}", path.display()))
-                })?)?;
+                let value = match cells.get(*column) {
+                    Some(value) => *value,
+                    None => {
+                        let one_based = column.checked_add(1).ok_or_else(|| {
+                            PbzError::Metadata(format!(
+                                "BED column index {column} cannot be represented as a one-based column number"
+                            ))
+                        })?;
+                        return Err(PbzError::Metadata(format!(
+                            "BED {}: BED column {one_based} (one-based) is outside the {}-column input",
+                            path.display(),
+                            cells.len()
+                        )));
+                    }
+                };
+                inference[field].observe(value)?;
             }
             count += 1;
             if matches!(limit, InferRows::Sample(max) if count >= max) {

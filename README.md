@@ -35,7 +35,7 @@ pbzarr stores the cohort as one two-dimensional array: one row per base, one col
 
 pbzarr uses the [dataset model of xarray](https://docs.xarray.dev/en/stable/user-guide/data-structures.html#dataset). In this model, a dataset holds many variables, and the variables share the same coordinates. In pbzarr, the collection is the dataset, each track is one variable, and the coordinates are genomic positions.
 
-A track has at most these two dimensions. When data contains more than one kind of value, each kind goes into its own track. For example, depth, mapping quality, and a mask become three tracks in one collection. Because the tracks are separate, each kind keeps its own data type, fill value, and compression settings.
+A track has at most two dimensions: genomic position and one explicitly labeled column axis. The column axis is homogeneous, so every column shares the track's data type, fill value, and compression settings. It can label samples from several input sources, or label BED columns that a schema groups into one track. Those two axes cannot appear together because that would require a rank-3 track; grouped BED-column imports therefore accept one source only. When values need different data types or settings, each kind goes into its own track. For example, depth, mapping quality, and a mask become three tracks in one collection.
 
 Each track records its own genome. Tracks that record the same genome have the same length and the same base order, so pbzarr can open them together and calculate across them. See [format](#format) for more details.
 
