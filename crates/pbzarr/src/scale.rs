@@ -796,8 +796,11 @@ mod tests {
     use crate::track::TrackConfig;
 
     /// Multi-slab cascade: a tiny slab budget forces slabs of one aligned
-    /// unit (lcm(4, 6) = 12 positions), so child factor 24's bins straddle
-    /// slabs and exercise the carry path, including the sequence-end flush.
+    /// unit (lcm(4, 6) = 12 positions), so child factor 72's bins span six
+    /// slabs each and exercise every carry branch: park-only (first slab of
+    /// a child bin), seed-then-park-again (middle slabs), seed-then-emit
+    /// (bin-completing slab), a mid-contig complete emission (chr1 bin 0 at
+    /// position 72), and the ragged sequence-end flush on both contigs.
     #[test]
     fn cascade_carry_across_small_slabs_matches_naive() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -805,7 +808,7 @@ mod tests {
         let genome = Genome::new(vec![
             Contig {
                 name: "chr1".into(),
-                length: 53,
+                length: 149,
             },
             Contig {
                 name: "chr2".into(),
@@ -817,7 +820,7 @@ mod tests {
             .create_track("depth", genome, TrackConfig::new(Dtype::I32))
             .unwrap();
         let t = store.track("depth").unwrap();
-        let chr1: Vec<i32> = (0..53).map(|i| (i * 7) % 23 - 5).collect();
+        let chr1: Vec<i32> = (0..149).map(|i| (i * 7) % 23 - 5).collect();
         let chr2: Vec<i32> = (0..13).map(|i| 100 - 9 * i).collect();
         for (name, vals) in [("chr1", &chr1), ("chr2", &chr2)] {
             let region = t
@@ -828,7 +831,10 @@ mod tests {
                 .unwrap();
         }
 
-        let factors = [4u64, 6, 24];
+        // chr1 (149 = 2*72 + 5) yields child bins [0, 72), [72, 144), and a
+        // ragged [144, 149); chr2 (13) is shorter than one child bin. 149
+        // and 13 are divisible by none of the factors.
+        let factors = [4u64, 6, 72];
         let source_fill = source_fill_as_f64(t).unwrap();
         let levels: Vec<Level> = factors
             .iter()
@@ -836,9 +842,9 @@ mod tests {
             .collect();
         let parents = factor_parents(&factors);
         assert_eq!(parents, vec![None, None, Some(1)]);
-        // 48-byte budget -> slab = one aligned unit = 12 positions; chr1
-        // takes 5 slabs (12, 12, 12, 12, 5) so factor 24 carries partial
-        // bins across every slab boundary.
+        // 48-byte budget -> slab = one aligned unit = 12 positions, so a
+        // 72-position child bin spans six slabs: the middle four each seed
+        // from the carry AND park back into it in the same slab.
         compute_levels_single_pass::<i32>(t, &levels, &parents, 12, 48, false, |v| v as f64)
             .unwrap();
 
@@ -861,5 +867,33 @@ mod tests {
             }
             assert_eq!(got, expect, "factor {factor}");
         }
+    }
+
+    /// The Tier A/B decision itself: slab alignment is the lcm of the ROOT
+    /// factors, a huge root lcm falls back to Tier B, and so does a factor
+    /// set whose one aligned unit at full column width overflows the slab
+    /// byte budget.
+    #[test]
+    fn tier_decision_alignment_cap_and_budget_guard() {
+        // {4, 6, 24}: roots {4, 6} -> alignment lcm(4, 6) = 12; the child
+        // 24 does not constrain slabs.
+        let factors = [4u64, 6, 24];
+        let parents = factor_parents(&factors);
+        assert_eq!(parents, vec![None, None, Some(1)]);
+        assert_eq!(tier_a_align(&factors, &parents, 1), Some(12));
+
+        // Two large coprime roots: lcm ~ 2^42 exceeds the 2^22 cap.
+        let factors = [1u64 << 21, (1 << 21) + 1];
+        let parents = factor_parents(&factors);
+        assert_eq!(parents, vec![None, None]);
+        assert_eq!(tier_a_align(&factors, &parents, 1), None);
+
+        // Budget guard: alignment 2^22 fits at 4 columns (2^22 * 4 * 4 B =
+        // 64 MiB, exactly the budget) but not at 8 (128 MiB).
+        let factors = [1u64 << 22];
+        let parents = factor_parents(&factors);
+        assert_eq!(tier_a_align(&factors, &parents, 1), Some(1 << 22));
+        assert_eq!(tier_a_align(&factors, &parents, 4), Some(1 << 22));
+        assert_eq!(tier_a_align(&factors, &parents, 8), None);
     }
 }
