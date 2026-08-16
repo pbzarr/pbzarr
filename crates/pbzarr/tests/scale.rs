@@ -515,6 +515,59 @@ fn cascade_factor_set_matches_naive_binning_f32_nan() {
 }
 
 #[test]
+fn workers_three_matches_workers_one_bitwise() {
+    // The {4, 6, 24} reference fixture again, computed once serially
+    // (workers = 1) and once with an odd worker count (workers = 3, to
+    // shake alignment bugs); every level must be bitwise identical, and
+    // both must match the naive reference.
+    let dir = TempDir::new().unwrap();
+    let chr1: Vec<i32> = (0..53).map(|i| (i * 7) % 23 - 5).collect();
+    let chr2: Vec<i32> = (0..13).map(|i| 100 - 9 * i).collect();
+
+    let mut paths = Vec::new();
+    for workers in [1usize, 3] {
+        let path = dir.path().join(format!("w{workers}.pbz"));
+        let mut store = PbzStore::create(&path).unwrap();
+        store
+            .create_track("depth", cascade_genome(), TrackConfig::new(Dtype::I32))
+            .unwrap();
+        let track = store.track("depth").unwrap();
+        for (name, vals) in [("chr1", &chr1), ("chr2", &chr2)] {
+            let region = track
+                .genome()
+                .resolve(&format!("{name}:0-{}", vals.len()).parse().unwrap())
+                .unwrap();
+            track
+                .write_region(&region, Array1::from(vals.clone()).into_dyn())
+                .unwrap();
+        }
+        let config = ScaleConfig {
+            factors: Some(vec![4, 6, 24]),
+            workers,
+            ..ScaleConfig::default()
+        };
+        scale(&store, "depth", &config).unwrap();
+        paths.push(path);
+    }
+
+    let as_f64: Vec<Vec<f64>> = [&chr1, &chr2]
+        .iter()
+        .map(|v| v.iter().map(|&x| f64::from(x)).collect())
+        .collect();
+    for f in [4u64, 6, 24] {
+        let serial = read_all_f32(&open_array(&paths[0], &format!("/depth/scales/{f}/mean")))
+            .into_raw_vec_and_offset()
+            .0;
+        let parallel = read_all_f32(&open_array(&paths[1], &format!("/depth/scales/{f}/mean")))
+            .into_raw_vec_and_offset()
+            .0;
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+        assert_eq!(bits(&serial), bits(&parallel), "factor {f}: workers 1 vs 3");
+        assert_eq!(serial, naive_means(&as_f64, f), "factor {f}: reference");
+    }
+}
+
+#[test]
 fn huge_lcm_factor_set_falls_back_to_multi_pass() {
     // Two large coprime factors: lcm(2^21, 2^21 + 1) ~ 2^42 blows the Tier A
     // alignment cap, so the per-factor multi-pass fallback runs and must

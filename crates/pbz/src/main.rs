@@ -65,6 +65,9 @@ struct ScaleArgs {
     /// ascending with no duplicates. Defaults to the built-in ladder.
     #[arg(short('s'), long, value_name = "LIST")]
     scales: Option<String>,
+    /// Number of scale workers.
+    #[arg(short('j'), long, value_name = "N", default_value_t = 4)]
+    workers: usize,
 }
 
 #[derive(Debug, Subcommand)]
@@ -440,6 +443,7 @@ fn scale_cmd(args: ScaleArgs) -> Result<()> {
         PbzStore::open(&args.pbz).with_context(|| format!("open store {}", args.pbz.display()))?;
     let config = ScaleConfig {
         factors,
+        workers: args.workers,
         ..ScaleConfig::default()
     };
 
