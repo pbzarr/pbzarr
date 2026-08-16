@@ -1118,6 +1118,88 @@ mod tests {
         }
     }
 
+    /// The whole-contig unit fallback: {2, 36, 2^27} is Tier A (root lcm =
+    /// 2, only 2 sweeps base) but lcm(all) = 9 * 2^27 exceeds the 2^26 unit
+    /// alignment cap, so build_units must emit exactly one unit per contig.
+    /// A 48-byte budget makes slabs 12 positions, so inside chr1's single
+    /// unit a factor-36 child bin spans three slabs (carry seeded, parked,
+    /// and completed mid-contig) and the 2^27 child's lone ragged bin
+    /// carries across all thirteen slabs to the contig-end flush; two
+    /// workers race the two units.
+    #[test]
+    fn whole_contig_units_carry_across_slabs_matches_naive() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = PbzStore::create(dir.path().join("s.pbz")).unwrap();
+        let genome = Genome::new(vec![
+            Contig {
+                name: "chr1".into(),
+                length: 149,
+            },
+            Contig {
+                name: "chr2".into(),
+                length: 13,
+            },
+        ])
+        .unwrap();
+        store
+            .create_track("depth", genome, TrackConfig::new(Dtype::I32))
+            .unwrap();
+        let t = store.track("depth").unwrap();
+        let chr1: Vec<i32> = (0..149).map(|i| (i * 13) % 29 - 6).collect();
+        let chr2: Vec<i32> = (0..13).map(|i| 40 - 5 * i).collect();
+        for (name, vals) in [("chr1", &chr1), ("chr2", &chr2)] {
+            let region = t
+                .genome()
+                .resolve(&format!("{name}:0-{}", vals.len()).parse().unwrap())
+                .unwrap();
+            t.write_region(&region, ndarray::Array1::from(vals.clone()).into_dyn())
+                .unwrap();
+        }
+
+        let factors = [2u64, 36, 1 << 27];
+        let parents = factor_parents(&factors);
+        assert_eq!(parents, vec![None, Some(0), Some(0)]);
+        // Tier A applies (the divergence under test): the root lcm is tiny
+        // even though lcm(all factors) blows the unit alignment cap.
+        assert_eq!(tier_a_align(&factors, &parents, 1), Some(2));
+
+        let source_fill = source_fill_as_f64(t).unwrap();
+        let levels: Vec<Level> = factors
+            .iter()
+            .map(|&f| create_level(&store, t, f, source_fill).unwrap())
+            .collect();
+        let mut ctx = PassCtx::<i32>::new(t, &levels, &parents, 2, false, |v| v as f64).unwrap();
+        ctx.slab_target_bytes = 48;
+
+        // Pin the fallback branch: exactly one unit per contig, whole span.
+        let units = build_units(&ctx);
+        assert_eq!(units.len(), 2);
+        assert_eq!((units[0].start, units[0].end), (0, 149));
+        assert_eq!((units[1].start, units[1].end), (0, 13));
+
+        run_units(&ctx, 2).unwrap();
+
+        for (fi, &factor) in factors.iter().enumerate() {
+            let lvl = &levels[fi];
+            #[allow(clippy::single_range_in_vec_init)]
+            let subset = ArraySubset::new_with_ranges(&[0..lvl.bins]);
+            let got = lvl
+                .array
+                .retrieve_array_subset::<ArrayD<f32>>(&subset)
+                .unwrap()
+                .into_raw_vec_and_offset()
+                .0;
+            let mut expect = Vec::new();
+            for vals in [&chr1, &chr2] {
+                for chunk in vals.chunks(factor as usize) {
+                    let s: f64 = chunk.iter().map(|&v| f64::from(v)).sum();
+                    expect.push((s / chunk.len() as f64) as f32);
+                }
+            }
+            assert_eq!(got, expect, "factor {factor}");
+        }
+    }
+
     /// The Tier A/B decision itself: slab alignment is the lcm of the ROOT
     /// factors, a huge root lcm falls back to Tier B, and so does a factor
     /// set whose one aligned unit at full column width overflows the slab
