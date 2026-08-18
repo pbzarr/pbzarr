@@ -55,10 +55,10 @@ not re-fire, so the crate is untouched.
 
 ## Version pinning
 
-The next version is pinned in `release-please-config.json` via `release-as`. It is
-set to `0.2.0` for the first release out of this repo (0.1.0 of both the crate and
-the wheel were published before the monorepo consolidation). Remove `release-as`
-once you want release-please to infer the bump from commit history again.
+release-please infers the next version from conventional commit history;
+`.release-please-manifest.json` tracks the current released version. (The
+one-off `release-as` pin used for the first release out of this repo has been
+removed.)
 
 ## Crate publishing
 

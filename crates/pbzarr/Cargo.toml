@@ -22,6 +22,7 @@ thiserror = "2"
 zarrs = { version = "0.23", features = ["ndarray"] }
 anyhow = "1"
 crossbeam-channel = "0.5"
+indicatif = "0.17"
 
 [dev-dependencies]
 tempfile = "3"

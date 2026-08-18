@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use log::{debug, info, warn};
 use pbzarr::Genome;
 use pbzarr::PbzError;
 use pbzarr::PbzStore;
@@ -39,17 +40,39 @@ pub fn from_bam(
         return Err(PbzError::Metadata("bam import: no sources".into()));
     }
 
+    info!(
+        "bam import: {} source(s) into track {track_name:?}, mode {mode:?}",
+        sources.len()
+    );
+    debug!("bam import filter: {filter:?}, reference {reference:?}");
+    if reference.is_none()
+        && let Some(cram) = sources
+            .iter()
+            .find(|s| s.path.extension().is_some_and(|ext| ext == "cram"))
+    {
+        warn!(
+            "{} looks like CRAM but no reference FASTA was given; decoding will fail unless the file embeds its reference",
+            cram.path.display()
+        );
+    }
     let readers: Vec<BamReader> = sources
         .iter()
         .map(|s| {
+            debug!("opening alignment source {}", s.path.display());
             BamReader::open(&s.path, reference.as_deref(), mode, filter)
                 .map_err(|e| PbzError::Store(format!("open {}: {e}", s.path.display())))
         })
         .collect::<Result<_>>()?;
 
     let genome = shared_genome(&readers, sources)?;
+    debug!(
+        "bam import genome: {} contig(s), {} positions",
+        genome.contigs().len(),
+        genome.contigs().iter().map(|c| c.length).sum::<u64>()
+    );
 
     let names = track_names(track_name, mode);
+    info!("bam import writes track(s) {names:?}");
     let source_paths = sources
         .iter()
         .map(|s| s.path.display().to_string())

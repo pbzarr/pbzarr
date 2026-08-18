@@ -5,6 +5,7 @@
 //! bindings (e.g. d4) live in their own crates and call `run_pipeline`.
 
 mod pipeline;
+pub mod progress;
 mod source;
 
 pub use pipeline::{

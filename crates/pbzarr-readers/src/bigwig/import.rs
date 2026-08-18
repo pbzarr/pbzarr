@@ -1,5 +1,6 @@
 //! bigWig-specific import glue. Wires `BigWigReader` into the generic pipeline.
 
+use log::{debug, info};
 use pbzarr::PbzError;
 use pbzarr::PbzStore;
 use pbzarr::Result;
@@ -30,9 +31,14 @@ pub fn from_bigwig(
         return Err(PbzError::Metadata("bigWig import: no sources".into()));
     }
 
+    info!(
+        "bigWig import: {} source(s) into track {track_name:?}",
+        sources.len()
+    );
     let readers: Vec<BigWigReader> = sources
         .iter()
         .map(|s| {
+            debug!("opening bigWig source {}", s.path.display());
             BigWigReader::open(&s.path)
                 .map_err(|e| PbzError::Store(format!("open {}: {e}", s.path.display())))
         })

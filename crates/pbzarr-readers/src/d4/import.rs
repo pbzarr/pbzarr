@@ -1,5 +1,6 @@
 //! D4-specific import glue. Wires `D4Reader` into the generic pipeline.
 
+use log::{debug, info};
 use pbzarr::PbzError;
 use pbzarr::PbzStore;
 use pbzarr::Result;
@@ -27,9 +28,14 @@ pub fn from_d4(
         return Err(PbzError::Metadata("d4 import: no sources".into()));
     }
 
+    info!(
+        "d4 import: {} source(s) into track {track_name:?}",
+        sources.len()
+    );
     let readers: Vec<D4Reader> = sources
         .iter()
         .map(|s| {
+            debug!("opening d4 source {}", s.path.display());
             D4Reader::open(&s.path)
                 .map_err(|e| PbzError::Store(format!("open {}: {e}", s.path.display())))
         })

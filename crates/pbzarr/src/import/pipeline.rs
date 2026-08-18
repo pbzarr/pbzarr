@@ -14,8 +14,10 @@ use std::mem;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use crossbeam_channel::bounded;
+use log::{debug, info, trace, warn};
 use ndarray::{Array2, Axis};
 
 use crate::Result;
@@ -28,6 +30,10 @@ use crate::track::Track;
 /// Hook for callers to observe pipeline progress. Implementations must be
 /// `Send + Sync` because workers call `tick` concurrently.
 pub trait ProgressSink: Send + Sync {
+    /// Total bytes the run will write, reported once before any `tick`. The
+    /// pipeline knows the exact figure (positions x columns x element width),
+    /// so callers build a sink without sizing it themselves.
+    fn set_total(&self, _bytes: u64) {}
     fn tick(&self, _bytes: u64) {}
     fn done(&self) {}
 }
@@ -154,6 +160,11 @@ fn skip_uncovered_task(
 ) -> bool {
     let covered = windows.iter().any(&mut may_have_data);
     if !covered {
+        trace!(
+            "skipping uncovered task: no reader covers {} contig window(s) starting at {:?}",
+            windows.len(),
+            windows.first().map(|w| w.name)
+        );
         state.tasks_skipped.fetch_add(1, Ordering::Relaxed);
     }
     !covered
@@ -195,7 +206,12 @@ impl State {
     fn record_err(&self, err: PbzError) {
         let mut slot = self.first_err.lock().expect("error slot poisoned");
         if slot.is_none() {
+            debug!("import worker failed: {err}");
             *slot = Some(err);
+        } else {
+            // Only the first error is returned; log the rest so a cascade
+            // isn't invisible when the reported cause is a downstream symptom.
+            warn!("additional import worker error (not reported): {err}");
         }
     }
 
@@ -204,6 +220,39 @@ impl State {
             .lock()
             .expect("error slot poisoned")
             .is_some()
+    }
+}
+
+/// Log the shape of a run about to start. `kind` names the pipeline so the
+/// four variants stay distinguishable in a log.
+fn log_run_start(
+    kind: &str,
+    tracks: &[&str],
+    total: u64,
+    columns: u64,
+    tasks: usize,
+    workers: usize,
+) {
+    info!(
+        "{kind} pipeline: {} track(s) {tracks:?}, {total} positions x {columns} column(s), {tasks} tasks, {workers} workers",
+        tracks.len()
+    );
+}
+
+/// Log what a finished run wrote. Returns nothing; callers still build the
+/// `Report` from the same state.
+fn log_run_end(kind: &str, state: &State, started: Instant) {
+    let completed = state.tasks_completed.load(Ordering::Relaxed);
+    let skipped = state.tasks_skipped.load(Ordering::Relaxed);
+    let bytes = state.bytes_written.load(Ordering::Relaxed);
+    let elapsed = started.elapsed();
+    info!(
+        "{kind} pipeline finished: {completed} tasks written, {skipped} skipped, {bytes} bytes in {elapsed:.1?}"
+    );
+    if completed == 0 && skipped > 0 {
+        warn!(
+            "{kind} pipeline wrote no data: all {skipped} tasks were skipped because no source covered them"
+        );
     }
 }
 
@@ -278,7 +327,26 @@ where
         }
     }
 
+    if let Some(progress) = &config.progress {
+        progress.set_total(total * n_columns * dtype_bytes(track.dtype()) as u64);
+    }
+
+    let started = Instant::now();
     let workers = config.workers.max(1);
+    debug!(
+        "single pipeline: track {:?} is {} rank {}, write unit {position_step} x {column_step}, {n_readers} reader(s)",
+        track.name(),
+        track.dtype(),
+        track.rank()
+    );
+    log_run_start(
+        "single",
+        &[track.name()],
+        total,
+        n_columns,
+        tasks.len(),
+        workers,
+    );
     let task_cap = (workers * 2).max(1);
     let (task_tx, task_rx) = bounded::<ChunkTask>(task_cap);
 
@@ -368,6 +436,7 @@ where
     if let Some(ref p) = config.progress {
         p.done();
     }
+    log_run_end("single", &state, started);
 
     if let Some(e) = state.first_err.lock().expect("error slot poisoned").take() {
         return Err(e);
@@ -397,6 +466,11 @@ where
     let chunk_len = (ge - gs) as usize;
     let tile_width = usize::try_from(task.columns.end - task.columns.start)
         .map_err(|_| PbzError::Metadata("tile width exceeds usize".into()))?;
+    trace!(
+        "task [{gs},{ge}) columns {:?} -> track {:?}",
+        task.columns,
+        track.name()
+    );
 
     let windows = contig_windows(genome, gs, ge);
     if skip_uncovered_task(&windows, state, |w| {
@@ -522,7 +596,16 @@ pub fn run_multi_pipeline<R: MultiValueReader>(
         });
     }
 
+    if let Some(progress) = &config.progress {
+        let per_position: u64 = dtypes.iter().map(|d| dtype_bytes(*d) as u64).sum();
+        progress.set_total(total * per_position);
+    }
+
+    let started = Instant::now();
     let workers = config.workers.max(1);
+    let names = tracks.iter().map(|t| t.name()).collect::<Vec<_>>();
+    debug!("multi pipeline: chunk step {step}, dtypes {dtypes:?}");
+    log_run_start("multi", &names, total, 1, tasks.len(), workers);
     let (task_tx, task_rx) = bounded::<ChunkTask>((workers * 2).max(1));
     let reader = Arc::new(reader);
     let dtypes = Arc::new(dtypes);
@@ -583,6 +666,7 @@ pub fn run_multi_pipeline<R: MultiValueReader>(
     if let Some(ref p) = config.progress {
         p.done();
     }
+    log_run_end("multi", &state, started);
     if let Some(e) = state.first_err.lock().expect("error slot poisoned").take() {
         return Err(e);
     }
@@ -652,7 +736,25 @@ pub fn run_wide_pipeline<R: MultiValueReader>(
         });
     }
 
+    if let Some(progress) = &config.progress {
+        progress.set_total(total * width_u64 * dtype_bytes(track.dtype()) as u64);
+    }
+
+    let started = Instant::now();
     let workers = config.workers.max(1);
+    debug!(
+        "wide pipeline: track {:?} is {}, position step {step}, {width} field column(s)",
+        track.name(),
+        track.dtype()
+    );
+    log_run_start(
+        "wide",
+        &[track.name()],
+        total,
+        width_u64,
+        tasks.len(),
+        workers,
+    );
     let (task_tx, task_rx) = bounded::<ChunkTask>((workers * 2).max(1));
     let reader = Arc::new(reader);
     let state = Arc::new(State {
@@ -705,6 +807,7 @@ pub fn run_wide_pipeline<R: MultiValueReader>(
     if let Some(ref p) = config.progress {
         p.done();
     }
+    log_run_end("wide", &state, started);
     if let Some(e) = state.first_err.lock().expect("error slot poisoned").take() {
         return Err(e);
     }
@@ -729,6 +832,12 @@ fn process_wide_task<R: MultiValueReader>(
         .map_err(|_| PbzError::Metadata("wide tile row count exceeds usize".into()))?;
     let width = usize::try_from(task.columns.end)
         .map_err(|_| PbzError::Metadata("wide tile width exceeds usize".into()))?;
+    trace!(
+        "wide task [{},{}) x {width} column(s) -> track {:?}",
+        task.start,
+        task.end,
+        track.name()
+    );
     let windows = contig_windows(genome, task.start, task.end);
     if skip_uncovered_task(&windows, state, |w| {
         reader.may_have_data(w.name, w.local_lo, w.local_hi)
@@ -833,7 +942,19 @@ pub fn run_matrix_pipeline<R: MultiValueReader>(
         }
     }
 
+    if let Some(progress) = &config.progress {
+        let per_position: u64 = dtypes.iter().map(|d| dtype_bytes(*d) as u64).sum();
+        progress.set_total(total * source_count * per_position);
+    }
+
+    let started = Instant::now();
     let workers = config.workers.max(1);
+    let names = tracks.iter().map(|t| t.name()).collect::<Vec<_>>();
+    debug!(
+        "matrix pipeline: write unit {position_step} x {column_step}, dtypes {dtypes:?}, {} reader(s)",
+        readers.len()
+    );
+    log_run_start("matrix", &names, total, source_count, tasks.len(), workers);
     let (task_tx, task_rx) = bounded::<ChunkTask>((workers * 2).max(1));
     let readers = Arc::new(readers);
     let dtypes = Arc::new(dtypes);
@@ -916,6 +1037,7 @@ pub fn run_matrix_pipeline<R: MultiValueReader>(
     if let Some(progress) = &config.progress {
         progress.done();
     }
+    log_run_end("matrix", &state, started);
     if let Some(error) = state.first_err.lock().expect("error slot poisoned").take() {
         return Err(error);
     }
@@ -944,6 +1066,13 @@ fn process_matrix_task<R: MultiValueReader>(
         .map_err(|_| PbzError::Metadata("matrix tile row count exceeds usize".into()))?;
     let width = usize::try_from(task.columns.end - task.columns.start)
         .map_err(|_| PbzError::Metadata("matrix tile width exceeds usize".into()))?;
+    trace!(
+        "matrix task [{},{}) columns {:?} -> {} track(s)",
+        task.start,
+        task.end,
+        task.columns,
+        tracks.len()
+    );
     let windows = contig_windows(genome, task.start, task.end);
     if skip_uncovered_task(&windows, state, |w| {
         readers
@@ -1005,6 +1134,7 @@ fn process_task_multi<R: MultiValueReader>(
 ) -> Result<()> {
     let (gs, ge) = (task.start, task.end);
     let chunk_len = (ge - gs) as usize;
+    trace!("multi task [{gs},{ge}) -> {} track(s)", tracks.len());
 
     let windows = contig_windows(genome, gs, ge);
     if skip_uncovered_task(&windows, state, |w| {

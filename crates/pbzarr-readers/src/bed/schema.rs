@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::BufRead;
 use std::path::Path;
 
+use log::debug;
 use pbzarr::io::Dtype;
 use pbzarr::{PbzError, Result};
 
@@ -344,10 +345,27 @@ pub fn infer_bed_dtypes(
 ) -> Result<Vec<Dtype>> {
     let mut states = vec![InferenceState::default(); columns.len()];
     let exact = sample_columns(bed_gz, columns, infer_rows, &mut states)?;
-    states
+    let dtypes = states
         .into_iter()
         .map(|state| state.finish(exact))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    log_inferred(&[bed_gz.to_path_buf()], columns, &dtypes, exact);
+    Ok(dtypes)
+}
+
+/// Report what inference decided, and how it got there. A sampled scan only
+/// sees `infer_rows` records, so it picks conservative classes; an exhaustive
+/// scan min-widths instead. Which one ran explains any surprising dtype.
+fn log_inferred(sources: &[std::path::PathBuf], columns: &[usize], dtypes: &[Dtype], exact: bool) {
+    debug!(
+        "bed dtype inference over {} source(s) ({}): columns {columns:?} -> {dtypes:?}",
+        sources.len(),
+        if exact {
+            "exhaustive scan"
+        } else {
+            "sampled, conservative classes"
+        }
+    );
 }
 
 /// Sample every BED source into one inference state per file column.
@@ -361,10 +379,13 @@ pub fn infer_bed_dtypes_for_sources(
     infer_rows: InferRows,
 ) -> Result<Vec<Dtype>> {
     let (states, exact) = infer_states(sources, columns, infer_rows)?;
-    states
+    let dtypes = states
         .into_iter()
         .map(|state| state.finish(exact))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    let paths = sources.iter().map(|s| s.path.clone()).collect::<Vec<_>>();
+    log_inferred(&paths, columns, &dtypes, exact);
+    Ok(dtypes)
 }
 
 /// Returns true when the scan reached EOF (saw every record) rather than

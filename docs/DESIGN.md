@@ -74,7 +74,7 @@ The importer partitions the flat position axis into one full-column-width physic
 
 ## Python API
 
-Importing `pbzarr` registers `.pbz` accessors on `xr.Dataset` and `xr.DataTree`. The public namespace is `PbzError`, `open`, `RegionQuery`, `parse_region`, `create_store`, `import_d4`, `import_bigwig`, `import_bed`, `import_bed_multi`, and `stack`.
+Importing `pbzarr` registers `.pbz` accessors on `xr.Dataset` and `xr.DataTree`. The public namespace is `PbzError`, `open`, `RegionQuery`, `parse_region`, `create_store`, `import_d4`, `import_bigwig`, `import_bed`, `import_bed_multi`, `import_bam`, and `stack` (deprecated).
 
 `pbzarr.open(source, *, tracks=None, chunks=..., storage_options=None)` opens a track as an `xr.Dataset` or a collection as an `xr.DataTree`. `tracks=` selects direct collection children without opening others.
 
@@ -82,7 +82,7 @@ Importing `pbzarr` registers `.pbz` accessors on `xr.Dataset` and `xr.DataTree`.
 
 `Dataset.pbz.region(query, *, column=None)` returns one contig-local `values` slice. `Dataset.pbz.regions(intervals)` and `DataTree.pbz.regions(intervals, *, tracks=None)` create a packed, derived Dataset for many non-overlapping regions.
 
-Packed data carries interval coordinates and `offsets`, then `Dataset.pbz.reduce(reducer, **kwargs)` reduces each complete packed interval along `position`. Supported reducers are `mean`, `sum`, `min`, `max`, `count`, `std`, `var`, `median`, and `quantile`.
+Packed data carries interval coordinates and `offsets`. `Dataset.pbz.reduce_regions(intervals, reducer, **kwargs)` packs the selected intervals and reduces each complete interval along `position` in one call. Supported reducers are `mean`, `sum`, `min`, `max`, `count`, `std`, `var`, `median`, `quantile`, and `summit` (which requires a `by=` variable).
 
 Default opening turns regular Zarr chunks, or outer shards, into Dask chunks. `chunks=None` uses xarray’s non-Dask backend: ordinary one-region slices stay lazy, while many-region reads gather only selected pieces eagerly.
 
@@ -90,9 +90,9 @@ An eager packed Dataset must still fit RAM: its complete values require memory p
 
 Packed region Datasets are in-memory/lazy derived values. Rectilinear opening and an on-disk region read/write representation are explicitly deferred.
 
-All writers are destination-oriented and return `None`. `create_store(destination)` creates an empty collection before `import_d4`, `import_bigwig`, `import_bed`, or `import_bed_multi` writes tracks into it.
+All writers are destination-oriented. `import_bam` returns a small report dictionary; the other writers return `None`. `create_store(destination)` creates an empty collection before `import_d4`, `import_bigwig`, `import_bed`, `import_bed_multi`, or `import_bam` writes tracks into it.
 
-`stack(sources, destination, *, tracks=None, column_dim=None, column_chunk_size=None, workers=None)` creates a new destination collection from scalar tracks in source collections. Callers reopen any written destination with `pbzarr.open`.
+`stack(sources, destination, *, tracks=None, column_dim=None, column_chunk_size=None, workers=None)` creates a new destination collection from scalar tracks in source collections. Callers reopen any written destination with `pbzarr.open`. `stack` is deprecated (it emits `DeprecationWarning`); import all samples in one cohort import instead.
 
 ## Rust API
 
@@ -102,7 +102,7 @@ All writers are destination-oriented and return `None`. `create_store(destinatio
 
 `Genome` owns named contigs and derives offsets and the checksum. `Track::read_region<T>` and `Track::write_region<T>` use 0-based, half-open regions and preserve the track rank at runtime-checked dtype `T`.
 
-The format-agnostic Rust import pipeline takes a `ValueReader` and writes a `Track`. Reader crates provide d4 (`int32`) and bigWig (`float32`) sources; Python exposes them through the destination-oriented writers.
+The format-agnostic Rust import pipeline takes a `ValueReader` and writes a `Track`. Reader crates provide d4 (`int32`), bigWig (`float32`), BED (schema-typed columns), and BAM/CRAM (`int32` depth and composition) sources; Python exposes them through the destination-oriented writers.
 
 ## Interoperability
 
@@ -114,7 +114,7 @@ Cross-language validation writes a regular fixture with Rust, opens it through r
 
 ## Deferred work
 
-Multi-resolution tracks, benchmarks, append operations, cloud write adapters, a CLI, and additional import formats remain future work.
+Multi-resolution tracks, benchmarks, append operations, cloud write adapters, and additional import formats remain future work. The `pbz` CLI ships `import bed` and `import bam`; its `view` subcommand is not yet implemented.
 
 Rectilinear chunk-grid opening needs upstream support and is not a current PBZ read mode. On-disk region reads and writes are likewise not part of the Python or PyO3 surface.
 

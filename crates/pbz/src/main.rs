@@ -5,7 +5,10 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use indicatif_log_bridge::LogWrapper;
+use log::{LevelFilter, debug, info, warn};
 use pbzarr::import::Config;
+use pbzarr::import::progress::{self, make_sink};
 use pbzarr::io::Dtype;
 use pbzarr::{Genome, PbzStore};
 use pbzarr_readers::{
@@ -69,9 +72,45 @@ struct BedArgs {
 
 #[derive(Debug, Args)]
 struct GlobalOptions {
-    /// Increase logging verbosity. Repeated uses are accepted.
+    /// Increase logging verbosity: -v info, -vv debug, -vvv trace. Warnings
+    /// and errors always print. `RUST_LOG` overrides this when set.
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
+}
+
+impl GlobalOptions {
+    fn log_level(&self) -> LevelFilter {
+        match self.verbose {
+            0 => LevelFilter::Warn,
+            1 => LevelFilter::Info,
+            2 => LevelFilter::Debug,
+            _ => LevelFilter::Trace,
+        }
+    }
+}
+
+/// Install the logger at the verbosity `-v` asked for. `RUST_LOG` wins when
+/// set, so a user can dial in one noisy module without flooding the rest.
+///
+/// The logger is bridged through the progress module's `MultiProgress`, which
+/// suspends the bars while a record prints; otherwise log lines and the
+/// animated bar would overwrite each other on stderr.
+fn init_logging(global: &GlobalOptions) {
+    let mut builder = env_logger::Builder::new();
+    builder.filter_level(global.log_level());
+    if let Ok(spec) = std::env::var("RUST_LOG") {
+        builder.parse_filters(&spec);
+    }
+    let logger = builder.build();
+    // `try_init` does not set the max level itself, so read it off the logger
+    // first (per indicatif-log-bridge's documented pattern).
+    let level = logger.filter();
+    if LogWrapper::new(progress::multi().clone(), logger)
+        .try_init()
+        .is_ok()
+    {
+        log::set_max_level(level);
+    }
 }
 
 #[derive(Debug, Args)]
@@ -95,6 +134,30 @@ struct ImportOptions {
     /// output is 2D: several sources, or several BED columns in one track).
     #[arg(short = 'c', long)]
     column_dim: Option<String>,
+    /// Show import progress on stderr. This is the default; the flag is
+    /// accepted so scripts can be explicit.
+    #[arg(long)]
+    progress: bool,
+    /// Hide the import progress display.
+    #[arg(long, conflicts_with = "progress")]
+    no_progress: bool,
+}
+
+impl ImportOptions {
+    /// Base pipeline config, with a progress sink labeled `label` unless
+    /// `--no-progress` turned it off. The pipeline sizes the sink itself, so
+    /// the label is all it needs here.
+    fn config(&self, label: &str) -> Config {
+        Config {
+            workers: self.threads,
+            chunk_size: self.chunk_size,
+            column_chunk_size: self.column_chunk_size,
+            shard_size: self.shard_size,
+            shard_column_size: self.shard_column_size,
+            column_dim: self.column_dim.clone(),
+            progress: (!self.no_progress).then(|| make_sink(label)),
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -318,13 +381,12 @@ fn main() -> Result<()> {
 }
 
 fn view(args: ViewArgs) -> Result<()> {
-    let _ = args.global.verbose;
+    init_logging(&args.global);
     bail!("view is not implemented yet for {}", args.store.display())
 }
 
 fn import_bed(args: BedArgs) -> Result<()> {
-    // TODO: setup logging/tracing
-    let _ = args.global.verbose;
+    init_logging(&args.global);
     let sources: Vec<pbzarr::import::Source> = args
         .bed
         .input
@@ -336,8 +398,13 @@ fn import_bed(args: BedArgs) -> Result<()> {
         })
         .collect();
     let infer_rows = parse_infer_rows(&args.bed.infer_rows)?;
+    debug!(
+        "resolved {} BED source(s), infer rows {infer_rows:?}",
+        sources.len()
+    );
 
     if args.bed.emit_schema {
+        info!("emitting a schema scaffold to stdout; no store is written");
         if sources.len() != 1 {
             bail!("--emit-schema requires exactly one BED source");
         }
@@ -347,35 +414,28 @@ fn import_bed(args: BedArgs) -> Result<()> {
     let genome_path = args.bed.genome.context("--genome is required to import")?;
     let genome = Genome::from_fai(&genome_path)
         .with_context(|| format!("read genome {}", genome_path.display()))?;
+    info!(
+        "genome {}: {} contig(s)",
+        genome_path.display(),
+        genome.contigs().len()
+    );
     let output = args.bed.output.context("--output is required to import")?;
-    let config = Config {
-        workers: args.import.threads,
-        chunk_size: args.import.chunk_size,
-        column_chunk_size: args.import.column_chunk_size,
-        shard_size: args.import.shard_size,
-        shard_column_size: args.import.shard_column_size,
-        column_dim: args.import.column_dim,
-        ..Config::default()
-    };
+    let label = args
+        .bed
+        .track
+        .clone()
+        .or_else(|| args.bed.schema.as_ref().map(|_| "bed-schema".to_owned()))
+        .unwrap_or_else(|| "bed".to_owned());
+    let config = args.import.config(&label);
     if let Some(schema_path) = &args.bed.schema {
+        info!("loading BED schema {}", schema_path.display());
         let schema = load_schema(schema_path, &sources, infer_rows)?;
         let plan = plan_bed_schema(&sources, &schema, &config).context("plan BED schema")?;
-        let mut store = if output.exists() {
-            PbzStore::open(&output)
-                .with_context(|| format!("open output store {}", output.display()))?
-        } else {
-            PbzStore::create(&output)
-                .with_context(|| format!("create output store {}", output.display()))?
-        };
+        debug!("BED schema planned against {} source(s)", sources.len());
+        let mut store = open_or_create(&output)?;
         execute_bed_schema_plan(&mut store, plan, genome, config).context("import BED schema")?;
     } else {
-        let mut store = if output.exists() {
-            PbzStore::open(&output)
-                .with_context(|| format!("open output store {}", output.display()))?
-        } else {
-            PbzStore::create(&output)
-                .with_context(|| format!("create output store {}", output.display()))?
-        };
+        let mut store = open_or_create(&output)?;
         let options = BedImportOptions {
             fields: (!args.bed.fields.is_empty()).then_some(args.bed.fields),
             track: args.bed.track,
@@ -392,12 +452,28 @@ fn import_bed(args: BedArgs) -> Result<()> {
         from_bed_matrix(&mut store, &sources, genome, &options, config)
             .context("import BED columns")?;
     }
+    info!("wrote {}", output.display());
     Ok(())
 }
 
+/// Open `path` as a store, creating it when it does not exist yet. Importing
+/// into an existing store adds tracks to it, which is easy to do by accident
+/// with a stale path, so say which of the two happened.
+fn open_or_create(path: &Path) -> Result<PbzStore> {
+    if path.exists() {
+        warn!(
+            "{} exists; adding track(s) to the existing store",
+            path.display()
+        );
+        PbzStore::open(path).with_context(|| format!("open output store {}", path.display()))
+    } else {
+        debug!("creating store {}", path.display());
+        PbzStore::create(path).with_context(|| format!("create output store {}", path.display()))
+    }
+}
+
 fn import_bam(args: BamArgs) -> Result<()> {
-    // TODO: setup logging/tracing
-    let _ = args.global.verbose;
+    init_logging(&args.global);
     let sources: Vec<pbzarr::import::Source> = args
         .bam
         .input
@@ -409,16 +485,9 @@ fn import_bam(args: BamArgs) -> Result<()> {
         })
         .collect();
     let n_sources = sources.len();
+    debug!("resolved {n_sources} alignment source(s)");
 
-    let config = Config {
-        workers: args.import.threads,
-        chunk_size: args.import.chunk_size,
-        column_chunk_size: args.import.column_chunk_size,
-        shard_size: args.import.shard_size,
-        shard_column_size: args.import.shard_column_size,
-        column_dim: args.import.column_dim,
-        ..Config::default()
-    };
+    let config = args.import.config(&args.bam.track);
     let mode = match args.bam.mode {
         ImportModeArg::Depth => ImportMode::Depth,
         ImportModeArg::Composition => ImportMode::Composition,
@@ -437,13 +506,7 @@ fn import_bam(args: BamArgs) -> Result<()> {
     };
 
     let output = args.bam.output;
-    let mut store = if output.exists() {
-        PbzStore::open(&output)
-            .with_context(|| format!("open output store {}", output.display()))?
-    } else {
-        PbzStore::create(&output)
-            .with_context(|| format!("create output store {}", output.display()))?
-    };
+    let mut store = open_or_create(&output)?;
 
     let report = from_bam(
         &mut store,
@@ -456,6 +519,10 @@ fn import_bam(args: BamArgs) -> Result<()> {
     )
     .context("import BAM/CRAM")?;
 
+    debug!(
+        "bam import wrote {} bytes across {} contig(s)",
+        report.bytes_written, report.contigs_written
+    );
     println!(
         "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
         output.display(),

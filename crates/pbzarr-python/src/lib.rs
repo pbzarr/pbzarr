@@ -10,6 +10,7 @@ use pyo3::types::PyDict;
 
 use pbzarr::Genome;
 use pbzarr::PbzStore;
+use pbzarr::import::progress::make_sink;
 use pbzarr::import::{Config, Report, Source};
 use pbzarr::io::Dtype;
 #[allow(deprecated)]
@@ -20,27 +21,7 @@ use pbzarr_readers::{
     from_bigwig as rs_from_bigwig, from_d4 as rs_from_d4,
 };
 
-/// Bytes per element for progress accounting.
-fn dtype_bytes(dt: Dtype) -> u64 {
-    match dt {
-        Dtype::U8 | Dtype::I8 | Dtype::Bool => 1,
-        Dtype::U16 | Dtype::I16 => 2,
-        Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
-        Dtype::F64 => 8,
-    }
-}
-
-mod progress;
-
 create_exception!(_native, PbzError, PyRuntimeError);
-
-/// Total bytes an import will write: positions x sources x element size. This
-/// matches the pipeline's per-chunk byte accounting, so a progress bar sized to
-/// it fills to exactly 100%. `sum_len` (ΣL) comes from the source headers, since
-/// the genome now belongs to the track the readers create, not the store.
-fn total_bytes(sum_len: u64, n_sources: usize, elem_size: usize) -> u64 {
-    sum_len * n_sources as u64 * elem_size as u64
-}
 
 /// Bulk-import one or more d4 files into a new `int32` track.
 ///
@@ -83,14 +64,8 @@ fn import_d4(
         if let Some(c) = column_chunk_size {
             config.column_chunk_size = Some(c);
         }
-        if progress && let Some((first, _)) = sources.first() {
-            let sum_len: u64 = pbzarr_readers::d4::contigs(first)
-                .map_err(|e| PbzError::new_err(format!("{e}")))?
-                .iter()
-                .map(|(_, len)| *len)
-                .sum();
-            let total = total_bytes(sum_len, d4_sources.len(), std::mem::size_of::<i32>());
-            config.progress = Some(progress::make_sink(&track, total));
+        if progress {
+            config.progress = Some(make_sink(&track));
         }
         rs_from_d4(&mut store, &track, &d4_sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))?;
@@ -140,14 +115,8 @@ fn import_bigwig(
         if let Some(c) = column_chunk_size {
             config.column_chunk_size = Some(c);
         }
-        if progress && let Some((first, _)) = sources.first() {
-            let sum_len: u64 = pbzarr_readers::bigwig::contigs(first)
-                .map_err(|e| PbzError::new_err(format!("{e}")))?
-                .iter()
-                .map(|(_, len)| *len)
-                .sum();
-            let total = total_bytes(sum_len, bw_sources.len(), std::mem::size_of::<f32>());
-            config.progress = Some(progress::make_sink(&track, total));
+        if progress {
+            config.progress = Some(make_sink(&track));
         }
         rs_from_bigwig(&mut store, &track, &bw_sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))?;
@@ -208,15 +177,7 @@ fn import_bed(
             config.column_chunk_size = Some(c);
         }
         if progress {
-            let sum_len: u64 = genome.contigs().iter().map(|c| c.length).sum();
-            let elem = match dtype.as_str() {
-                "int32" => std::mem::size_of::<i32>(),
-                "float32" => std::mem::size_of::<f32>(),
-                "bool" => std::mem::size_of::<bool>(),
-                other => return Err(PbzError::new_err(format!("unsupported dtype {other:?}"))),
-            };
-            let total = (sum_len) * bed_sources.len() as u64 * elem as u64;
-            config.progress = Some(progress::make_sink(&track, total));
+            config.progress = Some(make_sink(&track));
         }
 
         match dtype.as_str() {
@@ -287,9 +248,7 @@ fn import_bed_multi(
             config.shard_size = Some(s);
         }
         if progress {
-            let sum_len: u64 = genome.contigs().iter().map(|c| c.length).sum();
-            let per_pos: u64 = parsed.iter().map(|(_, dt)| dtype_bytes(*dt)).sum();
-            config.progress = Some(progress::make_sink("bed-multi", sum_len * per_pos));
+            config.progress = Some(make_sink("bed-multi"));
         }
 
         rs_from_bed_multi(&mut store, Path::new(&bed_gz), &schema, genome, config)

@@ -10,6 +10,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use log::{debug, info};
 use noodles_bgzf as bgzf;
 use noodles_csi::BinningIndex;
 
@@ -589,6 +590,18 @@ pub fn execute_bed_schema_plan(
             plan.column_dim, config.column_dim
         )));
     }
+    info!(
+        "bed schema import: {} source(s) into {}",
+        plan.sources.len(),
+        match &plan.layout {
+            SchemaLayout::PerColumn(resolved) => format!("{} per-column track(s)", resolved.len()),
+            SchemaLayout::BedColumnAxis {
+                track_name,
+                columns,
+                ..
+            } => format!("track {track_name:?} with {} BED column(s)", columns.len()),
+        }
+    );
     match plan.layout {
         SchemaLayout::PerColumn(resolved) => {
             let scalar = plan.sources.len() == 1 && config.column_dim.is_none();
@@ -697,6 +710,15 @@ pub fn from_bed_matrix(
     options: &BedImportOptions,
     config: Config,
 ) -> Result<Report> {
+    info!(
+        "bed import: {} source(s), genome {} contig(s), {} positions",
+        sources.len(),
+        genome.contigs().len(),
+        genome.contigs().iter().map(|c| c.length).sum::<u64>()
+    );
+    for source in sources {
+        debug!("bed source {}", source.path.display());
+    }
     let resolved = resolve_sources(sources, options)?;
     let two_d = matches!(resolved, ResolvedImport::Wide { .. }) || sources.len() > 1;
     if two_d && config.column_dim.is_none() {
