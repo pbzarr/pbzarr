@@ -166,6 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shard_size: args.shard_size,
         shard_column_size: None,
         column_dim: None,
+        codecs: None,
         progress: None,
     };
 

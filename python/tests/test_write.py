@@ -190,3 +190,32 @@ def test_stack_writes_labeled_collection_and_refuses_existing_destination(tmp_pa
     not_pbz.mkdir()
     with pytest.raises(pbzarr.PbzError):
         pbzarr.stack(not_pbz, tmp_path / "invalid.pbz")
+
+
+def test_import_d4_codecs_override_controls_zarr_metadata(tmp_path, write_d4):
+    import json
+
+    source = write_d4("chr1", 20, "depth")
+    destination = tmp_path / "codecs.pbz"
+    pbzarr.create_store(destination)
+    pbzarr.import_d4(
+        destination,
+        "depth",
+        source,
+        codecs=[
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "zstd", "configuration": {"level": 3, "checksum": False}},
+        ],
+    )
+
+    meta = json.loads((destination / "depth" / "values" / "zarr.json").read_text())
+    assert [c["name"] for c in meta["codecs"]] == ["bytes", "zstd"]
+
+    with pytest.raises(pbzarr.PbzError):
+        pbzarr.import_d4(
+            destination,
+            "depth2",
+            source,
+            chunk_size=100,
+            codecs=[{"name": "zstd", "configuration": {"level": 3, "checksum": False}}],
+        )

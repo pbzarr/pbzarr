@@ -66,7 +66,7 @@ A writer creates arrays first and writes the track’s `perbase:` interpretation
 
 ## Chunks and shards
 
-Every `values` array uses Blosc with zstd level 5 and byte shuffle. Scalar tracks are chunked by position; 2D tracks are chunked by position and column so compression can exploit similarity across columns.
+By default, every `values` array uses Blosc with zstd level 5 and byte shuffle. Scalar tracks are chunked by position; 2D tracks are chunked by position and column so compression can exploit similarity across columns. Import entry points accept an explicit Zarr v3 codec spec (`--codecs` on the CLI, `codecs=` in Python) that replaces this default: a standard `codecs` list, with sharding expressed as a `sharding_indexed` codec and an optional `chunk_grid` member for the outer grid.
 
 Sharding is optional and has an outer position-first shard grid with full declared column width by default. The normal Zarr chunk shape is retained as the shard’s subchunk shape; write work must align with the physical chunk or shard to avoid unsafe read-modify-write races.
 

@@ -21,6 +21,7 @@ use log::{debug, info, trace, warn};
 use ndarray::{Array2, Axis};
 
 use crate::Result;
+use crate::codec_spec::ExplicitArraySpec;
 use crate::error::PbzError;
 use crate::io::{
     ColumnBuffer, ColumnSinkMut, Dtype, MatrixBuffer, MultiValueReader, Numeric, ValueReader,
@@ -60,6 +61,10 @@ pub struct Config {
     /// `"strand"`, `"context"`, etc. when the columns are not samples. Ignored
     /// for single-source (scalar) imports.
     pub column_dim: Option<String>,
+    /// Explicit Zarr codec/chunk-grid metadata for created `values` arrays.
+    /// Consumed at track creation; replaces the default pipeline and the
+    /// chunk/shard sizing above.
+    pub codecs: Option<ExplicitArraySpec>,
     /// Optional progress observer.
     pub progress: Option<Arc<dyn ProgressSink>>,
 }
@@ -73,6 +78,7 @@ impl Default for Config {
             shard_size: None,
             shard_column_size: None,
             column_dim: None,
+            codecs: None,
             progress: None,
         }
     }
@@ -112,6 +118,9 @@ impl Config {
             if let Some(ccs) = self.column_chunk_size {
                 cfg = cfg.column_chunk_size(ccs);
             }
+        }
+        if let Some(spec) = &self.codecs {
+            cfg = cfg.codecs(spec.clone());
         }
         cfg
     }

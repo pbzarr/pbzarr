@@ -10,7 +10,7 @@ use log::{LevelFilter, debug, info, warn};
 use pbzarr::import::Config;
 use pbzarr::import::progress::{self, make_sink};
 use pbzarr::io::Dtype;
-use pbzarr::{Genome, PbzStore};
+use pbzarr::{ExplicitArraySpec, Genome, PbzStore};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
     OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam, from_bed_matrix,
@@ -59,7 +59,7 @@ enum ImportCommand {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth -c sample s1.bed.gz s2.bed.gz\n  pbz import bed -o mask.pbz --genome genome.fai --track callable regions.bed.gz\n  pbz import bed -o stats.pbz --genome genome.fai -c metric --schema schema.tsv wide.bed.gz"
+    after_help = "Examples:\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth -c sample s1.bed.gz s2.bed.gz\n  pbz import bed -o mask.pbz --genome genome.fai --track callable regions.bed.gz\n  pbz import bed -o stats.pbz --genome genome.fai -c metric --schema schema.tsv wide.bed.gz\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth -c sample --codecs '[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},{\"name\":\"zstd\",\"configuration\":{\"level\":3,\"checksum\":false}}]' s1.bed.gz s2.bed.gz"
 )]
 struct BedArgs {
     #[command(flatten)]
@@ -134,6 +134,17 @@ struct ImportOptions {
     /// output is 2D: several sources, or several BED columns in one track).
     #[arg(short = 'c', long)]
     column_dim: Option<String>,
+    /// Zarr v3 codec metadata for created `values` arrays: a `codecs` JSON
+    /// array, or a `{"chunk_grid": ..., "codecs": [...]}` fragment. Pass
+    /// `@path` to read the JSON from a file. Replaces the default
+    /// Blosc(zstd-5, byte shuffle) pipeline; express sharding as a
+    /// `sharding_indexed` codec and the outer grid as `chunk_grid`.
+    #[arg(
+        long,
+        value_name = "JSON|@FILE",
+        conflicts_with_all = ["chunk_size", "column_chunk_size", "shard_size", "shard_column_size"]
+    )]
+    codecs: Option<String>,
     /// Show import progress on stderr. This is the default; the flag is
     /// accepted so scripts can be explicit.
     #[arg(long)]
@@ -147,16 +158,32 @@ impl ImportOptions {
     /// Base pipeline config, with a progress sink labeled `label` unless
     /// `--no-progress` turned it off. The pipeline sizes the sink itself, so
     /// the label is all it needs here.
-    fn config(&self, label: &str) -> Config {
-        Config {
+    fn config(&self, label: &str) -> Result<Config> {
+        Ok(Config {
             workers: self.threads,
             chunk_size: self.chunk_size,
             column_chunk_size: self.column_chunk_size,
             shard_size: self.shard_size,
             shard_column_size: self.shard_column_size,
             column_dim: self.column_dim.clone(),
+            codecs: self.parse_codecs()?,
             progress: (!self.no_progress).then(|| make_sink(label)),
-        }
+        })
+    }
+
+    /// Parse `--codecs`: inline JSON, or `@path` to a JSON file.
+    fn parse_codecs(&self) -> Result<Option<ExplicitArraySpec>> {
+        let Some(raw) = &self.codecs else {
+            return Ok(None);
+        };
+        let text = match raw.strip_prefix('@') {
+            Some(path) => std::fs::read_to_string(path)
+                .with_context(|| format!("read --codecs file {path}"))?,
+            None => raw.clone(),
+        };
+        ExplicitArraySpec::parse(&text)
+            .map(Some)
+            .context("parse --codecs")
     }
 }
 
@@ -426,7 +453,7 @@ fn import_bed(args: BedArgs) -> Result<()> {
         .clone()
         .or_else(|| args.bed.schema.as_ref().map(|_| "bed-schema".to_owned()))
         .unwrap_or_else(|| "bed".to_owned());
-    let config = args.import.config(&label);
+    let config = args.import.config(&label)?;
     if let Some(schema_path) = &args.bed.schema {
         info!("loading BED schema {}", schema_path.display());
         let schema = load_schema(schema_path, &sources, infer_rows)?;
@@ -487,7 +514,7 @@ fn import_bam(args: BamArgs) -> Result<()> {
     let n_sources = sources.len();
     debug!("resolved {n_sources} alignment source(s)");
 
-    let config = args.import.config(&args.bam.track);
+    let config = args.import.config(&args.bam.track)?;
     let mode = match args.bam.mode {
         ImportModeArg::Depth => ImportMode::Depth,
         ImportModeArg::Composition => ImportMode::Composition,
@@ -712,5 +739,27 @@ mod tests {
     fn schema_rows_reject_wide_and_empty_records() {
         assert!(read_schema_rows("a\tb\tint32\td\n", Path::new("s.tsv")).is_err());
         assert!(read_schema_rows("# only comments\n", Path::new("s.tsv")).is_err());
+    }
+
+    #[test]
+    fn codecs_conflicts_with_grid_flags() {
+        let err = Cli::try_parse_from([
+            "pbz",
+            "import",
+            "bed",
+            "-o",
+            "out.pbz",
+            "--genome",
+            "g.fai",
+            "--track",
+            "depth",
+            "--codecs",
+            "[]",
+            "--chunk-size",
+            "100",
+            "in.bed.gz",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

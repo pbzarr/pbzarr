@@ -1,3 +1,4 @@
+pub mod codec_spec;
 pub mod error;
 pub mod genome;
 pub mod import;
@@ -7,6 +8,7 @@ pub mod stack;
 pub mod store;
 pub mod track;
 
+pub use codec_spec::ExplicitArraySpec;
 pub use error::{PbzError, Result};
 pub use genome::{Contig, ContigId, Genome, Region};
 pub use region_query::{RegionQuery, parse_region_query};

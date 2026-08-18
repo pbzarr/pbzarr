@@ -12,6 +12,7 @@ def import_d4(
     chunk_size: int | None = ...,
     column_chunk_size: int | None = ...,
     progress: bool = ...,
+    codecs: str | None = ...,
 ) -> None: ...
 def import_bigwig(
     store_path: str,
@@ -22,6 +23,7 @@ def import_bigwig(
     chunk_size: int | None = ...,
     column_chunk_size: int | None = ...,
     progress: bool = ...,
+    codecs: str | None = ...,
 ) -> None: ...
 def import_bed(
     store_path: str,
@@ -35,6 +37,7 @@ def import_bed(
     chunk_size: int | None = ...,
     column_chunk_size: int | None = ...,
     progress: bool = ...,
+    codecs: str | None = ...,
 ) -> None: ...
 def import_bed_multi(
     store_path: str,
@@ -45,6 +48,7 @@ def import_bed_multi(
     chunk_size: int | None = ...,
     shard_size: int | None = ...,
     progress: bool = ...,
+    codecs: str | None = ...,
 ) -> None: ...
 def import_bam(
     store_path: str,
@@ -63,6 +67,7 @@ def import_bam(
     column_chunk_size: int | None = ...,
     shard_size: int | None = ...,
     shard_column_size: int | None = ...,
+    codecs: str | None = ...,
 ) -> dict[str, int]: ...
 def create_store(store_path: str) -> None: ...
 def stack(

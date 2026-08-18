@@ -9,6 +9,7 @@ use zarrs::array::{Array, ArraySubset};
 use zarrs::storage::{ReadableWritableListableStorage, ReadableWritableListableStorageTraits};
 
 use crate::Result;
+use crate::codec_spec::ExplicitArraySpec;
 use crate::error::PbzError;
 use crate::genome::{Genome, Region};
 use crate::io::{Dtype, Numeric};
@@ -24,6 +25,11 @@ pub struct TrackConfig {
     pub column_chunk_size: Option<usize>,
     pub shard_size: Option<usize>,
     pub shard_column_size: Option<usize>,
+    /// Explicit Zarr codec/chunk-grid metadata for the `values` array.
+    /// Replaces the default Blosc pipeline; the chunk/shard size fields are
+    /// then ignored except as the fallback outer grid when the spec carries
+    /// no `chunk_grid`.
+    pub codecs: Option<ExplicitArraySpec>,
     pub fill_value: Option<Value>,
     pub description: Option<String>,
     pub source: Option<String>,
@@ -42,6 +48,7 @@ impl TrackConfig {
             column_chunk_size: None,
             shard_size: None,
             shard_column_size: None,
+            codecs: None,
             fill_value: None,
             description: None,
             source: None,
@@ -87,6 +94,11 @@ impl TrackConfig {
 
     pub fn shard_column_size(mut self, n: usize) -> Self {
         self.shard_column_size = Some(n);
+        self
+    }
+
+    pub fn codecs(mut self, spec: ExplicitArraySpec) -> Self {
+        self.codecs = Some(spec);
         self
     }
 

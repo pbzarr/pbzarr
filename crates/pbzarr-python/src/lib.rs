@@ -8,6 +8,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use pbzarr::ExplicitArraySpec;
 use pbzarr::Genome;
 use pbzarr::PbzStore;
 use pbzarr::import::progress::make_sink;
@@ -23,12 +24,32 @@ use pbzarr_readers::{
 
 create_exception!(_native, PbzError, PyRuntimeError);
 
+/// Parse the optional `codecs` JSON kwarg into `config.codecs`, rejecting
+/// the chunk/shard kwargs it replaces.
+fn apply_codecs_kwarg(
+    config: &mut Config,
+    codecs: Option<&str>,
+    conflicts: &[(&str, bool)],
+) -> PyResult<()> {
+    let Some(raw) = codecs else {
+        return Ok(());
+    };
+    if let Some((name, _)) = conflicts.iter().find(|(_, present)| *present) {
+        return Err(PbzError::new_err(format!(
+            "codecs conflicts with {name}; the codecs spec controls chunking and sharding"
+        )));
+    }
+    let spec = ExplicitArraySpec::parse(raw).map_err(|e| PbzError::new_err(format!("{e}")))?;
+    config.codecs = Some(spec);
+    Ok(())
+}
+
 /// Bulk-import one or more d4 files into a new `int32` track.
 ///
 /// The track is created from the source headers; it must NOT already exist.
 /// d4 stores depths as `int32` natively, so import is zero-conversion.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
+#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false, codecs=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_d4(
     py: Python<'_>,
@@ -40,6 +61,7 @@ fn import_d4(
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
     progress: bool,
+    codecs: Option<String>,
 ) -> PyResult<()> {
     py.allow_threads(|| {
         let mut store =
@@ -67,6 +89,14 @@ fn import_d4(
         if progress {
             config.progress = Some(make_sink(&track));
         }
+        apply_codecs_kwarg(
+            &mut config,
+            codecs.as_deref(),
+            &[
+                ("chunk_size", chunk_size.is_some()),
+                ("column_chunk_size", column_chunk_size.is_some()),
+            ],
+        )?;
         rs_from_d4(&mut store, &track, &d4_sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))?;
         Ok(())
@@ -79,7 +109,7 @@ fn import_d4(
 /// bigWig stores values as `float32` natively. Positions not covered by any
 /// bigWig become `0.0`, and the track is created with a `0.0` fill value.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
+#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false, codecs=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bigwig(
     py: Python<'_>,
@@ -91,6 +121,7 @@ fn import_bigwig(
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
     progress: bool,
+    codecs: Option<String>,
 ) -> PyResult<()> {
     py.allow_threads(|| {
         let mut store =
@@ -118,6 +149,14 @@ fn import_bigwig(
         if progress {
             config.progress = Some(make_sink(&track));
         }
+        apply_codecs_kwarg(
+            &mut config,
+            codecs.as_deref(),
+            &[
+                ("chunk_size", chunk_size.is_some()),
+                ("column_chunk_size", column_chunk_size.is_some()),
+            ],
+        )?;
         rs_from_bigwig(&mut store, &track, &bw_sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))?;
         Ok(())
@@ -129,7 +168,7 @@ fn import_bigwig(
 /// `column` is a header name; `dtype` is one of "int32" | "float32" | "bool".
 /// `genome` is a .fai / chrom.sizes path (BED files carry no contig lengths).
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column, dtype, genome, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false))]
+#[pyo3(signature = (store_path, track, sources, column, dtype, genome, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false, codecs=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bed(
     py: Python<'_>,
@@ -144,6 +183,7 @@ fn import_bed(
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
     progress: bool,
+    codecs: Option<String>,
 ) -> PyResult<()> {
     py.allow_threads(|| {
         let mut store =
@@ -179,6 +219,14 @@ fn import_bed(
         if progress {
             config.progress = Some(make_sink(&track));
         }
+        apply_codecs_kwarg(
+            &mut config,
+            codecs.as_deref(),
+            &[
+                ("chunk_size", chunk_size.is_some()),
+                ("column_chunk_size", column_chunk_size.is_some()),
+            ],
+        )?;
 
         match dtype.as_str() {
             "int32" => {
@@ -201,7 +249,7 @@ fn import_bed(
 /// tracks. `columns` is an ordered list of `(header_name, dtype)`; each becomes
 /// a track named after the column. `genome` is a .fai / chrom.sizes path.
 #[pyfunction]
-#[pyo3(signature = (store_path, bed_gz, columns, genome, workers=None, chunk_size=None, shard_size=None, progress=false))]
+#[pyo3(signature = (store_path, bed_gz, columns, genome, workers=None, chunk_size=None, shard_size=None, progress=false, codecs=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bed_multi(
     py: Python<'_>,
@@ -213,6 +261,7 @@ fn import_bed_multi(
     chunk_size: Option<usize>,
     shard_size: Option<usize>,
     progress: bool,
+    codecs: Option<String>,
 ) -> PyResult<()> {
     py.allow_threads(|| {
         if columns.is_empty() {
@@ -250,6 +299,14 @@ fn import_bed_multi(
         if progress {
             config.progress = Some(make_sink("bed-multi"));
         }
+        apply_codecs_kwarg(
+            &mut config,
+            codecs.as_deref(),
+            &[
+                ("chunk_size", chunk_size.is_some()),
+                ("shard_size", shard_size.is_some()),
+            ],
+        )?;
 
         rs_from_bed_multi(&mut store, Path::new(&bed_gz), &schema, genome, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))?;
@@ -277,7 +334,7 @@ fn report_to_dict(py: Python<'_>, report: &Report) -> PyResult<Py<PyAny>> {
 /// overlapping mates are deduped), `"all"` (riker/samtools-mpileup-style
 /// unconditional dedup), or `"none"` (dedup disabled).
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), reference=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None))]
+#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), reference=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, codecs=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bam(
     py: Python<'_>,
@@ -297,6 +354,7 @@ fn import_bam(
     column_chunk_size: Option<usize>,
     shard_size: Option<usize>,
     shard_column_size: Option<usize>,
+    codecs: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let mode = match mode.as_str() {
         "depth" => ImportMode::Depth,
@@ -353,6 +411,16 @@ fn import_bam(
         if let Some(s) = shard_column_size {
             config.shard_column_size = Some(s);
         }
+        apply_codecs_kwarg(
+            &mut config,
+            codecs.as_deref(),
+            &[
+                ("chunk_size", chunk_size.is_some()),
+                ("column_chunk_size", column_chunk_size.is_some()),
+                ("shard_size", shard_size.is_some()),
+                ("shard_column_size", shard_column_size.is_some()),
+            ],
+        )?;
         rs_from_bam(
             &mut store,
             &track,

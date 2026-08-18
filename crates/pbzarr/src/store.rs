@@ -14,10 +14,14 @@ use zarrs::storage::{
     ListableStorageTraits, ReadableWritableListableStorage, StoreKey, StorePrefix,
 };
 
+use zarrs::array::ChunkGrid;
 use zarrs::array::codec::api::BytesToBytesCodecTraits;
-use zarrs::array::codec::{BloscCodec, BloscCompressionLevel, BloscCompressor, BloscShuffleMode};
+use zarrs::array::codec::{
+    BloscCodec, BloscCompressionLevel, BloscCompressor, BloscShuffleMode, BytesCodec,
+};
 use zarrs::node::NodeName;
 
+use crate::codec_spec::{ExplicitArraySpec, resolve_codecs};
 use crate::error::PbzError;
 use crate::genome::{Contig, Genome};
 use crate::io::Dtype;
@@ -269,7 +273,6 @@ impl PbzStore {
         let total_len: u64 = genome.contigs().iter().map(|c| c.length).sum();
         let zarrs_dt = dtype_to_zarrs(config.dtype);
         let fill = resolve_fill_value(config.dtype, config.fill_value.as_ref())?;
-        let data_codecs = default_data_codecs(config.dtype)?;
         let chunk_pos = (config.chunk_size as u64).min(total_len.max(1)).max(1);
         // Shards span full column width, so cross-sample compression still
         // applies within a shard.
@@ -301,9 +304,13 @@ impl PbzStore {
                     .shard_column_size
                     .map(|s| (s as u64).min(n_cols).max(1))
                     .unwrap_or(n_cols);
-                let outer_chunk = match shard_pos {
-                    Some(sp) => vec![sp, shard_col],
-                    None => vec![chunk_pos, col_chunk],
+                let outer_chunk = if config.codecs.is_some() {
+                    vec![chunk_pos, col_chunk]
+                } else {
+                    match shard_pos {
+                        Some(sp) => vec![sp, shard_col],
+                        None => vec![chunk_pos, col_chunk],
+                    }
                 };
                 let mut builder = zarrs::array::ArrayBuilder::new(
                     vec![total_len, n_cols],
@@ -311,11 +318,14 @@ impl PbzStore {
                     zarrs_dt.clone(),
                     fill.clone(),
                 );
-                builder
-                    .dimension_names(["position", col_dim_name.as_str()].into())
-                    .bytes_to_bytes_codecs(data_codecs.clone());
-                if shard_pos.is_some() {
-                    builder.subchunk_shape(Some(vec![chunk_pos, col_chunk]));
+                builder.dimension_names(["position", col_dim_name.as_str()].into());
+                if let Some(spec) = &config.codecs {
+                    apply_explicit_spec(&mut builder, name, spec, &[total_len, n_cols])?;
+                } else {
+                    builder.bytes_to_bytes_codecs(default_data_codecs(config.dtype)?);
+                    if shard_pos.is_some() {
+                        builder.subchunk_shape(Some(vec![chunk_pos, col_chunk]));
+                    }
                 }
                 builder
                     .build(self.storage.clone(), &format!("/{name}/values"))
@@ -344,9 +354,13 @@ impl PbzStore {
                 (2, Some(col_dim_name))
             }
             None => {
-                let outer_chunk = match shard_pos {
-                    Some(sp) => vec![sp],
-                    None => vec![chunk_pos],
+                let outer_chunk = if config.codecs.is_some() {
+                    vec![chunk_pos]
+                } else {
+                    match shard_pos {
+                        Some(sp) => vec![sp],
+                        None => vec![chunk_pos],
+                    }
                 };
                 let mut builder = zarrs::array::ArrayBuilder::new(
                     vec![total_len],
@@ -354,11 +368,14 @@ impl PbzStore {
                     zarrs_dt.clone(),
                     fill.clone(),
                 );
-                builder
-                    .dimension_names(["position"].into())
-                    .bytes_to_bytes_codecs(data_codecs.clone());
-                if shard_pos.is_some() {
-                    builder.subchunk_shape(Some(vec![chunk_pos]));
+                builder.dimension_names(["position"].into());
+                if let Some(spec) = &config.codecs {
+                    apply_explicit_spec(&mut builder, name, spec, &[total_len])?;
+                } else {
+                    builder.bytes_to_bytes_codecs(default_data_codecs(config.dtype)?);
+                    if shard_pos.is_some() {
+                        builder.subchunk_shape(Some(vec![chunk_pos]));
+                    }
                 }
                 builder
                     .build(self.storage.clone(), &format!("/{name}/values"))
@@ -481,6 +498,35 @@ fn default_data_codecs(dtype: Dtype) -> Result<Vec<Arc<dyn BytesToBytesCodecTrai
     )
     .map_err(|e| PbzError::Store(format!("blosc codec init: {e}")))?;
     Ok(vec![Arc::new(codec)])
+}
+
+/// Apply a user-supplied explicit spec to `builder`: the resolved codec
+/// chain (default little-endian `bytes` inserted when the spec names no
+/// array-to-bytes codec), plus the chunk grid override when present.
+fn apply_explicit_spec(
+    builder: &mut zarrs::array::ArrayBuilder,
+    track: &str,
+    spec: &ExplicitArraySpec,
+    array_shape: &[u64],
+) -> Result<()> {
+    let resolved = resolve_codecs(track, &spec.codecs)?;
+    builder.array_to_array_codecs(resolved.array_to_array);
+    builder.array_to_bytes_codec(
+        resolved
+            .array_to_bytes
+            .unwrap_or_else(|| Arc::new(BytesCodec::little())),
+    );
+    builder.bytes_to_bytes_codecs(resolved.bytes_to_bytes);
+    if let Some(grid_metadata) = &spec.chunk_grid {
+        let grid = ChunkGrid::from_metadata(grid_metadata, array_shape).map_err(|e| {
+            PbzError::Metadata(format!(
+                "track {track:?}: chunk_grid for rank-{} values array: {e}",
+                array_shape.len()
+            ))
+        })?;
+        builder.chunk_grid(grid);
+    }
+    Ok(())
 }
 
 /// Element size in bytes for each dtype. Drives the blosc `typesize`.

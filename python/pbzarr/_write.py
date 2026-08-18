@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+import json
 import os
 import warnings
 from typing import TypeAlias
@@ -70,6 +71,17 @@ def _sources(values: Source | Iterable[Source]) -> list[tuple[str, str | None]]:
     return normalized
 
 
+def _codecs_json(codecs: list | dict | None) -> str | None:
+    if codecs is None:
+        return None
+    if not isinstance(codecs, (list, dict)):
+        raise TypeError(
+            "codecs must be a list of codec metadata dicts or a"
+            " {chunk_grid, codecs} mapping"
+        )
+    return json.dumps(codecs)
+
+
 def _require_absent(path: str) -> None:
     if os.path.lexists(path):
         raise FileExistsError(f"destination already exists: {path}")
@@ -106,6 +118,7 @@ def import_d4(
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
     progress: bool = False,
+    codecs: list | dict | None = None,
 ) -> None:
     """Import one or more D4 sources into an existing PBZ collection."""
     destination_path = _path(destination, "destination")
@@ -120,6 +133,7 @@ def import_d4(
         chunk_size,
         column_chunk_size,
         progress,
+        codecs=_codecs_json(codecs),
     )
 
 
@@ -133,6 +147,7 @@ def import_bigwig(
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
     progress: bool = False,
+    codecs: list | dict | None = None,
 ) -> None:
     """Import one or more bigWig sources into an existing PBZ collection."""
     destination_path = _path(destination, "destination")
@@ -147,6 +162,7 @@ def import_bigwig(
         chunk_size,
         column_chunk_size,
         progress,
+        codecs=_codecs_json(codecs),
     )
 
 
@@ -163,6 +179,7 @@ def import_bed(
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
     progress: bool = False,
+    codecs: list | dict | None = None,
 ) -> None:
     """Import one column from one or more BED sources into a PBZ collection."""
     destination_path = _path(destination, "destination")
@@ -181,6 +198,7 @@ def import_bed(
         chunk_size,
         column_chunk_size,
         progress,
+        codecs=_codecs_json(codecs),
     )
 
 
@@ -194,6 +212,7 @@ def import_bed_multi(
     chunk_size: int | None = None,
     shard_size: int | None = None,
     progress: bool = False,
+    codecs: list | dict | None = None,
 ) -> None:
     """Import an ordered mapping of BED columns as scalar tracks."""
     destination_path = _path(destination, "destination")
@@ -216,6 +235,7 @@ def import_bed_multi(
         chunk_size,
         shard_size,
         progress,
+        codecs=_codecs_json(codecs),
     )
 
 
@@ -238,6 +258,7 @@ def import_bam(
     shard_size: int | None = None,
     shard_column_size: int | None = None,
     workers: int | None = None,
+    codecs: list | dict | None = None,
 ) -> dict[str, int]:
     """Import per-base depth or composition counts from BAM/CRAM sources.
 
@@ -288,6 +309,7 @@ def import_bam(
         column_chunk_size,
         shard_size,
         shard_column_size,
+        codecs=_codecs_json(codecs),
     )
 
 

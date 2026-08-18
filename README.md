@@ -146,7 +146,7 @@ Each track group holds a fixed set of arrays:
 - `offsets`: an int64 index with one entry more than `contigs`. `offsets[i]` is the first row of contig `i`, so `offsets[i+1] - offsets[i]` is its length and the last entry equals `L`.
 - a column-label array, named after the column dimension (`sample` above). Present only when the track has columns.
 
-Every track declares one data type and one fill value, and positions with no data hold the fill value. The `values` array is chunked and compressed with Blosc (zstd with byte shuffle). For a track with columns, chunks extend across columns as well as positions, so values from different samples compress together.
+Every track declares one data type and one fill value, and positions with no data hold the fill value. The `values` array is chunked and compressed with Blosc (zstd with byte shuffle) by default; imports can override the codec pipeline and chunk grid with standard Zarr v3 metadata (`--codecs` on the CLI, `codecs=` in Python). For a track with columns, chunks extend across columns as well as positions, so values from different samples compress together.
 
 Region reads are index arithmetic. The rows for `chr2:10-20` are `offsets[i] + 10` up to `offsets[i] + 20`, where `i` is the index of chr2 in `contigs`. All coordinates are zero-based and half-open.
 
