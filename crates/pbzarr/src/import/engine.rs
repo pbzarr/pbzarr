@@ -6,15 +6,18 @@
 //! with that track's fill value. The worker that finishes a buffer's last piece
 //! writes it.
 //!
-//! Sharded tracks store one subchunk per buffer through
-//! `store_array_subset_opt` with `experimental_partial_encoding` on: for a
-//! subchunk-aligned subset the partial encoder reads only the shard index and
-//! APPENDS the encoded subchunk instead of rewriting the shard. So each
-//! subchunk must be written exactly once, and appends to one shard need a
-//! per-shard mutex because every call rewrites that index.
+//! Sharded tracks write through `store_array_subset_opt` with
+//! `experimental_partial_encoding` on: for a subchunk-aligned subset the
+//! partial encoder reads only the shard index, encodes the subchunks in
+//! parallel, and APPENDS them instead of rewriting the shard. Each subchunk
+//! must be written exactly once, and appends to one shard need a per-shard
+//! mutex because every call rewrites that index. So a sharded span's buffers
+//! flush together when its last buffer closes: one rectangular store call per
+//! touched column shard.
 //!
 //! When no reader `may_have_data` over any of a buffer's pieces, the buffer is
-//! never allocated and the write is elided: an absent chunk already reads back
+//! never allocated. An unsharded buffer with no data elides its write; a
+//! sharded span elides per column shard. An absent chunk already reads back
 //! as the fill value.
 
 use std::collections::HashMap;
@@ -388,6 +391,14 @@ struct SlotHandle {
     inner: Mutex<SlotInner>,
 }
 
+/// Closed buffers of one sharded `(target, span)`, held until the last one
+/// arrives so the span flushes as one rectangle per column shard.
+struct SpanGroup {
+    /// `(column chunk, buffer)`; an uncovered buffer stays `None`.
+    parts: Vec<(u64, Option<TileBuffer>)>,
+    remaining: usize,
+}
+
 /// One stage's accumulated timing: sum, event count, and slowest event.
 #[derive(Default)]
 struct StageTimer {
@@ -437,7 +448,9 @@ struct RunTimings {
     /// Per touched buffer: the region copy into the shared buffer, under
     /// the slot lock.
     merge: StageTimer,
-    /// Per written buffer: the store call (encode + write).
+    /// Per sharded flush segment: time blocked acquiring the shard's mutex.
+    shard_wait: StageTimer,
+    /// Per store call (encode + write), the shard mutex already held.
     write: StageTimer,
     worker_busy_ns: AtomicU64,
     worker_idle_ns: AtomicU64,
@@ -493,6 +506,11 @@ struct RunCtx<'a> {
     tap: Option<&'a Sender<TapMessage>>,
     partial_opts: CodecOptions,
     shard_locks: Mutex<ShardLockMap>,
+    /// Sharded `(target, span)` groups awaiting their last buffer.
+    span_groups: Mutex<HashMap<(usize, usize), SpanGroup>>,
+    /// Distinct column chunks per target: a sharded span group closes after
+    /// this many buffers.
+    group_sizes: Vec<usize>,
 }
 
 impl RunCtx<'_> {
@@ -531,52 +549,19 @@ impl RunCtx<'_> {
         Arc::clone(map.entry(key).or_default())
     }
 
-    /// Write or elide one closed buffer.
-    fn close_buffer(
-        &self,
-        t_idx: usize,
-        cc: u64,
-        span: Range<u64>,
-        data: Option<TileBuffer>,
-        any_data: bool,
-    ) -> Result<()> {
-        let geom = &self.geoms[t_idx];
-        let columns = geom.buffer_columns(cc);
-        if !any_data {
-            self.state.tasks_skipped.fetch_add(1, Ordering::Relaxed);
-            if let Some(tap) = self.tap {
-                // A dropped receiver detaches the tap; not an error.
-                let _ = tap.send(TapMessage::Skipped {
-                    track: geom.track.name().to_owned(),
-                    position: span,
-                    columns,
-                });
-            }
-            return Ok(());
+    fn record_skipped(&self, geom: &TargetGeom<'_>, span: Range<u64>, columns: Range<u64>) {
+        self.state.tasks_skipped.fetch_add(1, Ordering::Relaxed);
+        if let Some(tap) = self.tap {
+            // A dropped receiver detaches the tap; not an error.
+            let _ = tap.send(TapMessage::Skipped {
+                track: geom.track.name().to_owned(),
+                position: span,
+                columns,
+            });
         }
-        let data = data.ok_or_else(|| {
-            PbzError::Metadata("engine invariant: covered buffer has no data".into())
-        })?;
+    }
 
-        if geom.sharded {
-            let lock = self.shard_lock(t_idx, span.start, columns.start);
-            let _guard = lock.lock().expect("shard mutex poisoned");
-            let write_start = Instant::now();
-            data.store_subset(
-                &geom.array,
-                geom.track.name(),
-                geom.rank,
-                span.clone(),
-                columns.clone(),
-                &self.partial_opts,
-            )?;
-            self.state.timings.write.record(write_start.elapsed());
-        } else {
-            let write_start = Instant::now();
-            data.write_unsharded(geom.track, span.clone(), columns.clone())?;
-            self.state.timings.write.record(write_start.elapsed());
-        }
-
+    fn record_written(&self, geom: &TargetGeom<'_>, span: Range<u64>, columns: Range<u64>) {
         let bytes =
             (span.end - span.start) * (columns.end - columns.start) * dtype_bytes(geom.dtype);
         self.state.bytes_written.fetch_add(bytes, Ordering::Relaxed);
@@ -590,6 +575,153 @@ impl RunCtx<'_> {
                 position: span,
                 columns,
             });
+        }
+    }
+
+    /// Write, batch, or elide one closed buffer.
+    fn close_buffer(
+        &self,
+        t_idx: usize,
+        cc: u64,
+        span_idx: usize,
+        span: Range<u64>,
+        data: Option<TileBuffer>,
+        any_data: bool,
+    ) -> Result<()> {
+        if any_data && data.is_none() {
+            return Err(PbzError::Metadata(
+                "engine invariant: covered buffer has no data".into(),
+            ));
+        }
+        let geom = &self.geoms[t_idx];
+        if geom.sharded {
+            return self.close_sharded(t_idx, span_idx, span, cc, data);
+        }
+        let columns = geom.buffer_columns(cc);
+        let Some(data) = data else {
+            self.record_skipped(geom, span, columns);
+            return Ok(());
+        };
+        let write_start = Instant::now();
+        data.write_unsharded(geom.track, span.clone(), columns.clone())?;
+        self.state.timings.write.record(write_start.elapsed());
+        self.record_written(geom, span, columns);
+        Ok(())
+    }
+
+    /// Stash one closed sharded buffer in its `(target, span)` group; the
+    /// group flushes when its last buffer arrives. Every append into a shard
+    /// rewrites the shard index under that shard's mutex, so the batch gives
+    /// one index rewrite and one lock acquisition per span instead of one per
+    /// buffer.
+    fn close_sharded(
+        &self,
+        t_idx: usize,
+        span_idx: usize,
+        span: Range<u64>,
+        cc: u64,
+        data: Option<TileBuffer>,
+    ) -> Result<()> {
+        let done = {
+            let mut groups = self.span_groups.lock().expect("span group map poisoned");
+            let group = groups
+                .entry((t_idx, span_idx))
+                .or_insert_with(|| SpanGroup {
+                    parts: Vec::with_capacity(self.group_sizes[t_idx]),
+                    remaining: self.group_sizes[t_idx],
+                });
+            group.parts.push((cc, data));
+            group.remaining -= 1;
+            if group.remaining == 0 {
+                groups.remove(&(t_idx, span_idx))
+            } else {
+                None
+            }
+        };
+        match done {
+            Some(group) => self.flush_span_group(t_idx, span, group),
+            None => Ok(()),
+        }
+    }
+
+    fn flush_span_group(&self, t_idx: usize, span: Range<u64>, group: SpanGroup) -> Result<()> {
+        let geom = &self.geoms[t_idx];
+        let rows = (span.end - span.start) as usize;
+        let shard_w = geom.shard_col.max(1);
+        let mut parts = group.parts;
+        parts.sort_unstable_by_key(|&(cc, _)| cc);
+
+        // A span is one subchunk long and subchunks tile the shard, so the
+        // span rectangle can only straddle shards on the column axis.
+        let mut lo = 0;
+        while lo < parts.len() {
+            let seg_start = geom.buffer_columns(parts[lo].0).start;
+            let shard_end = (seg_start / shard_w + 1) * shard_w;
+            let mut hi = lo;
+            let mut seg_end = seg_start;
+            while hi < parts.len() && geom.buffer_columns(parts[hi].0).start < shard_end {
+                seg_end = geom.buffer_columns(parts[hi].0).end;
+                hi += 1;
+            }
+            let seg = seg_start..seg_end;
+
+            // Elide only when the whole column shard has no data; one covered
+            // buffer writes the full rectangle, fill-value columns included.
+            // That trades a little elision for the batched write: fill
+            // columns encode to almost nothing.
+            if parts[lo..hi].iter().all(|(_, data)| data.is_none()) {
+                for &(cc, _) in &parts[lo..hi] {
+                    self.record_skipped(geom, span.clone(), geom.buffer_columns(cc));
+                }
+                lo = hi;
+                continue;
+            }
+
+            let rect = if hi - lo == 1 {
+                parts[lo]
+                    .1
+                    .take()
+                    .expect("single covered part checked above")
+            } else {
+                let mut rect = TileBuffer::filled(
+                    geom.dtype,
+                    rows,
+                    (seg.end - seg.start) as usize,
+                    &geom.fill,
+                )?;
+                for (cc, data) in &mut parts[lo..hi] {
+                    if let Some(data) = data.take() {
+                        let cols = geom.buffer_columns(*cc);
+                        let dst_lo = (cols.start - seg.start) as usize;
+                        rect.copy_columns_from(
+                            &data,
+                            dst_lo..dst_lo + (cols.end - cols.start) as usize,
+                        )?;
+                    }
+                }
+                rect
+            };
+
+            let lock = self.shard_lock(t_idx, span.start, seg.start);
+            let wait_start = Instant::now();
+            let guard = lock.lock().expect("shard mutex poisoned");
+            self.state.timings.shard_wait.record(wait_start.elapsed());
+            let write_start = Instant::now();
+            rect.store_subset(
+                &geom.array,
+                geom.track.name(),
+                geom.rank,
+                span.clone(),
+                seg,
+                &self.partial_opts,
+            )?;
+            self.state.timings.write.record(write_start.elapsed());
+            drop(guard);
+
+            for &(cc, _) in &parts[lo..hi] {
+                self.record_written(geom, span.clone(), geom.buffer_columns(cc));
+            }
+            lo = hi;
         }
         Ok(())
     }
@@ -684,7 +816,14 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
             .lock()
             .expect("slot map poisoned")
             .remove(&(t_idx, piece.span, cc));
-        ctx.close_buffer(t_idx, cc, piece.start..piece.end, data, any_data)?;
+        ctx.close_buffer(
+            t_idx,
+            cc,
+            piece.span,
+            piece.start..piece.end,
+            data,
+            any_data,
+        )?;
     }
     Ok(())
 }
@@ -850,6 +989,16 @@ pub(crate) fn run_import<R: ValueReader>(
 
     let touch_plan = build_touch_plan(routing, &geoms, n_readers, n_fields);
 
+    let group_sizes: Vec<usize> = {
+        let mut ccs: Vec<std::collections::BTreeSet<u64>> = vec![Default::default(); geoms.len()];
+        for entries in &touch_plan {
+            for entry in entries {
+                ccs[entry.t_idx].insert(entry.cc);
+            }
+        }
+        ccs.into_iter().map(|set| set.len()).collect()
+    };
+
     let workers = options.workers.max(1);
     let in_flight = match options.in_flight_spans {
         0 => auto_in_flight_spans(workers, n_readers).min(n_spans.max(1)),
@@ -887,6 +1036,8 @@ pub(crate) fn run_import<R: ValueReader>(
         tap,
         partial_opts,
         shard_locks: Mutex::new(HashMap::new()),
+        span_groups: Mutex::new(HashMap::new()),
+        group_sizes,
     };
 
     // Workers fork lazily on first use and cache the fork by reader index, so
@@ -1019,7 +1170,8 @@ pub(crate) fn run_import<R: ValueReader>(
          probe  : total {:.1}s\n\
          slot wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s\n\
          merge  : total {:.1}s  copies {}  mean {:.2}s  max {:.2}s\n\
-         write  : total {:.1}s  buffers {}  mean {:.2}s  max {:.2}s\n\
+         shard wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s\n\
+         write  : total {:.1}s  stores {}  mean {:.2}s  max {:.2}s\n\
          worker busy {busy:.0}s / idle {idle:.0}s ({busy_pct:.0}% busy)\n\
          gate wait: {gate_wait:.1}s",
         timings.decode.total_secs(),
@@ -1035,6 +1187,10 @@ pub(crate) fn run_import<R: ValueReader>(
         timings.merge.count(),
         timings.merge.mean_secs(),
         timings.merge.max_secs(),
+        timings.shard_wait.total_secs(),
+        timings.shard_wait.count(),
+        timings.shard_wait.mean_secs(),
+        timings.shard_wait.max_secs(),
         timings.write.total_secs(),
         timings.write.count(),
         timings.write.mean_secs(),
@@ -1521,6 +1677,87 @@ mod tests {
                 .values_array()
                 .unwrap()
                 .is_exclusively_sharded()
+        );
+    }
+
+    /// Width-1 column chunks on a sharded track: the batched span flush must
+    /// round-trip identical to the unsharded import, split correctly across
+    /// column shards, and still elide fully uncovered spans.
+    #[test]
+    fn sharded_width_one_columns_match_unsharded() {
+        let len = 96u64;
+        let genome = one_contig(len);
+        let labels: Vec<String> = (0..4).map(|i| format!("s{i}")).collect();
+        let readers = || -> Vec<SynthReader> {
+            (0..4)
+                .map(|i| SynthReader::new(genome.clone(), Dtype::I32, 5..60, (i + 1) * 1000))
+                .collect()
+        };
+
+        let dir = TempDir::new().unwrap();
+        let mut plain = PbzStore::create(dir.path().join("plain.pbz")).unwrap();
+        plain
+            .create_track(
+                "depth",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32)
+                    .columns(labels.clone())
+                    .chunk_size(16)
+                    .column_chunk_size(1),
+            )
+            .unwrap();
+        let mut sharded = PbzStore::create(dir.path().join("sharded.pbz")).unwrap();
+        sharded
+            .create_track(
+                "depth",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32)
+                    .columns(labels.clone())
+                    .chunk_size(16)
+                    .column_chunk_size(1)
+                    .shard_size(32)
+                    .shard_column_size(2),
+            )
+            .unwrap();
+
+        for store in [&plain, &sharded] {
+            let report = Import::from_readers(readers())
+                .unwrap()
+                .into_track(store.track("depth").unwrap())
+                .readers_as_columns()
+                .expect_column_labels(labels.clone())
+                .options(PipelineOptions {
+                    workers: 4,
+                    ..PipelineOptions::default()
+                })
+                .run()
+                .unwrap();
+            // 6 spans x 4 column chunks; spans 64..96 have no coverage.
+            assert_eq!(report.tasks_completed, 16);
+            assert_eq!(report.tasks_skipped, 8);
+        }
+
+        let plain_data = plain
+            .track("depth")
+            .unwrap()
+            .read_region::<i32>(&whole(&plain, "depth", len))
+            .unwrap()
+            .into_dimensionality::<Ix2>()
+            .unwrap();
+        let sharded_data = sharded
+            .track("depth")
+            .unwrap()
+            .read_region::<i32>(&whole(&sharded, "depth", len))
+            .unwrap()
+            .into_dimensionality::<Ix2>()
+            .unwrap();
+        assert_eq!(plain_data, sharded_data);
+
+        // 3 x 2 shard grid; the uncovered position shard (64..96) elides, so
+        // its two shard files are never created.
+        assert_eq!(
+            chunk_file_count(&dir.path().join("sharded.pbz/depth/values")),
+            4
         );
     }
 }
