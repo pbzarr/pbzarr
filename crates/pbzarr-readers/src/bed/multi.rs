@@ -835,8 +835,8 @@ fn open_readers(
 fn pipeline_options(config: &Config) -> PipelineOptions {
     PipelineOptions {
         workers: config.workers,
+        in_flight_spans: config.in_flight_spans,
         progress: config.progress.clone(),
-        ..PipelineOptions::default()
     }
 }
 

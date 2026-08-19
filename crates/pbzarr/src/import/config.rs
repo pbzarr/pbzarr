@@ -21,6 +21,9 @@ pub trait ProgressSink: Send + Sync {
 pub struct Config {
     /// Number of reader/writer worker threads.
     pub workers: usize,
+    /// Open spans allowed at once in the engine; `0` = auto (see
+    /// `PipelineOptions::in_flight_spans`).
+    pub in_flight_spans: usize,
     /// Position chunk size for the track being imported. Consumed by the
     /// format entry points when they create the track; the engine always
     /// steps by the track's on-disk chunk grid.
@@ -56,6 +59,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             workers: 4,
+            in_flight_spans: 0,
             chunk_size: None,
             column_chunk_size: None,
             shard_size: None,
@@ -138,4 +142,18 @@ pub struct Report {
     /// Number of buffers elided because no reader covered them
     /// (`may_have_data` was false for every overlapping contig).
     pub tasks_skipped: usize,
+    /// Wall-clock duration of the engine run.
+    pub wall_seconds: f64,
+    /// Summed per-piece source read time across workers, probe included.
+    pub decode_seconds: f64,
+    /// Summed `may_have_data` probe time across workers.
+    pub probe_seconds: f64,
+    /// Summed encode+write time across workers.
+    pub write_seconds: f64,
+    /// Summed worker time spent processing pieces.
+    pub worker_busy_seconds: f64,
+    /// Summed worker time spent blocked on the piece channel.
+    pub worker_idle_seconds: f64,
+    /// Producer time blocked on the in-flight span gate.
+    pub gate_wait_seconds: f64,
 }

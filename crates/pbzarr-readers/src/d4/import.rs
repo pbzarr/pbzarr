@@ -49,8 +49,8 @@ pub fn from_d4(
     let track_config = config.track_config(Dtype::I32, None, labels.clone(), "sample");
     let options = PipelineOptions {
         workers: config.workers,
+        in_flight_spans: config.in_flight_spans,
         progress: config.progress.clone(),
-        ..PipelineOptions::default()
     };
     let report = store.create_tracks_with(
         vec![(track_name.to_owned(), genome, track_config)],

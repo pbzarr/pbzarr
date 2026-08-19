@@ -175,6 +175,10 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             shard_column_size: (sharded && rank2).then(|| write_unit[1] as u64),
         };
 
+        let in_flight = match self.options.in_flight_spans {
+            0 => engine::auto_in_flight_spans(self.options.workers, self.readers.len()),
+            n => n,
+        };
         Ok(LayoutEstimate::compute(
             GenomeGeometry {
                 total_len: first.total_len(),
@@ -184,7 +188,7 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             &knobs,
             self.readers.len(),
             self.options.workers,
-            self.options.in_flight_spans,
+            in_flight,
             &[],
         ))
     }

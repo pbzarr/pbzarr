@@ -128,6 +128,7 @@ def import_d4(
     *,
     column_dim: str | None = None,
     workers: int | None = None,
+    in_flight: int | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
     shard_size: int | None = None,
@@ -135,12 +136,13 @@ def import_d4(
     progress: bool = False,
     codecs: list | dict | None = None,
     scales: Sequence[int] | None = None,
-) -> dict[str, int]:
+) -> dict[str, int | float]:
     """Import one or more D4 sources into an existing PBZ collection.
 
     `scales=` builds a multiscale pyramid on the new track with the given
-    downsampling factors; `None` or empty builds no pyramid. Returns the
-    import report dict.
+    downsampling factors; `None` or empty builds no pyramid. `in_flight=`
+    caps the position spans the engine holds open at once (`None` = auto).
+    Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
     normalized_sources = _sources(sources)
@@ -158,6 +160,7 @@ def import_d4(
         progress,
         codecs=_codecs_json(codecs),
         scales=_scales(scales),
+        in_flight=in_flight,
     )
 
 
@@ -168,6 +171,7 @@ def import_bigwig(
     *,
     column_dim: str | None = None,
     workers: int | None = None,
+    in_flight: int | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
     shard_size: int | None = None,
@@ -175,12 +179,13 @@ def import_bigwig(
     progress: bool = False,
     codecs: list | dict | None = None,
     scales: Sequence[int] | None = None,
-) -> dict[str, int]:
+) -> dict[str, int | float]:
     """Import one or more bigWig sources into an existing PBZ collection.
 
     `scales=` builds a multiscale pyramid on the new track with the given
-    downsampling factors; `None` or empty builds no pyramid. Returns the
-    import report dict.
+    downsampling factors; `None` or empty builds no pyramid. `in_flight=`
+    caps the position spans the engine holds open at once (`None` = auto).
+    Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
     normalized_sources = _sources(sources)
@@ -198,6 +203,7 @@ def import_bigwig(
         progress,
         codecs=_codecs_json(codecs),
         scales=_scales(scales),
+        in_flight=in_flight,
     )
 
 
@@ -232,9 +238,10 @@ def import_bed(
     shard_column_size: int | None = None,
     codecs: list | dict | None = None,
     workers: int | None = None,
+    in_flight: int | None = None,
     progress: bool = False,
     scales: Sequence[int] | None = None,
-) -> dict[str, int]:
+) -> dict[str, int | float]:
     """Import tabix-indexed BED sources into an existing PBZ collection.
 
     The call has three forms, matching `pbz import bed`:
@@ -254,7 +261,8 @@ def import_bed(
     Output is 2D when there are several sources, or when one track holds
     several BED columns. Every 2D output requires `column_dim=`.
     `scales=` builds a multiscale pyramid on each new track with the given
-    downsampling factors; `None` or empty builds no pyramid.
+    downsampling factors; `None` or empty builds no pyramid. `in_flight=`
+    caps the position spans the engine holds open at once (`None` = auto).
     Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
@@ -292,6 +300,7 @@ def import_bed(
         progress,
         codecs=_codecs_json(codecs),
         scales=_scales(scales),
+        in_flight=in_flight,
     )
 
 
@@ -314,10 +323,11 @@ def import_bam(
     shard_size: int | None = None,
     shard_column_size: int | None = None,
     workers: int | None = None,
+    in_flight: int | None = None,
     progress: bool = False,
     codecs: list | dict | None = None,
     scales: Sequence[int] | None = None,
-) -> dict[str, int]:
+) -> dict[str, int | float]:
     """Import per-base depth or composition counts from BAM/CRAM sources.
 
     `mode` is `"depth"` (writes `track`) or `"composition"` (writes `track`
@@ -332,7 +342,8 @@ def import_bam(
     overlapping mate pair; `"none"` disables dedup, double-counting every
     overlapping pair's shared span. `scales=` builds a multiscale pyramid on
     each new track with the given downsampling factors; `None` or empty
-    builds no pyramid. Returns the import report dict.
+    builds no pyramid. `in_flight=` caps the position spans the engine holds
+    open at once (`None` = auto). Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
     if overlap not in ("proper", "all", "none"):
@@ -372,4 +383,5 @@ def import_bam(
         progress,
         codecs=_codecs_json(codecs),
         scales=_scales(scales),
+        in_flight=in_flight,
     )

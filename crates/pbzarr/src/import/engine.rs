@@ -22,7 +22,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, bounded};
 use log::{debug, info, warn};
@@ -40,8 +40,11 @@ use crate::track::Track;
 
 pub struct PipelineOptions {
     pub workers: usize,
-    /// Bounds peak scratch memory: open buffers never exceed this many spans'
-    /// worth, plus the pieces individual workers are holding.
+    /// Open spans allowed at once. Bounds peak scratch memory: open buffers
+    /// never exceed this many spans' worth, plus the pieces individual
+    /// workers are holding. `0` = auto: `ceil(3 * workers / readers)`, so the
+    /// runnable pieces target 3x the worker count, clamped to `[8, 256]` and
+    /// to the span count.
     pub in_flight_spans: usize,
     pub progress: Option<Arc<dyn ProgressSink>>,
 }
@@ -50,10 +53,16 @@ impl Default for PipelineOptions {
     fn default() -> Self {
         Self {
             workers: 4,
-            in_flight_spans: 8,
+            in_flight_spans: 0,
             progress: None,
         }
     }
+}
+
+/// The auto rule for `PipelineOptions::in_flight_spans` = 0, before the span
+/// count cap the engine applies.
+pub fn auto_in_flight_spans(workers: usize, n_readers: usize) -> usize {
+    (3 * workers.max(1)).div_ceil(n_readers.max(1)).clamp(8, 256)
 }
 
 /// When attached, spans are opened in descending order of summed cost
@@ -363,6 +372,62 @@ struct SlotHandle {
     inner: Mutex<SlotInner>,
 }
 
+/// One stage's accumulated timing: sum, event count, and slowest event.
+#[derive(Default)]
+struct StageTimer {
+    total_ns: AtomicU64,
+    count: AtomicU64,
+    max_ns: AtomicU64,
+}
+
+impl StageTimer {
+    fn record(&self, elapsed: Duration) {
+        let ns = elapsed.as_nanos() as u64;
+        self.total_ns.fetch_add(ns, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.max_ns.fetch_max(ns, Ordering::Relaxed);
+    }
+
+    fn total_secs(&self) -> f64 {
+        self.total_ns.load(Ordering::Relaxed) as f64 / 1e9
+    }
+
+    fn count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    fn mean_secs(&self) -> f64 {
+        let count = self.count();
+        if count == 0 {
+            0.0
+        } else {
+            self.total_secs() / count as f64
+        }
+    }
+
+    fn max_secs(&self) -> f64 {
+        self.max_ns.load(Ordering::Relaxed) as f64 / 1e9
+    }
+}
+
+#[derive(Default)]
+struct RunTimings {
+    /// Per piece: source read incl. contig windows and the coverage probe.
+    decode: StageTimer,
+    /// Per piece: the `may_have_data` probe alone (also inside `decode`).
+    probe: StageTimer,
+    /// Per written buffer: the store call (encode + write).
+    write: StageTimer,
+    worker_busy_ns: AtomicU64,
+    worker_idle_ns: AtomicU64,
+    /// Producer time blocked on the in-flight span gate.
+    gate_wait_ns: AtomicU64,
+}
+
+fn ns_secs(counter: &AtomicU64) -> f64 {
+    counter.load(Ordering::Relaxed) as f64 / 1e9
+}
+
 struct EngineState {
     slots: Mutex<HashMap<SlotKey, Arc<SlotHandle>>>,
     gate: SpanGate,
@@ -370,6 +435,7 @@ struct EngineState {
     bytes_written: AtomicU64,
     tasks_completed: AtomicUsize,
     tasks_skipped: AtomicUsize,
+    timings: RunTimings,
     err_flag: AtomicBool,
     first_err: Mutex<Option<PbzError>>,
 }
@@ -474,6 +540,7 @@ impl RunCtx<'_> {
         if geom.sharded {
             let lock = self.shard_lock(t_idx, span.start, columns.start);
             let _guard = lock.lock().expect("shard mutex poisoned");
+            let write_start = Instant::now();
             data.store_subset(
                 &geom.array,
                 geom.track.name(),
@@ -482,8 +549,11 @@ impl RunCtx<'_> {
                 columns.clone(),
                 &self.partial_opts,
             )?;
+            self.state.timings.write.record(write_start.elapsed());
         } else {
+            let write_start = Instant::now();
             data.write_unsharded(geom.track, span.clone(), columns.clone())?;
+            self.state.timings.write.record(write_start.elapsed());
         }
 
         let bytes =
@@ -506,9 +576,12 @@ impl RunCtx<'_> {
 
 fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece) -> Result<()> {
     let windows = contig_windows(ctx.genome, piece.start, piece.end);
+    let probe_start = Instant::now();
     let covered = windows
         .iter()
         .any(|w| reader.may_have_data(w.name, w.local_lo, w.local_hi));
+    let mut decode = probe_start.elapsed();
+    ctx.state.timings.probe.record(decode);
 
     let entries = &ctx.touch_plan[piece.reader];
     let handles: Vec<Arc<SlotHandle>> = entries
@@ -521,6 +594,7 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
         .collect();
 
     if covered {
+        let read_start = Instant::now();
         let rows = (piece.end - piece.start) as usize;
         let n_fields = entries.iter().map(|e| e.fields.len()).sum::<usize>();
         for (guard, entry) in guards.iter_mut().zip(entries) {
@@ -554,7 +628,9 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
                 .collect();
             reader.read_into(w.name, w.local_lo, w.local_hi, &mut outputs)?;
         }
+        decode += read_start.elapsed();
     }
+    ctx.state.timings.decode.record(decode);
 
     // Collect the buffers this piece finished, then write them outside the
     // slot locks.
@@ -741,21 +817,26 @@ pub(crate) fn run_import<R: ValueReader>(
     let touch_plan = build_touch_plan(routing, &geoms, n_readers, n_fields);
 
     let workers = options.workers.max(1);
+    let in_flight = match options.in_flight_spans {
+        0 => auto_in_flight_spans(workers, n_readers).min(n_spans.max(1)),
+        n => n,
+    };
     let started = Instant::now();
     let names: Vec<&str> = tracks.iter().map(|t| t.name()).collect();
     info!(
         "import pipeline: {} track(s) {names:?}, {total} positions, {n_spans} span(s) of \
-         {chunk_len}, {n_readers} reader(s), {workers} workers",
+         {chunk_len}, {n_readers} reader(s), {workers} workers, {in_flight} span(s) in flight",
         tracks.len()
     );
 
     let state = EngineState {
         slots: Mutex::new(HashMap::new()),
-        gate: SpanGate::new(options.in_flight_spans),
+        gate: SpanGate::new(in_flight),
         span_remaining: (0..n_spans).map(|_| AtomicUsize::new(n_readers)).collect(),
         bytes_written: AtomicU64::new(0),
         tasks_completed: AtomicUsize::new(0),
         tasks_skipped: AtomicUsize::new(0),
+        timings: RunTimings::default(),
         err_flag: AtomicBool::new(false),
         first_err: Mutex::new(None),
     };
@@ -787,45 +868,66 @@ pub(crate) fn run_import<R: ValueReader>(
             let originals = &originals;
             scope.spawn(move || {
                 let mut forks: HashMap<usize, R> = HashMap::new();
-                while let Ok(piece) = piece_rx.recv() {
-                    if ctx.state.has_err() {
-                        // Drain so the channel closes cleanly; the gate is
-                        // already aborted, so nothing blocks on us.
-                        continue;
-                    }
-                    if let std::collections::hash_map::Entry::Vacant(slot) =
-                        forks.entry(piece.reader)
-                    {
-                        let fork = originals.lock().expect("readers poisoned")[piece.reader]
-                            .fork()
-                            .map_err(PbzError::Reader);
-                        match fork {
-                            Ok(fork) => {
-                                slot.insert(fork);
-                            }
-                            Err(e) => {
-                                ctx.state.record_err(e);
-                                continue;
+                let mut busy = Duration::ZERO;
+                let mut idle = Duration::ZERO;
+                loop {
+                    let wait_start = Instant::now();
+                    let Ok(piece) = piece_rx.recv() else { break };
+                    idle += wait_start.elapsed();
+                    let work_start = Instant::now();
+                    'piece: {
+                        if ctx.state.has_err() {
+                            // Drain so the channel closes cleanly; the gate is
+                            // already aborted, so nothing blocks on us.
+                            break 'piece;
+                        }
+                        if let std::collections::hash_map::Entry::Vacant(slot) =
+                            forks.entry(piece.reader)
+                        {
+                            let fork = originals.lock().expect("readers poisoned")[piece.reader]
+                                .fork()
+                                .map_err(PbzError::Reader);
+                            match fork {
+                                Ok(fork) => {
+                                    slot.insert(fork);
+                                }
+                                Err(e) => {
+                                    ctx.state.record_err(e);
+                                    break 'piece;
+                                }
                             }
                         }
+                        let reader = forks.get_mut(&piece.reader).expect("fork cached above");
+                        if let Err(e) = process_piece(ctx, reader, piece) {
+                            ctx.state.record_err(e);
+                            break 'piece;
+                        }
+                        if ctx.state.span_remaining[piece.span].fetch_sub(1, Ordering::AcqRel)
+                            == 1
+                        {
+                            ctx.state.gate.release();
+                        }
                     }
-                    let reader = forks.get_mut(&piece.reader).expect("fork cached above");
-                    if let Err(e) = process_piece(ctx, reader, piece) {
-                        ctx.state.record_err(e);
-                        continue;
-                    }
-                    if ctx.state.span_remaining[piece.span].fetch_sub(1, Ordering::AcqRel) == 1 {
-                        ctx.state.gate.release();
-                    }
+                    busy += work_start.elapsed();
                 }
+                let timings = &ctx.state.timings;
+                timings
+                    .worker_busy_ns
+                    .fetch_add(busy.as_nanos() as u64, Ordering::Relaxed);
+                timings
+                    .worker_idle_ns
+                    .fetch_add(idle.as_nanos() as u64, Ordering::Relaxed);
             });
         }
 
+        let mut gate_wait = Duration::ZERO;
         'produce: for &span_idx in &span_order {
             if state.has_err() {
                 break;
             }
+            let gate_start = Instant::now();
             state.gate.acquire();
+            gate_wait += gate_start.elapsed();
             if state.has_err() {
                 break;
             }
@@ -842,6 +944,10 @@ pub(crate) fn run_import<R: ValueReader>(
                 }
             }
         }
+        state
+            .timings
+            .gate_wait_ns
+            .store(gate_wait.as_nanos() as u64, Ordering::Relaxed);
         drop(piece_tx);
     });
 
@@ -864,6 +970,34 @@ pub(crate) fn run_import<R: ValueReader>(
         );
     }
 
+    let wall = started.elapsed().as_secs_f64();
+    let timings = &state.timings;
+    let busy = ns_secs(&timings.worker_busy_ns);
+    let idle = ns_secs(&timings.worker_idle_ns);
+    let gate_wait = ns_secs(&timings.gate_wait_ns);
+    let busy_pct = if busy + idle > 0.0 {
+        100.0 * busy / (busy + idle)
+    } else {
+        0.0
+    };
+    info!(
+        "import timing: wall {wall:.1}s workers {workers}\n\
+         decode : total {:.1}s  pieces {}  mean {:.2}s  max {:.2}s\n\
+         probe  : total {:.1}s\n\
+         write  : total {:.1}s  buffers {}  mean {:.2}s  max {:.2}s\n\
+         worker busy {busy:.0}s / idle {idle:.0}s ({busy_pct:.0}% busy)\n\
+         gate wait: {gate_wait:.1}s",
+        timings.decode.total_secs(),
+        timings.decode.count(),
+        timings.decode.mean_secs(),
+        timings.decode.max_secs(),
+        timings.probe.total_secs(),
+        timings.write.total_secs(),
+        timings.write.count(),
+        timings.write.mean_secs(),
+        timings.write.max_secs(),
+    );
+
     if let Some(e) = state.first_err.lock().expect("error slot poisoned").take() {
         return Err(e);
     }
@@ -873,6 +1007,13 @@ pub(crate) fn run_import<R: ValueReader>(
         bytes_written: bytes,
         tasks_completed: completed,
         tasks_skipped: skipped,
+        wall_seconds: wall,
+        decode_seconds: timings.decode.total_secs(),
+        probe_seconds: timings.probe.total_secs(),
+        write_seconds: timings.write.total_secs(),
+        worker_busy_seconds: busy,
+        worker_idle_seconds: idle,
+        gate_wait_seconds: gate_wait,
     })
 }
 
@@ -986,6 +1127,17 @@ mod tests {
         let mut n = 0;
         walk(values_dir, &mut n);
         n
+    }
+
+    #[test]
+    fn auto_in_flight_targets_three_pieces_per_worker() {
+        // ceil(3 * workers / readers), inside the clamp.
+        assert_eq!(auto_in_flight_spans(64, 10), 20);
+        assert_eq!(auto_in_flight_spans(4, 1), 12);
+        assert_eq!(auto_in_flight_spans(22, 7), 10);
+        // Clamp floor and ceiling.
+        assert_eq!(auto_in_flight_spans(1, 64), 8);
+        assert_eq!(auto_in_flight_spans(256, 1), 256);
     }
 
     #[test]

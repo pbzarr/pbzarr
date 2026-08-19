@@ -11,7 +11,7 @@ use indicatif_log_bridge::LogWrapper;
 use log::{LevelFilter, debug, info, warn};
 use pbzarr::import::progress::{self, make_sink};
 use pbzarr::import::{
-    Config, GenomeGeometry, LayoutEstimate, LayoutKnobs, PipelineOptions, TrackShape,
+    Config, GenomeGeometry, LayoutEstimate, LayoutKnobs, TrackShape, auto_in_flight_spans,
 };
 use pbzarr::io::{Dtype, ValueReader as _};
 use pbzarr::{ExplicitArraySpec, Genome, PbzStore, ScaleConfig};
@@ -144,6 +144,11 @@ struct ImportOptions {
     /// Number of import workers.
     #[arg(short = 't', long, default_value_t = 4)]
     threads: usize,
+    /// Position spans open at once in the import engine. Bounds scratch
+    /// memory; more keeps workers busy near span boundaries. Default: auto
+    /// (targets 3x the worker count in runnable pieces, clamped to 8..256).
+    #[arg(long = "in-flight", value_name = "N")]
+    in_flight: Option<usize>,
     /// Position chunk size.
     #[arg(long)]
     chunk_size: Option<usize>,
@@ -196,6 +201,7 @@ impl ImportOptions {
     fn config(&self, label: &str) -> Result<Config> {
         Ok(Config {
             workers: self.threads,
+            in_flight_spans: self.in_flight.unwrap_or(0),
             chunk_size: self.chunk_size,
             column_chunk_size: self.column_chunk_size,
             shard_size: self.shard_size,
@@ -656,6 +662,10 @@ fn print_dry_run(
         config.shard_column_size.map(|v| v as u64),
         config.codecs.as_ref(),
     );
+    let in_flight = match config.in_flight_spans {
+        0 => auto_in_flight_spans(config.workers, readers),
+        n => n,
+    };
     let estimate = LayoutEstimate::compute(
         GenomeGeometry {
             total_len: genome.contigs().iter().map(|c| c.length).sum(),
@@ -665,7 +675,7 @@ fn print_dry_run(
         &knobs,
         readers,
         config.workers,
-        PipelineOptions::default().in_flight_spans,
+        in_flight,
         &config.scales,
     );
     print!("{estimate}");

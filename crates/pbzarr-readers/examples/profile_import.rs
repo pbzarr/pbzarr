@@ -170,11 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         chunk_size: Some(args.chunk_size),
         column_chunk_size: Some(args.column_chunk_size),
         shard_size: args.shard_size,
-        shard_column_size: None,
-        column_dim: None,
-        codecs: None,
-        scales: Vec::new(),
-        progress: None,
+        ..Config::default()
     };
 
     let t0 = Instant::now();
