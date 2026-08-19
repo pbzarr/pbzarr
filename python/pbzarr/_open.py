@@ -90,13 +90,18 @@ def _open_all_collection(
     try:
         if _node_kind(opened.attrs) != "collection":
             raise PbzError("PBZ node is a track, not a collection")
-        if any(node.path.count("/") > 1 for node in opened.descendants):
-            raise PbzError("PBZ collections may contain only direct track children")
         published = {
             name: node
             for name, node in opened.children.items()
             if _has_perbase_marker(node.attrs)
         }
+        # Published tracks may carry subtrees of their own (a scales/
+        # pyramid); deep descendants are rejected only outside them.
+        if any(
+            node.path.count("/") > 1 and node.path.split("/", 2)[1] not in published
+            for node in opened.descendants
+        ):
+            raise PbzError("PBZ collections may contain only direct track children")
         for node in published.values():
             if _node_kind(node.attrs) != "track":
                 raise PbzError("PBZ collection children must be tracks")

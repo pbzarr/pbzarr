@@ -445,6 +445,67 @@ def test_open_all_children_skips_unpublished_direct_tracks():
     assert not _value_reads(store)
 
 
+def test_open_all_children_accepts_a_published_scales_pyramid():
+    store = _make_collection({"depth": {"chunks": (4,)}})
+    root = zarr.open_group(store, mode="a", zarr_format=3)
+    depth = root["depth"]
+    depth["values"][:] = np.arange(10, dtype="int16")
+    depth.create_group("scales").create_group("16").create_array(
+        "mean",
+        shape=(2,),
+        chunks=(2,),
+        dtype="float32",
+        fill_value=np.float32(-7),
+        dimension_names=("bin",),
+        write_data=False,
+    )
+    depth.attrs.update(
+        {
+            "multiscales": {
+                "layout": [
+                    {"asset": "values"},
+                    {
+                        "asset": "scales/16/mean",
+                        "derived_from": "values",
+                        "transform": {
+                            "perbase:ragged_axis_scale": {
+                                "dimension": "position",
+                                "factor": 16,
+                                "anchor": "segment-start",
+                                "last_bin": "clip",
+                            }
+                        },
+                        "resampling_method": "average",
+                    },
+                ]
+            },
+            "zarr_conventions": [
+                *depth.attrs["zarr_conventions"],
+                {
+                    "uuid": "d35379db-88df-4056-af3a-620245f8e347",
+                    "name": "multiscales",
+                    "schema_url": (
+                        "https://raw.githubusercontent.com/zarr-conventions/"
+                        "multiscales/refs/tags/v0.1/schema.json"
+                    ),
+                    "spec_url": (
+                        "https://github.com/zarr-conventions/multiscales/"
+                        "blob/v0.1/README.md"
+                    ),
+                },
+            ],
+        }
+    )
+    store.reads.clear()
+    store.listings.clear()
+
+    tree = pbzarr.open(store)
+
+    assert set(tree.children) == {"depth"}
+    dataset = tree["depth"].to_dataset()
+    assert dataset["values"].values.tolist() == list(range(10))
+
+
 def test_open_all_children_prepares_each_track_without_indexes():
     store = _make_collection(
         {
