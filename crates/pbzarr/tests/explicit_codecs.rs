@@ -62,6 +62,40 @@ fn explicit_codecs_array_transpose_zstd_roundtrip() {
 }
 
 #[test]
+fn explicit_codecs_transpose_pcodec_roundtrip() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("p.pbz");
+    let spec = ExplicitArraySpec::parse(
+        r#"[{"name":"transpose","configuration":{"order":[1,0]}},
+            {"name":"numcodecs.pcodec","configuration":{"level":8}}]"#,
+    )
+    .unwrap();
+    let mut store = PbzStore::create(&path).unwrap();
+    store
+        .create_track(
+            "depth",
+            genome(8),
+            TrackConfig::new(Dtype::I32)
+                .columns(vec!["a".into(), "b".into()])
+                .chunk_size(4)
+                .codecs(spec),
+        )
+        .unwrap();
+
+    let track = store.track("depth").unwrap();
+    let region = track
+        .genome()
+        .resolve(&"chr1:0-8".parse().unwrap())
+        .unwrap();
+    let data = Array2::from_shape_fn((8, 2), |(i, j)| (i * 2 + j) as i32).into_dyn();
+    track.write_region(&region, data.clone()).unwrap();
+    assert_eq!(track.read_region::<i32>(&region).unwrap(), data);
+
+    let meta = values_meta(&path, "depth");
+    assert_eq!(codec_names(&meta), ["transpose", "numcodecs.pcodec"]);
+}
+
+#[test]
 fn explicit_fragment_controls_grid_and_sharding() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");
