@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -62,7 +62,9 @@ impl Default for PipelineOptions {
 /// The auto rule for `PipelineOptions::in_flight_spans` = 0, before the span
 /// count cap the engine applies.
 pub fn auto_in_flight_spans(workers: usize, n_readers: usize) -> usize {
-    (3 * workers.max(1)).div_ceil(n_readers.max(1)).clamp(8, 256)
+    (3 * workers.max(1))
+        .div_ceil(n_readers.max(1))
+        .clamp(8, 256)
 }
 
 /// When attached, spans are opened in descending order of summed cost
@@ -173,6 +175,20 @@ macro_rules! tile_buffer {
                             .map(OutputSinkMut::$variant)
                             .collect()
                     } )*
+                }
+            }
+
+            /// Copies `src` (same dtype and row count, `cols.len()` columns
+            /// wide) into the `cols` column range of this buffer.
+            fn copy_columns_from(&mut self, src: &TileBuffer, cols: Range<usize>) -> Result<()> {
+                match (self, src) {
+                    $( (TileBuffer::$variant(dst), TileBuffer::$variant(src)) => {
+                        dst.slice_mut(s![.., cols.start..cols.end]).assign(src);
+                        Ok(())
+                    } )*
+                    _ => Err(PbzError::Metadata(
+                        "engine invariant: merge dtype mismatch".into(),
+                    )),
                 }
             }
 
@@ -350,8 +366,8 @@ struct Piece {
 struct TouchEntry {
     t_idx: usize,
     cc: u64,
-    /// `(schema field index, buffer-local column)`, strictly increasing by
-    /// column.
+    /// `(schema field index, buffer-local column)`. The columns are
+    /// consecutive and ascending; the merge copies them as one range.
     fields: Vec<(usize, usize)>,
 }
 
@@ -416,6 +432,11 @@ struct RunTimings {
     decode: StageTimer,
     /// Per piece: the `may_have_data` probe alone (also inside `decode`).
     probe: StageTimer,
+    /// Per touched buffer: time blocked acquiring the slot's lock at merge.
+    slot_wait: StageTimer,
+    /// Per touched buffer: the region copy into the shared buffer, under
+    /// the slot lock.
+    merge: StageTimer,
     /// Per written buffer: the store call (encode + write).
     write: StageTimer,
     worker_busy_ns: AtomicU64,
@@ -584,40 +605,29 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
     ctx.state.timings.probe.record(decode);
 
     let entries = &ctx.touch_plan[piece.reader];
-    let handles: Vec<Arc<SlotHandle>> = entries
-        .iter()
-        .map(|e| ctx.slot((e.t_idx, piece.span, e.cc)))
-        .collect();
-    let mut guards: Vec<MutexGuard<'_, SlotInner>> = handles
-        .iter()
-        .map(|h| h.inner.lock().expect("buffer slot poisoned"))
-        .collect();
+    let rows = (piece.end - piece.start) as usize;
 
+    // Piece-local scratch, one buffer per touched entry, sized to this
+    // piece's own columns. Peak scratch memory gains one such set per active
+    // worker (typically a few MB each).
+    let mut scratch: Vec<TileBuffer> = Vec::new();
     if covered {
         let read_start = Instant::now();
-        let rows = (piece.end - piece.start) as usize;
         let n_fields = entries.iter().map(|e| e.fields.len()).sum::<usize>();
-        for (guard, entry) in guards.iter_mut().zip(entries) {
-            if guard.data.is_none() {
-                let geom = &ctx.geoms[entry.t_idx];
-                let columns = geom.buffer_columns(entry.cc);
-                guard.data = Some(TileBuffer::filled(
-                    geom.dtype,
-                    rows,
-                    (columns.end - columns.start) as usize,
-                    &geom.fill,
-                )?);
-            }
+        for entry in entries {
+            let geom = &ctx.geoms[entry.t_idx];
+            scratch.push(TileBuffer::filled(
+                geom.dtype,
+                rows,
+                entry.fields.len(),
+                &geom.fill,
+            )?);
         }
         for w in &windows {
             let mut staged: Vec<Option<OutputSinkMut<'_>>> = (0..n_fields).map(|_| None).collect();
-            for (guard, entry) in guards.iter_mut().zip(entries) {
-                let cols: Vec<usize> = entry.fields.iter().map(|&(_, c)| c).collect();
-                let data = guard
-                    .data
-                    .as_mut()
-                    .expect("buffer allocated above for covered piece");
-                let sinks = data.column_sinks(w.row_lo..w.row_hi, &cols);
+            for (local, entry) in scratch.iter_mut().zip(entries) {
+                let cols: Vec<usize> = (0..entry.fields.len()).collect();
+                let sinks = local.column_sinks(w.row_lo..w.row_hi, &cols);
                 for (&(field, _), sink) in entry.fields.iter().zip(sinks) {
                     staged[field] = Some(sink);
                 }
@@ -632,17 +642,41 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
     }
     ctx.state.timings.decode.record(decode);
 
-    // Collect the buffers this piece finished, then write them outside the
-    // slot locks.
+    // Merge into the shared buffers. Decode ran without slot locks so pieces
+    // sharing a buffer stay concurrent; each lock covers only the region
+    // copy. Buffers this piece finished are written outside the locks.
     let mut closed: Vec<(usize, u64, Option<TileBuffer>, bool)> = Vec::new();
-    for (guard, entry) in guards.iter_mut().zip(entries) {
+    for (idx, entry) in entries.iter().enumerate() {
+        let wait_start = Instant::now();
+        let handle = ctx.slot((entry.t_idx, piece.span, entry.cc));
+        let mut guard = handle.inner.lock().expect("buffer slot poisoned");
+        ctx.state.timings.slot_wait.record(wait_start.elapsed());
+        if covered {
+            let merge_start = Instant::now();
+            if guard.data.is_none() {
+                let geom = &ctx.geoms[entry.t_idx];
+                let columns = geom.buffer_columns(entry.cc);
+                guard.data = Some(TileBuffer::filled(
+                    geom.dtype,
+                    rows,
+                    (columns.end - columns.start) as usize,
+                    &geom.fill,
+                )?);
+            }
+            let dst_lo = entry.fields[0].1;
+            guard
+                .data
+                .as_mut()
+                .expect("buffer allocated above for covered piece")
+                .copy_columns_from(&scratch[idx], dst_lo..dst_lo + entry.fields.len())?;
+            ctx.state.timings.merge.record(merge_start.elapsed());
+        }
         guard.remaining -= 1;
         guard.any_data |= covered;
         if guard.remaining == 0 {
             closed.push((entry.t_idx, entry.cc, guard.data.take(), guard.any_data));
         }
     }
-    drop(guards);
 
     for (t_idx, cc, data, any_data) in closed {
         ctx.state
@@ -902,8 +936,7 @@ pub(crate) fn run_import<R: ValueReader>(
                             ctx.state.record_err(e);
                             break 'piece;
                         }
-                        if ctx.state.span_remaining[piece.span].fetch_sub(1, Ordering::AcqRel)
-                            == 1
+                        if ctx.state.span_remaining[piece.span].fetch_sub(1, Ordering::AcqRel) == 1
                         {
                             ctx.state.gate.release();
                         }
@@ -984,6 +1017,8 @@ pub(crate) fn run_import<R: ValueReader>(
         "import timing: wall {wall:.1}s workers {workers}\n\
          decode : total {:.1}s  pieces {}  mean {:.2}s  max {:.2}s\n\
          probe  : total {:.1}s\n\
+         slot wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s\n\
+         merge  : total {:.1}s  copies {}  mean {:.2}s  max {:.2}s\n\
          write  : total {:.1}s  buffers {}  mean {:.2}s  max {:.2}s\n\
          worker busy {busy:.0}s / idle {idle:.0}s ({busy_pct:.0}% busy)\n\
          gate wait: {gate_wait:.1}s",
@@ -992,6 +1027,14 @@ pub(crate) fn run_import<R: ValueReader>(
         timings.decode.mean_secs(),
         timings.decode.max_secs(),
         timings.probe.total_secs(),
+        timings.slot_wait.total_secs(),
+        timings.slot_wait.count(),
+        timings.slot_wait.mean_secs(),
+        timings.slot_wait.max_secs(),
+        timings.merge.total_secs(),
+        timings.merge.count(),
+        timings.merge.mean_secs(),
+        timings.merge.max_secs(),
         timings.write.total_secs(),
         timings.write.count(),
         timings.write.mean_secs(),
@@ -1275,6 +1318,112 @@ mod tests {
                 position: 16..32,
                 columns: 0..1,
             }
+        );
+    }
+
+    /// Reader whose `read_into` records how many decodes run at once. Each
+    /// call waits (bounded) for a peer, so serialized decodes stay at 1.
+    #[derive(Clone)]
+    struct ConcurrencyProbe {
+        genome: Genome,
+        schema: OutputSchema,
+        /// `(currently decoding, max observed)`.
+        gauge: Arc<(Mutex<(usize, usize)>, Condvar)>,
+    }
+
+    impl ValueReader for ConcurrencyProbe {
+        fn contigs(&self) -> &Genome {
+            &self.genome
+        }
+
+        fn output_schema(&self) -> &OutputSchema {
+            &self.schema
+        }
+
+        fn read_into(
+            &mut self,
+            _contig: &str,
+            _start: u64,
+            _end: u64,
+            outputs: &mut [OutputSinkMut<'_>],
+        ) -> std::result::Result<(), crate::io::ReaderError> {
+            let (lock, cv) = &*self.gauge;
+            let mut g = lock.lock().unwrap();
+            g.0 += 1;
+            g.1 = g.1.max(g.0);
+            cv.notify_all();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while g.1 < 2 {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                g = cv.wait_timeout(g, deadline - now).unwrap().0;
+            }
+            g.0 -= 1;
+            cv.notify_all();
+            drop(g);
+            match &mut outputs[0] {
+                OutputSinkMut::I32(dst) => dst.fill(1),
+                _ => panic!("probe reader supports i32 sinks only"),
+            }
+            Ok(())
+        }
+
+        fn may_have_data(&self, _contig: &str, _start: u64, _end: u64) -> bool {
+            true
+        }
+
+        fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
+            Ok(self.clone())
+        }
+    }
+
+    /// Two readers routed as columns of one column chunk share one buffer
+    /// slot; their decodes must run concurrently, not serialized behind the
+    /// slot lock.
+    #[test]
+    fn pieces_sharing_a_buffer_decode_concurrently() {
+        let dir = TempDir::new().unwrap();
+        let genome = one_contig(16);
+        let labels = vec!["a".to_string(), "b".to_string()];
+        let mut store = PbzStore::create(dir.path().join("conc.pbz")).unwrap();
+        store
+            .create_track(
+                "depth",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32)
+                    .columns(labels.clone())
+                    .chunk_size(16)
+                    .column_chunk_size(2),
+            )
+            .unwrap();
+
+        let gauge = Arc::new((Mutex::new((0usize, 0usize)), Condvar::new()));
+        let readers: Vec<ConcurrencyProbe> = (0..2)
+            .map(|_| ConcurrencyProbe {
+                genome: genome.clone(),
+                schema: OutputSchema::single("value", Dtype::I32),
+                gauge: Arc::clone(&gauge),
+            })
+            .collect();
+
+        Import::from_readers(readers)
+            .unwrap()
+            .into_track(store.track("depth").unwrap())
+            .readers_as_columns()
+            .expect_column_labels(labels)
+            .options(PipelineOptions {
+                workers: 2,
+                ..PipelineOptions::default()
+            })
+            .run()
+            .unwrap();
+
+        let max = gauge.0.lock().unwrap().1;
+        assert!(
+            max >= 2,
+            "pieces sharing a buffer decoded serially: observed max concurrency {max}"
         );
     }
 
