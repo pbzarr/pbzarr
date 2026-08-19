@@ -7,9 +7,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use ndarray::Array2;
+use ndarray::Array1;
 use pbzarr::Genome;
-use pbzarr::io::ValueReader;
+use pbzarr::io::{OutputSinkMut, ValueReader};
 use pbzarr_readers::D4Reader;
 use tempfile::TempDir;
 
@@ -63,9 +63,9 @@ fn open_missing_file_errors() {
 }
 
 #[test]
-fn open_reports_contigs_and_n_fields() {
+fn open_reports_contigs_and_schema() {
     if !d4tools_available() {
-        eprintln!("skipping open_reports_contigs_and_n_fields: d4tools not in PATH");
+        eprintln!("skipping open_reports_contigs_and_schema: d4tools not in PATH");
         return;
     }
     let dir = TempDir::new().unwrap();
@@ -79,7 +79,7 @@ fn open_reports_contigs_and_n_fields() {
     let c2 = genome.get(genome.id("chr2").unwrap()).unwrap();
     assert_eq!(c1.length, 1000);
     assert_eq!(c2.length, 500);
-    assert_eq!(reader.n_fields(), 1);
+    assert_eq!(reader.output_schema().len(), 1);
 }
 
 #[test]
@@ -107,16 +107,15 @@ fn read_into_fills_constant_buffer() {
     let dir = TempDir::new().unwrap();
     let d4 = synth_d4(dir.path(), "a", &[("chr1", 1000)], 7);
 
-    let reader = D4Reader::open(&d4).unwrap();
+    let mut reader = D4Reader::open(&d4).unwrap();
     let start = 10u64;
     let end = 30u64;
 
-    let mut buf: Array2<i32> = Array2::zeros(((end - start) as usize, reader.n_fields()));
-    reader
-        .read_into("chr1", start, end, buf.view_mut())
-        .unwrap();
+    let mut buf: Array1<i32> = Array1::zeros((end - start) as usize);
+    let mut outputs = [OutputSinkMut::I32(buf.view_mut())];
+    reader.read_into("chr1", start, end, &mut outputs).unwrap();
 
-    assert_eq!(buf.shape(), &[20, 1]);
+    assert_eq!(buf.len(), 20);
     assert!(
         buf.iter().all(|&v| v == 7),
         "expected all 7s, got {:?}",
@@ -133,11 +132,12 @@ fn empty_region_is_noop() {
     let dir = TempDir::new().unwrap();
     let d4 = synth_d4(dir.path(), "a", &[("chr1", 100)], 3);
 
-    let reader = D4Reader::open(&d4).unwrap();
+    let mut reader = D4Reader::open(&d4).unwrap();
 
     // 0-row view: contract is just "don't crash".
-    let mut buf: Array2<i32> = Array2::zeros((0, 1));
-    reader.read_into("chr1", 50, 50, buf.view_mut()).unwrap();
+    let mut buf: Array1<i32> = Array1::zeros(0);
+    let mut outputs = [OutputSinkMut::I32(buf.view_mut())];
+    reader.read_into("chr1", 50, 50, &mut outputs).unwrap();
 }
 
 #[test]
@@ -149,13 +149,15 @@ fn fork_produces_independent_reader() {
     let dir = TempDir::new().unwrap();
     let d4 = synth_d4(dir.path(), "a", &[("chr1", 200)], 42);
 
-    let a = D4Reader::open(&d4).unwrap();
-    let b = a.fork().unwrap();
+    let mut a = D4Reader::open(&d4).unwrap();
+    let mut b = a.fork().unwrap();
 
-    let mut buf_a: Array2<i32> = Array2::zeros((8, 1));
-    let mut buf_b: Array2<i32> = Array2::zeros((8, 1));
-    a.read_into("chr1", 0, 8, buf_a.view_mut()).unwrap();
-    b.read_into("chr1", 0, 8, buf_b.view_mut()).unwrap();
+    let mut buf_a: Array1<i32> = Array1::zeros(8);
+    let mut buf_b: Array1<i32> = Array1::zeros(8);
+    a.read_into("chr1", 0, 8, &mut [OutputSinkMut::I32(buf_a.view_mut())])
+        .unwrap();
+    b.read_into("chr1", 0, 8, &mut [OutputSinkMut::I32(buf_b.view_mut())])
+        .unwrap();
 
     assert_eq!(buf_a, buf_b);
     assert!(buf_a.iter().all(|&v| v == 42));

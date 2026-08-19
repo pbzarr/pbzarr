@@ -9,10 +9,8 @@ from ._write import (
     create_store,
     import_bam,
     import_bed,
-    import_bed_multi,
     import_bigwig,
     import_d4,
-    stack,
 )
 
 __all__ = [
@@ -23,8 +21,6 @@ __all__ = [
     "import_d4",
     "import_bigwig",
     "import_bed",
-    "import_bed_multi",
     "import_bam",
-    "stack",
     "open",
 ]

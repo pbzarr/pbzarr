@@ -109,11 +109,11 @@ pbzarr.import_bigwig("signals.pbz", "signal", "sample.bw")
 pbzarr.create_store("scores.pbz")
 pbzarr.import_bed(
     "scores.pbz",
-    "score",
     "sites.bed.gz",
+    genome="genome.fai",
+    track="score",
     column="score",
     dtype="float32",
-    genome="genome.fai",
 )
 ```
 
@@ -166,3 +166,9 @@ pbzarr is under active development and has not reached version 1.0. The API and 
 - [Design](docs/DESIGN.md)
 - [d4](https://github.com/38/d4-format)
 - [Motivating issues](https://github.com/38/d4-format/issues/82): mask generation, [cross-sample compression](https://github.com/38/d4-format/issues/64), and [per-base sample statistics](https://github.com/cademirch/clam/issues/25)
+
+## Development note
+
+The per-base Zarr format that pbzarr standardizes was first prototyped by hand in [clam](https://github.com/cademirch/clam), where the initial concepts (the contig-major layout, cohort-shaped tracks, and the zarr/ndarray I/O path) were fleshed out before AI tooling was introduced. pbzarr lifts those concepts into a dedicated, spec-driven library.
+
+From that point, development of pbzarr was heavily assisted by Claude (Anthropic), accelerating the library implementation, d4 import, tests, and documentation. The architecture, domain knowledge, and direction remain the author's own; Claude was used as an accelerant, not an author.

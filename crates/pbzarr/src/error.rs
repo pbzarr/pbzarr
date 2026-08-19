@@ -23,5 +23,8 @@ pub enum PbzError {
     Metadata(String),
 
     #[error(transparent)]
+    Reader(#[from] crate::io::error::ReaderError),
+
+    #[error(transparent)]
     Io(#[from] std::io::Error),
 }

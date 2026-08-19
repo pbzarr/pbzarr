@@ -54,6 +54,9 @@ pub enum ReaderError {
         value: String,
     },
 
+    #[error("schema mismatch: {message}")]
+    SchemaMismatch { message: String },
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

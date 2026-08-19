@@ -186,10 +186,10 @@ fn cohort_import_distinct_columns() {
     }
 }
 
-/// Positions with no bigWig coverage import as 0 ("no coverage" = 0 for
-/// coverage/percent tracks): `from_bigwig` creates the track with a 0.0 fill.
+/// Positions with no bigWig coverage import as `NaN`: the format has no value
+/// there, and `from_bigwig` creates the track with the `float32` NaN fill.
 #[test]
-fn uncovered_positions_import_as_zero() {
+fn uncovered_positions_import_as_nan() {
     let dir = TempDir::new().unwrap();
     // Only [0, 100) covered; the rest of the 3_000 bp contig is gaps.
     let bw = common::write_bigwig(
@@ -226,8 +226,8 @@ fn uncovered_positions_import_as_zero() {
         .unwrap();
     assert!(head.iter().all(|v| *v == 9.0), "covered head must be 9.0");
 
-    // Everything past coverage reads back as 0, including a fully-uncovered tail
-    // chunk.
+    // Everything past coverage reads back as NaN, including a fully-uncovered
+    // tail chunk.
     let tail = track
         .read_region::<f32>(&Region {
             contig: cid,
@@ -236,7 +236,7 @@ fn uncovered_positions_import_as_zero() {
         })
         .unwrap();
     assert!(
-        tail.iter().all(|v| *v == 0.0),
-        "uncovered positions must be 0"
+        tail.iter().all(|v| v.is_nan()),
+        "uncovered positions must be NaN"
     );
 }

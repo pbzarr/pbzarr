@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 import json
 import os
-import warnings
 from typing import TypeAlias
 
 from . import _native
@@ -49,6 +48,9 @@ def _source(value: object) -> tuple[str, str | None]:
     raise TypeError("each source must be a path or an exact (path, column_label) tuple")
 
 
+_SOURCE_SUFFIXES = (".d4", ".bw", ".bigwig", ".bed", ".bed.gz", ".bam", ".cram")
+
+
 def _sources(values: Source | Iterable[Source]) -> list[tuple[str, str | None]]:
     if _is_pathlike(values):
         normalized = [_source(values)]
@@ -58,6 +60,11 @@ def _sources(values: Source | Iterable[Source]) -> list[tuple[str, str | None]]:
         and _is_pathlike(values[0])
         and isinstance(values[1], str)
     ):
+        if values[1].lower().endswith(_SOURCE_SUFFIXES):
+            raise ValueError(
+                f"source label {values[1]!r} looks like a source file; pass a"
+                " list to import multiple sources, or rename the label"
+            )
         normalized = [_source(values)]
     else:
         try:
@@ -108,6 +115,12 @@ def create_store(destination: PathLike, /) -> None:
     return _native.create_store(destination_path)
 
 
+def _scales(scales: Sequence[int] | None) -> list[int] | None:
+    if scales is None:
+        return None
+    return [int(factor) for factor in scales]
+
+
 def import_d4(
     destination: PathLike,
     track: str,
@@ -117,10 +130,18 @@ def import_d4(
     workers: int | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
+    shard_size: int | None = None,
+    shard_column_size: int | None = None,
     progress: bool = False,
     codecs: list | dict | None = None,
-) -> None:
-    """Import one or more D4 sources into an existing PBZ collection."""
+    scales: Sequence[int] | None = None,
+) -> dict[str, int]:
+    """Import one or more D4 sources into an existing PBZ collection.
+
+    `scales=` builds a multiscale pyramid on the new track with the given
+    downsampling factors; `None` or empty builds no pyramid. Returns the
+    import report dict.
+    """
     destination_path = _path(destination, "destination")
     normalized_sources = _sources(sources)
     _require_collection(destination_path)
@@ -132,8 +153,11 @@ def import_d4(
         workers,
         chunk_size,
         column_chunk_size,
+        shard_size,
+        shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
+        scales=_scales(scales),
     )
 
 
@@ -146,10 +170,18 @@ def import_bigwig(
     workers: int | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
+    shard_size: int | None = None,
+    shard_column_size: int | None = None,
     progress: bool = False,
     codecs: list | dict | None = None,
-) -> None:
-    """Import one or more bigWig sources into an existing PBZ collection."""
+    scales: Sequence[int] | None = None,
+) -> dict[str, int]:
+    """Import one or more bigWig sources into an existing PBZ collection.
+
+    `scales=` builds a multiscale pyramid on the new track with the given
+    downsampling factors; `None` or empty builds no pyramid. Returns the
+    import report dict.
+    """
     destination_path = _path(destination, "destination")
     normalized_sources = _sources(sources)
     _require_collection(destination_path)
@@ -161,81 +193,105 @@ def import_bigwig(
         workers,
         chunk_size,
         column_chunk_size,
+        shard_size,
+        shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
+        scales=_scales(scales),
     )
+
+
+def _bed_selector(value: object) -> str:
+    """Normalize a BED column selector: a header name, or a 1-based number."""
+    if isinstance(value, bool):
+        raise TypeError("BED column selectors must be header names or 1-based integers")
+    if isinstance(value, int):
+        if value < 1:
+            raise ValueError(f"BED column selectors are 1-based; got {value}")
+        return str(value)
+    if isinstance(value, str):
+        if not value:
+            raise ValueError("BED column selector must not be empty")
+        return value
+    raise TypeError("BED column selectors must be header names or 1-based integers")
 
 
 def import_bed(
     destination: PathLike,
-    track: str,
     sources: Source | Iterable[Source],
     *,
-    column: str,
-    dtype: str,
     genome: PathLike,
+    schema: Mapping[str | int, str | None] | None = None,
+    track: str | None = None,
+    column: str | int | None = None,
+    dtype: str | None = None,
     column_dim: str | None = None,
-    workers: int | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
-    progress: bool = False,
+    shard_size: int | None = None,
+    shard_column_size: int | None = None,
     codecs: list | dict | None = None,
-) -> None:
-    """Import one column from one or more BED sources into a PBZ collection."""
+    workers: int | None = None,
+    progress: bool = False,
+    scales: Sequence[int] | None = None,
+) -> dict[str, int]:
+    """Import tabix-indexed BED sources into an existing PBZ collection.
+
+    The call has three forms, matching `pbz import bed`:
+
+    - `column=` selects one BED column (a header name, or a 1-based column
+      number) and imports it as one track. `track=` names the track;
+      it defaults to the column name. `dtype=` skips inference.
+    - `schema=` maps BED column selectors to dtype strings and imports one
+      track per entry, named by its selector. A `None` dtype is inferred
+      across every source. `schema=` conflicts with `track=`, `column=`,
+      and `dtype=`.
+    - With none of those, BED3 input imports a bool presence track and
+      headerless BED4 one value track (both need `track=`). Headered input
+      imports every value column: one wide track when a single source has
+      `track=` set, else one track per column.
+
+    Output is 2D when there are several sources, or when one track holds
+    several BED columns. Every 2D output requires `column_dim=`.
+    `scales=` builds a multiscale pyramid on each new track with the given
+    downsampling factors; `None` or empty builds no pyramid.
+    Returns the import report dict.
+    """
     destination_path = _path(destination, "destination")
     normalized_sources = _sources(sources)
     genome_path = _path(genome, "genome")
+    schema_entries = None
+    if schema is not None:
+        if track is not None or column is not None or dtype is not None:
+            raise ValueError("schema= conflicts with track=, column=, and dtype=")
+        if not isinstance(schema, Mapping):
+            raise TypeError("schema must be a mapping of BED column selectors to dtypes")
+        if not schema:
+            raise ValueError("schema must not be empty")
+        schema_entries = []
+        for key, value in schema.items():
+            if value is not None and not isinstance(value, str):
+                raise TypeError("schema dtypes must be strings or None")
+            schema_entries.append((_bed_selector(key), value))
+    normalized_column = _bed_selector(column) if column is not None else None
     _require_collection(destination_path)
     return _native.import_bed(
         destination_path,
-        track,
         normalized_sources,
-        column,
-        dtype,
         genome_path,
+        schema_entries,
+        track,
+        normalized_column,
+        dtype,
         column_dim,
         workers,
         chunk_size,
         column_chunk_size,
-        progress,
-        codecs=_codecs_json(codecs),
-    )
-
-
-def import_bed_multi(
-    destination: PathLike,
-    bed: PathLike,
-    columns: Mapping[str, str],
-    *,
-    genome: PathLike,
-    workers: int | None = None,
-    chunk_size: int | None = None,
-    shard_size: int | None = None,
-    progress: bool = False,
-    codecs: list | dict | None = None,
-) -> None:
-    """Import an ordered mapping of BED columns as scalar tracks."""
-    destination_path = _path(destination, "destination")
-    bed_path = _path(bed, "bed")
-    genome_path = _path(genome, "genome")
-    if not isinstance(columns, Mapping):
-        raise TypeError("columns must be a mapping of track names to dtypes")
-    items = list(columns.items())
-    if not items:
-        raise ValueError("columns must not be empty")
-    if any(not isinstance(name, str) or not isinstance(dtype, str) for name, dtype in items):
-        raise TypeError("column names and dtypes must be strings")
-    _require_collection(destination_path)
-    return _native.import_bed_multi(
-        destination_path,
-        bed_path,
-        items,
-        genome_path,
-        workers,
-        chunk_size,
         shard_size,
+        shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
+        scales=_scales(scales),
     )
 
 
@@ -258,7 +314,9 @@ def import_bam(
     shard_size: int | None = None,
     shard_column_size: int | None = None,
     workers: int | None = None,
+    progress: bool = False,
     codecs: list | dict | None = None,
+    scales: Sequence[int] | None = None,
 ) -> dict[str, int]:
     """Import per-base depth or composition counts from BAM/CRAM sources.
 
@@ -272,7 +330,9 @@ def import_bam(
     collapsing only PROPER_PAIR-flagged overlapping mates to one count;
     `"all"` matches riker/samtools-mpileup-style unconditional dedup of any
     overlapping mate pair; `"none"` disables dedup, double-counting every
-    overlapping pair's shared span. Returns the import report dict.
+    overlapping pair's shared span. `scales=` builds a multiscale pyramid on
+    each new track with the given downsampling factors; `None` or empty
+    builds no pyramid. Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
     if overlap not in ("proper", "all", "none"):
@@ -309,42 +369,7 @@ def import_bam(
         column_chunk_size,
         shard_size,
         shard_column_size,
+        progress,
         codecs=_codecs_json(codecs),
-    )
-
-
-def stack(
-    sources: Source | Iterable[Source],
-    destination: PathLike,
-    *,
-    tracks: Sequence[str] | None = None,
-    column_dim: str | None = None,
-    column_chunk_size: int | None = None,
-    workers: int | None = None,
-) -> None:
-    """Stack scalar tracks from PBZ collections into a new cohort collection.
-
-    .. deprecated::
-        ``stack`` is being removed; import all samples in one cohort import
-        instead.
-    """
-    warnings.warn(
-        "pbzarr.stack is deprecated and will be removed; "
-        "import all samples in one cohort import instead",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    normalized_sources = _sources(sources)
-    destination_path = _path(destination, "destination")
-    _require_absent(destination_path)
-    for source_path, _ in normalized_sources:
-        _require_collection(source_path)
-    normalized_tracks = list(tracks) if tracks is not None else None
-    return _native.stack(
-        normalized_sources,
-        destination_path,
-        normalized_tracks,
-        column_dim,
-        column_chunk_size,
-        workers,
+        scales=_scales(scales),
     )

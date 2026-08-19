@@ -1,43 +1,47 @@
-use ndarray::ArrayViewMut2;
-use pbzarr::import::{Config, run_pipeline};
-use pbzarr::io::Dtype;
-use pbzarr::io::ValueReader;
+use pbzarr::import::{Import, PipelineOptions};
+use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
 use tempfile::TempDir;
 
 /// A reader that fills every position with a constant value.
 struct ConstReader {
     genome: Genome,
+    schema: OutputSchema,
     val: u32,
 }
 
-impl ValueReader for ConstReader {
-    type Item = u32;
+impl ConstReader {
+    fn new(genome: Genome, val: u32) -> Self {
+        Self {
+            genome,
+            schema: OutputSchema::single("value", Dtype::U32),
+            val,
+        }
+    }
+}
 
+impl ValueReader for ConstReader {
     fn contigs(&self) -> &Genome {
         &self.genome
     }
 
-    fn n_fields(&self) -> usize {
-        1
+    fn output_schema(&self) -> &OutputSchema {
+        &self.schema
     }
 
     fn read_into(
-        &self,
-        _contig_name: &str,
+        &mut self,
+        _contig: &str,
         _start: u64,
         _end: u64,
-        mut dst: ArrayViewMut2<'_, u32>,
+        outputs: &mut [OutputSinkMut<'_>],
     ) -> pbzarr::io::Result<()> {
-        dst.fill(self.val);
+        outputs[0].as_u32_mut()?.fill(self.val);
         Ok(())
     }
 
     fn fork(&self) -> pbzarr::io::Result<Self> {
-        Ok(Self {
-            genome: self.genome.clone(),
-            val: self.val,
-        })
+        Ok(Self::new(self.genome.clone(), self.val))
     }
 }
 
@@ -63,18 +67,17 @@ fn pipeline_writes_constants_into_cohort_track() {
         .unwrap();
 
     let readers = vec![
-        ConstReader {
-            genome: genome.clone(),
-            val: 7,
-        },
-        ConstReader {
-            genome: genome.clone(),
-            val: 13,
-        },
+        ConstReader::new(genome.clone(), 7),
+        ConstReader::new(genome.clone(), 13),
     ];
 
     let track = store.track("depth").unwrap();
-    let report = run_pipeline::<u32, _>(track, readers, &Config::default()).unwrap();
+    let report = Import::from_readers(readers)
+        .unwrap()
+        .into_track(track)
+        .readers_as_columns()
+        .run()
+        .unwrap();
     assert!(report.bytes_written > 0);
     assert_eq!(report.contigs_written, 1);
 
@@ -118,20 +121,18 @@ fn cohort_pipeline_tiles_columns_with_multiple_workers() {
 
     let readers = [7, 8, 9, 10]
         .into_iter()
-        .map(|val| ConstReader {
-            genome: genome.clone(),
-            val,
-        })
+        .map(|val| ConstReader::new(genome.clone(), val))
         .collect();
-    let report = run_pipeline::<u32, _>(
-        store.track("depth").unwrap(),
-        readers,
-        &Config {
+    let report = Import::from_readers(readers)
+        .unwrap()
+        .into_track(store.track("depth").unwrap())
+        .readers_as_columns()
+        .options(PipelineOptions {
             workers: 2,
-            ..Config::default()
-        },
-    )
-    .unwrap();
+            ..PipelineOptions::default()
+        })
+        .run()
+        .unwrap();
 
     assert_eq!(report.tasks_completed, 4);
     let region = Region {
@@ -166,13 +167,14 @@ fn pipeline_writes_constants_into_scalar_track() {
         .create_track("mask", genome.clone(), TrackConfig::new(Dtype::U32))
         .unwrap();
 
-    let readers = vec![ConstReader {
-        genome: genome.clone(),
-        val: 42,
-    }];
+    let readers = vec![ConstReader::new(genome.clone(), 42)];
 
     let track = store.track("mask").unwrap();
-    let report = run_pipeline::<u32, _>(track, readers, &Config::default()).unwrap();
+    let report = Import::from_readers(readers)
+        .unwrap()
+        .into_track(track)
+        .run()
+        .unwrap();
     assert!(report.bytes_written > 0);
 
     let region = Region {
@@ -190,29 +192,37 @@ fn pipeline_writes_constants_into_scalar_track() {
 }
 
 /// Fills each position with `contig_index * 1_000_000 + local_position`, so a
-/// read-back reveals whether a task handed the reader the right contig name and
+/// read-back reveals whether a span handed the reader the right contig name and
 /// local range.
 struct RampReader {
     genome: Genome,
+    schema: OutputSchema,
+}
+
+impl RampReader {
+    fn new(genome: Genome) -> Self {
+        Self {
+            genome,
+            schema: OutputSchema::single("value", Dtype::U32),
+        }
+    }
 }
 
 impl ValueReader for RampReader {
-    type Item = u32;
-
     fn contigs(&self) -> &Genome {
         &self.genome
     }
 
-    fn n_fields(&self) -> usize {
-        1
+    fn output_schema(&self) -> &OutputSchema {
+        &self.schema
     }
 
     fn read_into(
-        &self,
+        &mut self,
         contig_name: &str,
         start: u64,
         end: u64,
-        mut dst: ArrayViewMut2<'_, u32>,
+        outputs: &mut [OutputSinkMut<'_>],
     ) -> pbzarr::io::Result<()> {
         let cid = self
             .genome
@@ -220,21 +230,20 @@ impl ValueReader for RampReader {
             .iter()
             .position(|c| c.name == contig_name)
             .unwrap() as u32;
+        let dst = outputs[0].as_u32_mut()?;
         for (row, pos) in (start..end).enumerate() {
-            dst[[row, 0]] = cid * 1_000_000 + pos as u32;
+            dst[row] = cid * 1_000_000 + pos as u32;
         }
         Ok(())
     }
 
     fn fork(&self) -> pbzarr::io::Result<Self> {
-        Ok(Self {
-            genome: self.genome.clone(),
-        })
+        Ok(Self::new(self.genome.clone()))
     }
 }
 
 #[test]
-fn pipeline_task_straddling_contig_boundary_maps_local_coords() {
+fn pipeline_span_straddling_contig_boundary_maps_local_coords() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("r.pbz");
     let genome = Genome::new(vec![
@@ -260,11 +269,13 @@ fn pipeline_task_straddling_contig_boundary_maps_local_coords() {
         )
         .unwrap();
 
-    let readers = vec![RampReader {
-        genome: genome.clone(),
-    }];
+    let readers = vec![RampReader::new(genome.clone())];
     let track = store.track("depth").unwrap();
-    run_pipeline::<u32, _>(track, readers, &Config::default()).unwrap();
+    Import::from_readers(readers)
+        .unwrap()
+        .into_track(track)
+        .run()
+        .unwrap();
 
     for (name, cid, len) in [("chr1", 0u32, 2_000usize), ("chr2", 1, 1_500)] {
         let region = Region {
@@ -311,12 +322,14 @@ fn pipeline_spans_multiple_contigs() {
         )
         .unwrap();
 
-    let readers = vec![ConstReader {
-        genome: genome.clone(),
-        val: 99,
-    }];
+    let readers = vec![ConstReader::new(genome.clone(), 99)];
     let track = store.track("depth").unwrap();
-    let report = run_pipeline::<u32, _>(track, readers, &Config::default()).unwrap();
+    let report = Import::from_readers(readers)
+        .unwrap()
+        .into_track(track)
+        .readers_as_columns()
+        .run()
+        .unwrap();
     assert_eq!(report.contigs_written, 2);
 
     for (name, len) in [("chr1", 2_000usize), ("chr2", 1_500)] {

@@ -5,9 +5,9 @@
 
 mod common;
 
-use ndarray::Array2;
+use ndarray::Array1;
 use pbzarr::Genome;
-use pbzarr::io::ValueReader;
+use pbzarr::io::{OutputSinkMut, ValueReader};
 use pbzarr_readers::BigWigReader;
 use tempfile::TempDir;
 
@@ -17,7 +17,7 @@ fn open_missing_file_errors() {
 }
 
 #[test]
-fn open_reports_contigs_and_n_fields() {
+fn open_reports_contigs_and_schema() {
     let dir = TempDir::new().unwrap();
     let bw = common::write_bigwig(
         dir.path(),
@@ -35,7 +35,7 @@ fn open_reports_contigs_and_n_fields() {
     let c2 = genome.get(genome.id("chr2").unwrap()).unwrap();
     assert_eq!(c1.length, 1000);
     assert_eq!(c2.length, 500);
-    assert_eq!(reader.n_fields(), 1);
+    assert_eq!(reader.output_schema().len(), 1);
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn contigs_reads_header_pairs() {
 }
 
 #[test]
-fn read_into_fills_values_and_zero_gaps() {
+fn read_into_fills_values_and_nan_gaps() {
     let dir = TempDir::new().unwrap();
     // Cover [0, 20) with 7.5; [20, 1000) is left uncovered (a gap).
     let bw = common::write_bigwig(
@@ -70,20 +70,19 @@ fn read_into_fills_values_and_zero_gaps() {
         false,
     );
 
-    let reader = BigWigReader::open(&bw).unwrap();
+    let mut reader = BigWigReader::open(&bw).unwrap();
     let (start, end) = (10u64, 30u64);
-    let mut buf: Array2<f32> = Array2::zeros(((end - start) as usize, reader.n_fields()));
-    reader
-        .read_into("chr1", start, end, buf.view_mut())
-        .unwrap();
+    let mut buf: Array1<f32> = Array1::zeros((end - start) as usize);
+    let mut outputs = [OutputSinkMut::F32(buf.view_mut())];
+    reader.read_into("chr1", start, end, &mut outputs).unwrap();
 
-    assert_eq!(buf.shape(), &[20, 1]);
-    // Positions [10, 20) carry 7.5; [20, 30) are gaps -> 0.
+    assert_eq!(buf.len(), 20);
+    // Positions [10, 20) carry 7.5; [20, 30) are gaps -> NaN.
     for i in 0..10 {
-        assert_eq!(buf[[i, 0]], 7.5, "pos {}", start as usize + i);
+        assert_eq!(buf[i], 7.5, "pos {}", start as usize + i);
     }
     for i in 10..20 {
-        assert_eq!(buf[[i, 0]], 0.0, "pos {} should be 0", start as usize + i);
+        assert!(buf[i].is_nan(), "pos {} should be NaN", start as usize + i);
     }
 }
 
@@ -98,10 +97,11 @@ fn empty_region_is_noop() {
         false,
     );
 
-    let reader = BigWigReader::open(&bw).unwrap();
+    let mut reader = BigWigReader::open(&bw).unwrap();
     // 0-row view: contract is just "don't crash".
-    let mut buf: Array2<f32> = Array2::zeros((0, 1));
-    reader.read_into("chr1", 50, 50, buf.view_mut()).unwrap();
+    let mut buf: Array1<f32> = Array1::zeros(0);
+    let mut outputs = [OutputSinkMut::F32(buf.view_mut())];
+    reader.read_into("chr1", 50, 50, &mut outputs).unwrap();
 }
 
 #[test]
@@ -114,9 +114,10 @@ fn unknown_contig_errors() {
         &[("chr1", 0, 100, 3.0)],
         false,
     );
-    let reader = BigWigReader::open(&bw).unwrap();
-    let mut buf: Array2<f32> = Array2::zeros((10, 1));
-    assert!(reader.read_into("chrX", 0, 10, buf.view_mut()).is_err());
+    let mut reader = BigWigReader::open(&bw).unwrap();
+    let mut buf: Array1<f32> = Array1::zeros(10);
+    let mut outputs = [OutputSinkMut::F32(buf.view_mut())];
+    assert!(reader.read_into("chrX", 0, 10, &mut outputs).is_err());
 }
 
 #[test]
@@ -130,13 +131,15 @@ fn fork_produces_independent_reader() {
         false,
     );
 
-    let a = BigWigReader::open(&bw).unwrap();
-    let b = a.fork().unwrap();
+    let mut a = BigWigReader::open(&bw).unwrap();
+    let mut b = a.fork().unwrap();
 
-    let mut buf_a: Array2<f32> = Array2::zeros((8, 1));
-    let mut buf_b: Array2<f32> = Array2::zeros((8, 1));
-    a.read_into("chr1", 0, 8, buf_a.view_mut()).unwrap();
-    b.read_into("chr1", 0, 8, buf_b.view_mut()).unwrap();
+    let mut buf_a: Array1<f32> = Array1::zeros(8);
+    let mut buf_b: Array1<f32> = Array1::zeros(8);
+    a.read_into("chr1", 0, 8, &mut [OutputSinkMut::F32(buf_a.view_mut())])
+        .unwrap();
+    b.read_into("chr1", 0, 8, &mut [OutputSinkMut::F32(buf_b.view_mut())])
+        .unwrap();
 
     assert_eq!(buf_a, buf_b);
     assert!(buf_a.iter().all(|&v| v == 42.0));

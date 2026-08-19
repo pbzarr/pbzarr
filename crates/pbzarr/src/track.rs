@@ -418,15 +418,35 @@ impl Track {
     }
 
     /// Flat base offset of a region's contig on the `values` position axis.
+    ///
+    /// Validates the region against its contig: the range must be non-empty
+    /// and `region.end` must not exceed the contig length. Without this check
+    /// a too-long region would silently read or write the next contig's data.
     fn base_of(&self, region: &Region) -> Result<u64> {
-        let idx = region.contig.as_usize();
-        let offsets = self.genome.offsets();
-        offsets
-            .get(idx)
-            .map(|b| *b as u64)
+        let contig = self
+            .genome
+            .get(region.contig)
             .ok_or_else(|| PbzError::InvalidRegion {
                 message: format!("unknown contig id {:?}", region.contig),
-            })
+            })?;
+        if region.start >= region.end {
+            return Err(PbzError::InvalidRegion {
+                message: format!(
+                    "empty range {}..{} on contig {:?} (length {})",
+                    region.start, region.end, contig.name, contig.length
+                ),
+            });
+        }
+        if region.end > contig.length {
+            return Err(PbzError::InvalidRegion {
+                message: format!(
+                    "range {}..{} extends past contig {:?} (length {})",
+                    region.start, region.end, contig.name, contig.length
+                ),
+            });
+        }
+        let offsets = self.genome.offsets();
+        Ok(offsets[region.contig.as_usize()] as u64)
     }
 
     /// Read an arbitrary region. Returns an `ArrayD<T>` whose rank matches the

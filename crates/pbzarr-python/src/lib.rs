@@ -1,7 +1,7 @@
 //! PyO3 bindings for pbzarr: `import_d4`, `import_bigwig`, `import_bed`, and
 //! `import_bam`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -14,12 +14,11 @@ use pbzarr::PbzStore;
 use pbzarr::import::progress::make_sink;
 use pbzarr::import::{Config, Report, Source};
 use pbzarr::io::Dtype;
-#[allow(deprecated)]
-use pbzarr::{StackConfig, stack as rs_stack};
 use pbzarr_readers::{
-    BedColumnSpec, BedSchema, DepthFilter, ImportMode, OverlapMode, column_index_by_name,
-    from_bam as rs_from_bam, from_bed as rs_from_bed, from_bed_multi as rs_from_bed_multi,
-    from_bigwig as rs_from_bigwig, from_d4 as rs_from_d4,
+    BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
+    OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam as rs_from_bam,
+    from_bed_matrix as rs_from_bed_matrix, from_bigwig as rs_from_bigwig, from_d4 as rs_from_d4,
+    infer_bed_dtypes_for_sources, plan_bed_schema, read_bed_layout,
 };
 
 create_exception!(_native, PbzError, PyRuntimeError);
@@ -49,7 +48,7 @@ fn apply_codecs_kwarg(
 /// The track is created from the source headers; it must NOT already exist.
 /// d4 stores depths as `int32` natively, so import is zero-conversion.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false, codecs=None))]
+#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_d4(
     py: Python<'_>,
@@ -60,10 +59,13 @@ fn import_d4(
     workers: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
+    shard_size: Option<usize>,
+    shard_column_size: Option<usize>,
     progress: bool,
     codecs: Option<String>,
-) -> PyResult<()> {
-    py.allow_threads(|| {
+    scales: Option<Vec<u64>>,
+) -> PyResult<Py<PyAny>> {
+    let report = py.allow_threads(|| {
         let mut store =
             PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
         let d4_sources: Vec<Source> = sources
@@ -86,30 +88,40 @@ fn import_d4(
         if let Some(c) = column_chunk_size {
             config.column_chunk_size = Some(c);
         }
+        if let Some(s) = shard_size {
+            config.shard_size = Some(s);
+        }
+        if let Some(s) = shard_column_size {
+            config.shard_column_size = Some(s);
+        }
         if progress {
             config.progress = Some(make_sink(&track));
         }
+        config.scales = scales.unwrap_or_default();
         apply_codecs_kwarg(
             &mut config,
             codecs.as_deref(),
             &[
                 ("chunk_size", chunk_size.is_some()),
                 ("column_chunk_size", column_chunk_size.is_some()),
+                ("shard_size", shard_size.is_some()),
+                ("shard_column_size", shard_column_size.is_some()),
             ],
         )?;
         rs_from_d4(&mut store, &track, &d4_sources, config)
-            .map_err(|e| PbzError::new_err(format!("{e}")))?;
-        Ok(())
-    })
+            .map_err(|e| PbzError::new_err(format!("{e}")))
+    })?;
+    report_to_dict(py, &report)
 }
 
 /// Bulk-import one or more bigWig files into a new `float32` track.
 ///
 /// The track is created from the source headers; it must NOT already exist.
-/// bigWig stores values as `float32` natively. Positions not covered by any
-/// bigWig become `0.0`, and the track is created with a `0.0` fill value.
+/// bigWig stores values as `float32` natively. A bigWig holds no value at an
+/// uncovered base, so uncovered positions read back as `NaN` and reductions
+/// skip them.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false, codecs=None))]
+#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bigwig(
     py: Python<'_>,
@@ -120,10 +132,13 @@ fn import_bigwig(
     workers: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
+    shard_size: Option<usize>,
+    shard_column_size: Option<usize>,
     progress: bool,
     codecs: Option<String>,
-) -> PyResult<()> {
-    py.allow_threads(|| {
+    scales: Option<Vec<u64>>,
+) -> PyResult<Py<PyAny>> {
+    let report = py.allow_threads(|| {
         let mut store =
             PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
         let bw_sources: Vec<Source> = sources
@@ -146,48 +161,166 @@ fn import_bigwig(
         if let Some(c) = column_chunk_size {
             config.column_chunk_size = Some(c);
         }
+        if let Some(s) = shard_size {
+            config.shard_size = Some(s);
+        }
+        if let Some(s) = shard_column_size {
+            config.shard_column_size = Some(s);
+        }
         if progress {
             config.progress = Some(make_sink(&track));
         }
+        config.scales = scales.unwrap_or_default();
         apply_codecs_kwarg(
             &mut config,
             codecs.as_deref(),
             &[
                 ("chunk_size", chunk_size.is_some()),
                 ("column_chunk_size", column_chunk_size.is_some()),
+                ("shard_size", shard_size.is_some()),
+                ("shard_column_size", shard_column_size.is_some()),
             ],
         )?;
         rs_from_bigwig(&mut store, &track, &bw_sources, config)
-            .map_err(|e| PbzError::new_err(format!("{e}")))?;
-        Ok(())
-    })
+            .map_err(|e| PbzError::new_err(format!("{e}")))
+    })?;
+    report_to_dict(py, &report)
 }
 
-/// Import one column from N bgzipped, tabix-indexed BED files into a track.
+/// Build a `BedSchema` from `(selector, dtype)` entries. An all-digit selector
+/// is a 1-based BED column number; anything else is a header name. A numeric
+/// entry's track takes the header name at that column, or `field{N}` for
+/// headerless input. `track_override` (the single-column form) renames the one
+/// output track. `None` dtypes are inferred across every source.
+fn build_bed_schema(
+    sources: &[Source],
+    entries: &[(String, Option<String>)],
+    track_override: Option<&str>,
+) -> PyResult<BedSchema> {
+    let first = sources
+        .first()
+        .ok_or_else(|| PbzError::new_err("bed import: no sources"))?;
+    let mut header: Option<Option<Vec<String>>> = None; // first source's header, read once
+    let mut specs = Vec::with_capacity(entries.len());
+    let mut file_cols = Vec::with_capacity(entries.len());
+    for (selector, dtype) in entries {
+        let is_index = !selector.is_empty() && selector.bytes().all(|b| b.is_ascii_digit());
+        let (selector, file_col, default_track) = if is_index {
+            let number: usize = selector.parse().map_err(|_| {
+                PbzError::new_err(format!(
+                    "bed import: numeric BED-column selector {selector:?} is out of range"
+                ))
+            })?;
+            let Some(index) = number.checked_sub(1) else {
+                return Err(PbzError::new_err(
+                    "bed import: BED column selectors are 1-based; 0 selects nothing",
+                ));
+            };
+            if header.is_none() {
+                header = Some(
+                    read_bed_layout(&first.path)
+                        .map_err(|e| PbzError::new_err(format!("{e}")))?
+                        .header,
+                );
+            }
+            let track = header
+                .as_ref()
+                .and_then(|names| names.as_ref())
+                .and_then(|names| names.get(index))
+                .cloned()
+                .unwrap_or_else(|| format!("field{number}"));
+            (ColumnSelector::Index(index), index, track)
+        } else {
+            let index = column_index_by_name(&first.path, selector)
+                .map_err(|e| PbzError::new_err(format!("{e}")))?;
+            (
+                ColumnSelector::Name(selector.clone()),
+                index,
+                selector.clone(),
+            )
+        };
+        file_cols.push(file_col);
+        let dtype = dtype
+            .as_deref()
+            .map(Dtype::from_str)
+            .transpose()
+            .map_err(|e| PbzError::new_err(format!("{e}")))?;
+        specs.push((selector, dtype, default_track));
+    }
+
+    let missing: Vec<usize> = specs
+        .iter()
+        .zip(&file_cols)
+        .filter(|((_, dtype, _), _)| dtype.is_none())
+        .map(|(_, file_col)| *file_col)
+        .collect();
+    let mut inferred = if missing.is_empty() {
+        Vec::new()
+    } else {
+        infer_bed_dtypes_for_sources(sources, &missing, InferRows::Sample(1_000))
+            .map_err(|e| PbzError::new_err(format!("{e}")))?
+    }
+    .into_iter();
+
+    let columns = specs
+        .into_iter()
+        .map(|(selector, dtype, default_track)| {
+            let dtype = match dtype {
+                Some(dtype) => dtype,
+                None => inferred.next().ok_or_else(|| {
+                    PbzError::new_err("bed import: dtype inference returned too few dtypes")
+                })?,
+            };
+            Ok(BedColumnSpec {
+                selector,
+                dtype,
+                track_name: Some(track_override.map(str::to_owned).unwrap_or(default_track)),
+                description: None,
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(BedSchema(columns))
+}
+
+/// Import bgzipped, tabix-indexed BED sources into new tracks. `genome` is a
+/// .fai / chrom.sizes path (BED files carry no contig lengths).
 ///
-/// `column` is a header name; `dtype` is one of "int32" | "float32" | "bool".
-/// `genome` is a .fai / chrom.sizes path (BED files carry no contig lengths).
+/// Three forms, mirroring `pbz import bed`:
+/// - `column` (a header name, or an all-digit 1-based BED column number)
+///   imports that one BED column into one track, named by `track` when given.
+///   `dtype` overrides inference.
+/// - `schema` entries `(selector, dtype)` import one track per entry; a `None`
+///   dtype is inferred across every source.
+/// - Neither: BED3 imports a bool presence track and headerless BED4 one value
+///   track (both need `track`); headered input imports every value column,
+///   as one wide track when a single source has `track` set, else as one
+///   track per column.
+///
+/// Any 2D output (several sources, or a wide track) requires `column_dim`.
+/// Returns the import report dict.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column, dtype, genome, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, progress=false, codecs=None))]
+#[pyo3(signature = (store_path, sources, genome, schema=None, track=None, column=None, dtype=None, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bed(
     py: Python<'_>,
     store_path: String,
-    track: String,
     sources: Vec<(String, Option<String>)>,
-    column: String,
-    dtype: String,
     genome: String,
+    schema: Option<Vec<(String, Option<String>)>>,
+    track: Option<String>,
+    column: Option<String>,
+    dtype: Option<String>,
     column_dim: Option<String>,
     workers: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
+    shard_size: Option<usize>,
+    shard_column_size: Option<usize>,
     progress: bool,
     codecs: Option<String>,
-) -> PyResult<()> {
-    py.allow_threads(|| {
-        let mut store =
-            PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+    scales: Option<Vec<u64>>,
+) -> PyResult<Py<PyAny>> {
+    let report = py.allow_threads(|| {
         let bed_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -195,12 +328,9 @@ fn import_bed(
                 column_label: column_label.clone(),
             })
             .collect();
-        let (first, _) = bed_sources
-            .first()
-            .map(|s| (&s.path, ()))
-            .ok_or_else(|| PbzError::new_err("bed import: no sources"))?;
-        let column_idx =
-            column_index_by_name(first, &column).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        if bed_sources.is_empty() {
+            return Err(PbzError::new_err("bed import: no sources"));
+        }
         let genome = Genome::from_fai(&genome).map_err(|e| PbzError::new_err(format!("{e}")))?;
 
         let mut config = Config {
@@ -216,102 +346,75 @@ fn import_bed(
         if let Some(c) = column_chunk_size {
             config.column_chunk_size = Some(c);
         }
-        if progress {
-            config.progress = Some(make_sink(&track));
+        if let Some(s) = shard_size {
+            config.shard_size = Some(s);
         }
+        if let Some(s) = shard_column_size {
+            config.shard_column_size = Some(s);
+        }
+        if progress {
+            config.progress = Some(make_sink(track.as_deref().unwrap_or("bed")));
+        }
+        config.scales = scales.unwrap_or_default();
         apply_codecs_kwarg(
             &mut config,
             codecs.as_deref(),
             &[
                 ("chunk_size", chunk_size.is_some()),
                 ("column_chunk_size", column_chunk_size.is_some()),
+                ("shard_size", shard_size.is_some()),
+                ("shard_column_size", shard_column_size.is_some()),
             ],
         )?;
-
-        match dtype.as_str() {
-            "int32" => {
-                rs_from_bed::<i32>(&mut store, &track, &bed_sources, column_idx, genome, config)
-            }
-            "float32" => {
-                rs_from_bed::<f32>(&mut store, &track, &bed_sources, column_idx, genome, config)
-            }
-            "bool" => {
-                rs_from_bed::<bool>(&mut store, &track, &bed_sources, column_idx, genome, config)
-            }
-            other => return Err(PbzError::new_err(format!("unsupported dtype {other:?}"))),
-        }
-        .map_err(|e| PbzError::new_err(format!("{e}")))?;
-        Ok(())
-    })
-}
-
-/// Single-pass, multi-column import of one tabix-indexed BED into N scalar
-/// tracks. `columns` is an ordered list of `(header_name, dtype)`; each becomes
-/// a track named after the column. `genome` is a .fai / chrom.sizes path.
-#[pyfunction]
-#[pyo3(signature = (store_path, bed_gz, columns, genome, workers=None, chunk_size=None, shard_size=None, progress=false, codecs=None))]
-#[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
-fn import_bed_multi(
-    py: Python<'_>,
-    store_path: String,
-    bed_gz: String,
-    columns: Vec<(String, String)>,
-    genome: String,
-    workers: Option<usize>,
-    chunk_size: Option<usize>,
-    shard_size: Option<usize>,
-    progress: bool,
-    codecs: Option<String>,
-) -> PyResult<()> {
-    py.allow_threads(|| {
-        if columns.is_empty() {
-            return Err(PbzError::new_err("bed multi import: no columns"));
-        }
         let mut store =
             PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
-        let genome = Genome::from_fai(&genome).map_err(|e| PbzError::new_err(format!("{e}")))?;
 
-        let parsed: Vec<(String, Dtype)> = columns
-            .iter()
-            .map(|(name, ds)| {
-                Dtype::from_str(ds)
-                    .map(|dt| (name.clone(), dt))
-                    .map_err(|e| PbzError::new_err(format!("column {name:?}: {e}")))
-            })
-            .collect::<PyResult<_>>()?;
-        let schema = BedSchema(
-            parsed
-                .iter()
-                .map(|(name, dt)| BedColumnSpec::named(name.clone(), *dt))
-                .collect(),
-        );
-
-        let mut config = Config::default();
-        if let Some(w) = workers {
-            config.workers = w;
+        let entries = match (schema, &column) {
+            (Some(_), Some(_)) => {
+                return Err(PbzError::new_err(
+                    "bed import: schema conflicts with track, column, and dtype",
+                ));
+            }
+            (Some(entries), None) => {
+                if track.is_some() || dtype.is_some() {
+                    return Err(PbzError::new_err(
+                        "bed import: schema conflicts with track, column, and dtype",
+                    ));
+                }
+                Some(entries)
+            }
+            (None, Some(column)) => Some(vec![(column.clone(), dtype.clone())]),
+            (None, None) => None,
+        };
+        match entries {
+            Some(entries) => {
+                let track_override = if column.is_some() {
+                    track.as_deref()
+                } else {
+                    None
+                };
+                let bed_schema = build_bed_schema(&bed_sources, &entries, track_override)?;
+                let plan = plan_bed_schema(&bed_sources, &bed_schema, &config)
+                    .map_err(|e| PbzError::new_err(format!("{e}")))?;
+                execute_bed_schema_plan(&mut store, plan, genome, config)
+                    .map_err(|e| PbzError::new_err(format!("{e}")))
+            }
+            None => {
+                let options = BedImportOptions {
+                    track: track.clone(),
+                    dtype: dtype
+                        .as_deref()
+                        .map(Dtype::from_str)
+                        .transpose()
+                        .map_err(|e| PbzError::new_err(format!("{e}")))?,
+                    ..BedImportOptions::default()
+                };
+                rs_from_bed_matrix(&mut store, &bed_sources, genome, &options, config)
+                    .map_err(|e| PbzError::new_err(format!("{e}")))
+            }
         }
-        if let Some(c) = chunk_size {
-            config.chunk_size = Some(c);
-        }
-        if let Some(s) = shard_size {
-            config.shard_size = Some(s);
-        }
-        if progress {
-            config.progress = Some(make_sink("bed-multi"));
-        }
-        apply_codecs_kwarg(
-            &mut config,
-            codecs.as_deref(),
-            &[
-                ("chunk_size", chunk_size.is_some()),
-                ("shard_size", shard_size.is_some()),
-            ],
-        )?;
-
-        rs_from_bed_multi(&mut store, Path::new(&bed_gz), &schema, genome, config)
-            .map_err(|e| PbzError::new_err(format!("{e}")))?;
-        Ok(())
-    })
+    })?;
+    report_to_dict(py, &report)
 }
 
 /// Turn a `Report` into the `dict` handed back to Python callers.
@@ -334,7 +437,7 @@ fn report_to_dict(py: Python<'_>, report: &Report) -> PyResult<Py<PyAny>> {
 /// overlapping mates are deduped), `"all"` (riker/samtools-mpileup-style
 /// unconditional dedup), or `"none"` (dedup disabled).
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), reference=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, codecs=None))]
+#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), reference=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bam(
     py: Python<'_>,
@@ -354,7 +457,9 @@ fn import_bam(
     column_chunk_size: Option<usize>,
     shard_size: Option<usize>,
     shard_column_size: Option<usize>,
+    progress: bool,
     codecs: Option<String>,
+    scales: Option<Vec<u64>>,
 ) -> PyResult<Py<PyAny>> {
     let mode = match mode.as_str() {
         "depth" => ImportMode::Depth,
@@ -411,6 +516,10 @@ fn import_bam(
         if let Some(s) = shard_column_size {
             config.shard_column_size = Some(s);
         }
+        if progress {
+            config.progress = Some(make_sink(&track));
+        }
+        config.scales = scales.unwrap_or_default();
         apply_codecs_kwarg(
             &mut config,
             codecs.as_deref(),
@@ -435,58 +544,6 @@ fn import_bam(
     report_to_dict(py, &report)
 }
 
-/// Combine single-sample stores into a fresh cohort store `out`.
-///
-/// `sources` is a list of `(store_path, label)`; `label=None` defaults to the
-/// store's filename stem. Each shared scalar track becomes a `(ΣL, N)` cohort
-/// track. All sources must share a genome; `tracks=None` stacks every track of
-/// the first source (each must exist in all sources).
-#[pyfunction]
-#[pyo3(signature = (sources, out, tracks=None, column_dim=None, column_chunk_size=None, workers=None))]
-#[allow(deprecated)]
-fn stack(
-    py: Python<'_>,
-    sources: Vec<(String, Option<String>)>,
-    out: String,
-    tracks: Option<Vec<String>>,
-    column_dim: Option<String>,
-    column_chunk_size: Option<usize>,
-    workers: Option<usize>,
-) -> PyResult<()> {
-    py.allow_threads(|| {
-        if sources.is_empty() {
-            return Err(PbzError::new_err("stack: no sources"));
-        }
-        let opened: Vec<(PbzStore, String)> = sources
-            .iter()
-            .map(|(path, label)| {
-                let store = PbzStore::open(path).map_err(|e| PbzError::new_err(format!("{e}")))?;
-                let label = label.clone().unwrap_or_else(|| {
-                    Path::new(path)
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.clone())
-                });
-                Ok((store, label))
-            })
-            .collect::<PyResult<_>>()?;
-
-        let mut out_store =
-            PbzStore::create(&out).map_err(|e| PbzError::new_err(format!("{e}")))?;
-        let mut config = StackConfig {
-            tracks,
-            column_dim,
-            column_chunk_size,
-            ..StackConfig::default()
-        };
-        if let Some(w) = workers {
-            config.workers = w;
-        }
-        rs_stack(opened, &mut out_store, config).map_err(|e| PbzError::new_err(format!("{e}")))?;
-        Ok(())
-    })
-}
-
 /// Create a new empty flat pbz store (a bare `zarr_conventions` marker root).
 /// The imports open this store and add tracks to it.
 #[pyfunction]
@@ -502,9 +559,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(import_d4, m)?)?;
     m.add_function(wrap_pyfunction!(import_bigwig, m)?)?;
     m.add_function(wrap_pyfunction!(import_bed, m)?)?;
-    m.add_function(wrap_pyfunction!(import_bed_multi, m)?)?;
     m.add_function(wrap_pyfunction!(import_bam, m)?)?;
     m.add_function(wrap_pyfunction!(create_store, m)?)?;
-    m.add_function(wrap_pyfunction!(stack, m)?)?;
     Ok(())
 }

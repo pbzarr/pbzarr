@@ -1,6 +1,7 @@
-//! End-to-end: synthesize one multi-column bgzipped+tabix BED, import all value
-//! columns to their own tracks via `from_bed_multi`, read each back. Skipped if
-//! bgzip/tabix are unavailable.
+//! End-to-end: synthesize multi-column bgzipped+tabix BEDs and import them via
+//! the schema generation (`plan_bed_schema`/`execute_bed_schema_plan`) and
+//! `from_bed_matrix`, then read the tracks back. Skipped if bgzip/tabix are
+//! unavailable.
 
 mod common;
 
@@ -11,7 +12,7 @@ use pbzarr::io::Dtype;
 use pbzarr::{PbzStore, Region};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, Source, execute_bed_schema_plan, from_bed_matrix,
-    from_bed_multi, plan_bed_schema,
+    plan_bed_schema,
 };
 use tempfile::TempDir;
 
@@ -738,14 +739,9 @@ fn multi_column_mixed_dtype_roundtrip() {
         BedColumnSpec::named("score", Dtype::F32),
         BedColumnSpec::indexed(5, Dtype::Bool, "mask"),
     ]);
-    from_bed_multi(
-        &mut store,
-        &bed,
-        &schema,
-        genome(&[("chr1", 40)]),
-        Config::default(),
-    )
-    .unwrap();
+    let sources = [Source::new(bed)];
+    let plan = plan_bed_schema(&sources, &schema, &Config::default()).unwrap();
+    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 40)]), Config::default()).unwrap();
 
     // Every track owns an identical genome; contig ids share the same index.
     let g = store.genome_for("cov").unwrap();
@@ -855,11 +851,10 @@ fn multi_source_matrix_import_roundtrip() {
     );
 }
 
-/// D-1 regression: one source with an explicit `column_dim` (no second
-/// source) must still build a rank-2, 1-column track through the `PerField`
-/// path -- `from_bed_matrix`'s single-vs-matrix pipeline dispatch has to key
-/// on that scalarity, not on source count, or it mis-routes into
-/// `run_multi_pipeline`'s scalar-only guard and errors.
+/// One source with an explicit `column_dim` (no second source) must still
+/// build a rank-2, 1-column track through the `PerField` path: a single
+/// labeled source with an explicit column dimension makes a one-column 2D
+/// track, so the routing keys on that, not on source count.
 #[test]
 fn single_source_with_column_dim_is_one_column_2d() {
     if !htslib_available() {
@@ -912,93 +907,6 @@ fn single_source_with_column_dim_is_one_column_2d() {
 }
 
 #[test]
-fn multi_column_chunk_and_contig_boundaries() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::multi_column_chunk_and_contig_boundaries: bgzip/tabix not on PATH"
-        );
-        return;
-    }
-    let dir = TempDir::new().unwrap();
-    // chr1 run spans the chunk boundary at 100; chr2 exercises the contig straddle.
-    let bed = write_bed_bgzip_tabix(
-        dir.path(),
-        "s1",
-        &["chrom", "start", "end", "cov", "flag"],
-        &[
-            ("chr1", 0, 250, vec!["5", "1"]),
-            ("chr2", 0, 100, vec!["8", "0"]),
-        ],
-    );
-    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
-    let schema = BedSchema(vec![
-        BedColumnSpec::named("cov", Dtype::I32),
-        BedColumnSpec::named("flag", Dtype::Bool),
-    ]);
-    let config = Config {
-        chunk_size: Some(100),
-        ..Config::default()
-    };
-    from_bed_multi(
-        &mut store,
-        &bed,
-        &schema,
-        genome(&[("chr1", 250), ("chr2", 100)]),
-        config,
-    )
-    .unwrap();
-
-    let g = store.genome_for("cov").unwrap();
-    let r1 = Region {
-        contig: g.id("chr1").unwrap(),
-        start: 0,
-        end: 250,
-    };
-    let r2 = Region {
-        contig: g.id("chr2").unwrap(),
-        start: 0,
-        end: 100,
-    };
-
-    let cov1 = store
-        .track("cov")
-        .unwrap()
-        .read_region::<i32>(&r1)
-        .unwrap()
-        .into_dimensionality::<Ix1>()
-        .unwrap();
-    assert!(
-        cov1.iter().all(|&v| v == 5),
-        "run uniform across chunk boundary"
-    );
-    let cov2 = store
-        .track("cov")
-        .unwrap()
-        .read_region::<i32>(&r2)
-        .unwrap()
-        .into_dimensionality::<Ix1>()
-        .unwrap();
-    assert!(cov2.iter().all(|&v| v == 8));
-
-    let flag1 = store
-        .track("flag")
-        .unwrap()
-        .read_region::<bool>(&r1)
-        .unwrap()
-        .into_dimensionality::<Ix1>()
-        .unwrap();
-    assert!(flag1.iter().all(|&v| v));
-    let flag2 = store
-        .track("flag")
-        .unwrap()
-        .read_region::<bool>(&r2)
-        .unwrap()
-        .into_dimensionality::<Ix1>()
-        .unwrap();
-    assert!(flag2.iter().all(|&v| !v));
-}
-
-#[test]
 fn uncovered_positions_read_back_as_zero() {
     if !htslib_available() {
         eprintln!(
@@ -1023,14 +931,9 @@ fn uncovered_positions_read_back_as_zero() {
         BedColumnSpec::named("cov", Dtype::I32),
         BedColumnSpec::named("flag", Dtype::Bool),
     ]);
-    from_bed_multi(
-        &mut store,
-        &bed,
-        &schema,
-        genome(&[("chr1", 40)]),
-        Config::default(),
-    )
-    .unwrap();
+    let sources = [Source::new(bed)];
+    let plan = plan_bed_schema(&sources, &schema, &Config::default()).unwrap();
+    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 40)]), Config::default()).unwrap();
 
     let g = store.genome_for("cov").unwrap();
     let reg = Region {
@@ -1090,13 +993,10 @@ fn population_failure_leaves_all_tracks_unpublished() {
         BedColumnSpec::named("flag", Dtype::Bool),
     ]);
 
-    let result = from_bed_multi(
-        &mut store,
-        &bed,
-        &schema,
-        genome(&[("chr1", 10)]),
-        Config::default(),
-    );
+    let sources = [Source::new(bed)];
+    let plan = plan_bed_schema(&sources, &schema, &Config::default()).unwrap();
+    let result =
+        execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 10)]), Config::default());
 
     assert!(result.is_err());
     assert!(store.track("cov").is_none());

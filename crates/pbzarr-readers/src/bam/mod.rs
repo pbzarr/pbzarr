@@ -1,6 +1,6 @@
 //! BAM/CRAM alignment reader: `backend` decodes records, `mate`/`walk` turn
 //! them into depth/composition increments, and `reader`/`import` wire that
-//! into the `MultiValueReader` pipeline as `BamReader`/`from_bam`.
+//! into the `ValueReader` pipeline as `BamReader`/`from_bam`.
 
 // Submodules below are `pub` only so `tests/bam_*.rs` can exercise their
 // internals directly (D-2); they are not part of the curated public API and

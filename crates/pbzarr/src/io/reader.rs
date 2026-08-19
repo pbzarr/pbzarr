@@ -1,86 +1,160 @@
+//! The reader trait for the import engine.
+//!
+//! One trait covers every source shape: a reader exposes an ordered,
+//! dtype-erased [`OutputSchema`] and fills one [`OutputSinkMut`] per schema
+//! field in a single decode pass.
+
 use crate::genome::Genome;
-use crate::io::column::ColumnSinkMut;
-use crate::io::dtype::{Dtype, Numeric};
-use crate::io::error::Result;
-use ndarray::ArrayViewMut2;
-pub trait ValueReader: Send + Sync {
-    /// The numeric type this reader produces.
-    type Item: Numeric;
+use crate::io::dtype::Dtype;
+use crate::io::error::ReaderError;
+use ndarray::ArrayViewMut1;
 
-    /// Contigs present in the source file, with lengths.
-    fn contigs(&self) -> &Genome;
-
-    /// Number of value columns per record. Determines the trailing
-    /// axis of the buffer passed to `read_into`. Scalar tracks return 1.
-    fn n_fields(&self) -> usize;
-
-    /// Fill `dst` with values for `[start, end)` on the contig named `contig_name`.
-    ///
-    /// The reader resolves `contig_name` in its own genome. `dst` has shape
-    /// `((end - start) as usize, self.n_fields())`. The caller pre-fills `dst`
-    /// with the desired fill value; the reader only overwrites positions where
-    /// the source file has data.
-    ///
-    /// Names — not `ContigId`s — cross this boundary because `ContigId` is
-    /// namespaced to its owning `Genome`. The caller's genome (e.g., a pbz
-    /// store) and the reader's source file are independent.
-    fn read_into(
-        &self,
-        contig_name: &str,
-        start: u64,
-        end: u64,
-        dst: ArrayViewMut2<'_, Self::Item>,
-    ) -> Result<()>;
-
-    /// Cheap pre-check: could this reader have any data in `[start, end)` on
-    /// `contig_name`? Defaults to `true` (always read). Sparse-source readers
-    /// (e.g. a BAM/CRAM index) override this so the pipeline can skip a whole
-    /// task's read and write when no reader reports coverage.
-    fn may_have_data(&self, _contig_name: &str, _start: u64, _end: u64) -> bool {
-        true
-    }
-
-    /// Produce a worker-local handle for use on a single thread.
-    /// Shared state (index, header) is reused via `Arc`; per-thread
-    /// state (file handle, decode buffers) is freshly allocated.
-    fn fork(&self) -> Result<Self>
-    where
-        Self: Sized;
+/// One field a reader produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputField {
+    pub name: Option<String>,
+    pub dtype: Dtype,
 }
 
-/// Multi-column analogue of [`ValueReader`]: one source fans out to several
-/// tracks of possibly different dtypes in a single decode pass. Each element of
-/// `columns()` is one target track's dtype, in track order; `read_into` fills
-/// one [`ColumnSinkMut`] per column for the same `[start, end)` window.
-pub trait MultiValueReader: Send + Sync {
-    /// Contigs present in the source file, with lengths.
+/// The ordered fields a reader produces. `read_into` receives exactly one
+/// sink per field, in this order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OutputSchema {
+    pub fields: Vec<OutputField>,
+}
+
+impl OutputSchema {
+    pub fn new(fields: Vec<OutputField>) -> Self {
+        Self { fields }
+    }
+
+    pub fn single(name: impl Into<String>, dtype: Dtype) -> Self {
+        Self {
+            fields: vec![OutputField {
+                name: Some(name.into()),
+                dtype,
+            }],
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    pub fn dtypes(&self) -> Vec<Dtype> {
+        self.fields.iter().map(|f| f.dtype).collect()
+    }
+}
+
+macro_rules! output_sink {
+    ($( $variant:ident => $ty:ty, $as_mut:ident );* $(;)?) => {
+        /// A borrowing, dtype-tagged mutable view a reader fills.
+        pub enum OutputSinkMut<'a> {
+            $( $variant(ArrayViewMut1<'a, $ty>), )*
+        }
+
+        impl<'a> OutputSinkMut<'a> {
+            pub fn dtype(&self) -> Dtype {
+                match self {
+                    $( OutputSinkMut::$variant(_) => Dtype::$variant, )*
+                }
+            }
+
+            pub fn len(&self) -> usize {
+                match self {
+                    $( OutputSinkMut::$variant(v) => v.len(), )*
+                }
+            }
+
+            pub fn is_empty(&self) -> bool {
+                self.len() == 0
+            }
+
+            $(
+                /// `SchemaMismatch` when the sink holds a different dtype.
+                pub fn $as_mut(&mut self) -> Result<&mut ArrayViewMut1<'a, $ty>, ReaderError> {
+                    match self {
+                        OutputSinkMut::$variant(v) => Ok(v),
+                        other => Err(ReaderError::SchemaMismatch {
+                            message: format!(
+                                "requested {} sink but the engine handed {}",
+                                Dtype::$variant,
+                                other.dtype()
+                            ),
+                        }),
+                    }
+                }
+            )*
+        }
+    };
+}
+
+output_sink! {
+    U8 => u8, as_u8_mut;
+    U16 => u16, as_u16_mut;
+    U32 => u32, as_u32_mut;
+    I8 => i8, as_i8_mut;
+    I16 => i16, as_i16_mut;
+    I32 => i32, as_i32_mut;
+    F32 => f32, as_f32_mut;
+    F64 => f64, as_f64_mut;
+    Bool => bool, as_bool_mut;
+}
+
+/// One source, decoded in a single pass into one sink per schema field.
+///
+/// `Send` but not `Sync`: each worker gets its own fork, so a reader holds
+/// its file handles and decode buffers directly, with no internal `Mutex`.
+pub trait ValueReader: Send + Sized {
+    /// Contigs present in the source, with lengths.
     fn contigs(&self) -> &Genome;
 
-    /// Dtype of each target column/track, in order. `sinks` in `read_into`
-    /// matches this length and order.
-    fn columns(&self) -> &[Dtype];
+    fn output_schema(&self) -> &OutputSchema;
 
-    /// Fill each sink with values for `[start, end)` on the contig named
-    /// `contig_name`. `sinks[i]` is already sliced to the window; the reader
-    /// indexes it from 0. Positions the source does not cover are left as the
-    /// caller's fill.
+    /// Fill `outputs` with values for `[start, end)` on `contig`. `outputs[i]`
+    /// is `output_schema().fields[i]`, already sliced to the window and
+    /// indexed from 0. The caller has pre-filled it with the target track's
+    /// fill value: overwrite only the positions the source covers, never
+    /// write gap filler.
     fn read_into(
-        &self,
-        contig_name: &str,
+        &mut self,
+        contig: &str,
         start: u64,
         end: u64,
-        sinks: &mut [ColumnSinkMut<'_>],
-    ) -> Result<()>;
+        outputs: &mut [OutputSinkMut<'_>],
+    ) -> Result<(), ReaderError>;
 
-    /// Cheap pre-check: could this reader have any data in `[start, end)` on
-    /// `contig_name`? Defaults to `true` (always read). See
-    /// `ValueReader::may_have_data`.
-    fn may_have_data(&self, _contig_name: &str, _start: u64, _end: u64) -> bool {
+    /// Cheap pre-check: could this reader have any data in `[start, end)`?
+    /// A sparse source returns `false` so the engine can skip whole buffers.
+    fn may_have_data(&self, _contig: &str, _start: u64, _end: u64) -> bool {
         true
     }
 
-    /// Worker-local handle, sharing index/header via `Arc` (see `ValueReader::fork`).
-    fn fork(&self) -> Result<Self>
-    where
-        Self: Sized;
+    /// A worker-local handle. Shared state (index, header) is reused through
+    /// `Arc`; per-thread state (file handle, decode buffers) is reallocated.
+    fn fork(&self) -> Result<Self, ReaderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::Array1;
+
+    #[test]
+    fn typed_accessor_matches_and_mismatches() {
+        let mut buf = Array1::<i32>::zeros(4);
+        let mut sink = OutputSinkMut::I32(buf.view_mut());
+        assert_eq!(sink.dtype(), Dtype::I32);
+        assert_eq!(sink.len(), 4);
+        sink.as_i32_mut().unwrap()[2] = 7;
+        assert!(matches!(
+            sink.as_f32_mut(),
+            Err(ReaderError::SchemaMismatch { .. })
+        ));
+        assert_eq!(buf[2], 7);
+    }
 }

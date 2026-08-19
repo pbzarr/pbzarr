@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ndarray::{Array1, ArrayD};
-use pbzarr::genome::Contig;
+use pbzarr::genome::{Contig, Region};
 use pbzarr::io::Dtype;
 use pbzarr::{Genome, PbzStore, TrackConfig};
 use tempfile::TempDir;
@@ -55,6 +55,60 @@ fn write_and_read_region_translates_offset() {
         .unwrap();
     let other: ArrayD<i32> = track.read_region(&chr1).unwrap();
     assert_eq!(other.into_raw_vec_and_offset().0, vec![0i32; 10]);
+}
+
+#[test]
+fn read_region_past_contig_end_errors() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    let store = two_contig_store(&path);
+    let track = store.track("depth").unwrap();
+    let genome = store.genome_for("depth").unwrap();
+
+    // Put known data at chr2's start (flat positions 1000..1010).
+    let chr2 = genome.resolve(&"chr2:0-10".parse().unwrap()).unwrap();
+    track
+        .write_region(&chr2, Array1::from(vec![7i32; 10]).into_dyn())
+        .unwrap();
+
+    // chr1 has length 1000; [995, 1005) overhangs into chr2's flat range.
+    let region = Region {
+        contig: genome.id("chr1").unwrap(),
+        start: 995,
+        end: 1005,
+    };
+    let err = track
+        .read_region::<i32>(&region)
+        .expect_err("read past contig end must error, not return chr2's values")
+        .to_string();
+    assert!(err.contains("chr1"), "{err}");
+    assert!(err.contains("1000"), "{err}");
+}
+
+#[test]
+fn write_region_past_contig_end_errors() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    let store = two_contig_store(&path);
+    let track = store.track("depth").unwrap();
+    let genome = store.genome_for("depth").unwrap();
+
+    let region = Region {
+        contig: genome.id("chr1").unwrap(),
+        start: 995,
+        end: 1005,
+    };
+    let err = track
+        .write_region(&region, Array1::from(vec![9i32; 10]).into_dyn())
+        .expect_err("write past contig end must error, not spill into chr2")
+        .to_string();
+    assert!(err.contains("chr1"), "{err}");
+    assert!(err.contains("1000"), "{err}");
+
+    // chr2's start must be untouched.
+    let chr2 = genome.resolve(&"chr2:0-5".parse().unwrap()).unwrap();
+    let got: ArrayD<i32> = track.read_region(&chr2).unwrap();
+    assert_eq!(got.into_raw_vec_and_offset().0, vec![0i32; 5]);
 }
 
 #[test]

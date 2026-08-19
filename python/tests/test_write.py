@@ -39,15 +39,13 @@ def test_import_d4_one_labeled_source_with_column_dim_is_two_dimensional(
         pbzarr.import_d4(tmp_path / "missing.pbz", "depth", source)
 
     pbzarr.create_store(destination)
-    assert (
-        pbzarr.import_d4(
-            destination,
-            "depth",
-            (source, "depth-a"),
-            column_dim="replicate",
-        )
-        is None
+    report = pbzarr.import_d4(
+        destination,
+        "depth",
+        (source, "depth-a"),
+        column_dim="replicate",
     )
+    assert report["contigs_written"] == 1
 
     collection, depth = _track(destination, "depth")
     try:
@@ -65,7 +63,8 @@ def test_import_bigwig_path_list_defaults_to_sample_axis(tmp_path, write_bigwig)
     destination = tmp_path / "bigwig.pbz"
     pbzarr.create_store(destination)
 
-    assert pbzarr.import_bigwig(destination, "signal", [first, second]) is None
+    report = pbzarr.import_bigwig(destination, "signal", [first, second])
+    assert report["contigs_written"] == 1
 
     collection, signal = _track(destination, "signal")
     try:
@@ -77,7 +76,7 @@ def test_import_bigwig_path_list_defaults_to_sample_axis(tmp_path, write_bigwig)
 
 
 @htslib
-def test_import_bed_one_path_is_scalar(tmp_path):
+def test_import_bed_single_column_is_scalar(tmp_path):
     bed = write_bed_bgzip_tabix(
         tmp_path,
         "single",
@@ -88,28 +87,27 @@ def test_import_bed_one_path_is_scalar(tmp_path):
     destination = tmp_path / "bed.pbz"
     pbzarr.create_store(destination)
 
-    assert (
-        pbzarr.import_bed(
-            destination,
-            "coverage",
-            bed,
-            column="coverage",
-            dtype="int32",
-            genome=genome,
-        )
-        is None
+    report = pbzarr.import_bed(
+        destination,
+        bed,
+        genome=genome,
+        track="depth",
+        column="coverage",
+        dtype="int32",
     )
+    assert report["contigs_written"] == 1
 
-    collection, coverage = _track(destination, "coverage")
+    collection, depth = _track(destination, "depth")
     try:
-        assert coverage["values"].dims == ("position",)
-        assert coverage["values"].values.tolist() == [7] * 20
+        assert depth["values"].dims == ("position",)
+        assert depth["values"].dtype == np.dtype("int32")
+        assert depth["values"].values.tolist() == [7] * 20
     finally:
         collection.close()
 
 
 @htslib
-def test_import_bed_multi_writes_mapped_scalar_tracks(tmp_path):
+def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
     bed = write_bed_bgzip_tabix(
         tmp_path,
         "multi",
@@ -123,20 +121,20 @@ def test_import_bed_multi_writes_mapped_scalar_tracks(tmp_path):
     destination = tmp_path / "multi.pbz"
     pbzarr.create_store(destination)
 
-    assert (
-        pbzarr.import_bed_multi(
-            destination,
-            bed,
-            {"coverage": "int32", "score": "float32", "is_max": "bool"},
-            genome=genome,
-        )
-        is None
+    report = pbzarr.import_bed(
+        destination,
+        bed,
+        genome=genome,
+        schema={"coverage": "int32", "score": None, "is_max": None},
     )
+    assert report["contigs_written"] == 1
 
     collection = pbzarr.open(destination, chunks=None)
     try:
         assert set(collection.children) == {"coverage", "score", "is_max"}
         assert collection["coverage"]["values"].dtype == np.dtype("int32")
+        assert collection["score"]["values"].dtype == np.dtype("float32")
+        assert collection["is_max"]["values"].dtype == np.dtype("bool")
         assert collection["score"]["values"].values[[0, -1]].tolist() == [
             1.5,
             -2.5,
@@ -150,46 +148,76 @@ def test_import_bed_multi_writes_mapped_scalar_tracks(tmp_path):
 
 
 @htslib
-def test_stack_writes_labeled_collection_and_refuses_existing_destination(tmp_path):
+def test_import_bed_wide_form_gathers_fields_into_one_track(tmp_path):
+    bed = write_bed_bgzip_tabix(
+        tmp_path,
+        "wide",
+        ["chrom", "start", "end", "cov", "mapq"],
+        [("chr1", 0, 10, ["4", "60"]), ("chr1", 10, 20, ["9", "300"])],
+    )
     genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
-    sources = []
-    for name, value in [("left", 3), ("right", 8)]:
-        bed = write_bed_bgzip_tabix(
-            tmp_path,
-            name,
-            ["chrom", "start", "end", "coverage"],
-            [("chr1", 0, 20, [str(value)])],
-        )
-        source = tmp_path / f"{name}.pbz"
-        pbzarr.create_store(source)
-        pbzarr.import_bed(
-            source,
-            "coverage",
-            bed,
-            column="coverage",
-            dtype="int32",
-            genome=genome,
-        )
-        sources.append((source, name))
+    destination = tmp_path / "wide.pbz"
+    pbzarr.create_store(destination)
 
-    destination = tmp_path / "cohort.pbz"
-    assert pbzarr.stack(sources, destination) is None
+    pbzarr.import_bed(
+        destination,
+        bed,
+        genome=genome,
+        track="stats",
+        column_dim="metric",
+    )
 
-    collection, coverage = _track(destination, "coverage")
+    collection, stats = _track(destination, "stats")
     try:
-        assert coverage["values"].dims == ("position", "sample")
-        assert coverage["sample"].values.tolist() == ["left", "right"]
-        assert coverage["values"].isel(position=0).values.tolist() == [3, 8]
+        assert stats["values"].dims == ("position", "metric")
+        assert stats["metric"].values.tolist() == ["cov", "mapq"]
+        assert stats["values"].isel(position=0).values.tolist() == [4, 60]
+        assert stats["values"].isel(position=-1).values.tolist() == [9, 300]
     finally:
         collection.close()
 
-    with pytest.raises(FileExistsError):
-        pbzarr.stack(sources, destination)
 
-    not_pbz = tmp_path / "not-pbz"
-    not_pbz.mkdir()
-    with pytest.raises(pbzarr.PbzError):
-        pbzarr.stack(not_pbz, tmp_path / "invalid.pbz")
+@htslib
+def test_import_bed_multi_source_matrix(tmp_path):
+    first = write_bed_bgzip_tabix(
+        tmp_path,
+        "s1",
+        ["chrom", "start", "end", "depth"],
+        [("chr1", 0, 20, ["1"])],
+    )
+    second = write_bed_bgzip_tabix(
+        tmp_path,
+        "s2",
+        ["chrom", "start", "end", "depth"],
+        [("chr1", 0, 20, ["2"])],
+    )
+    genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
+    destination = tmp_path / "matrix.pbz"
+    pbzarr.create_store(destination)
+
+    pbzarr.import_bed(
+        destination,
+        [(first, "tumor"), (second, "normal")],
+        genome=genome,
+        column_dim="sample",
+    )
+
+    collection, depth = _track(destination, "depth")
+    try:
+        assert depth["values"].dims == ("position", "sample")
+        assert depth["sample"].values.tolist() == ["tumor", "normal"]
+        assert depth["values"].isel(position=0).values.tolist() == [1, 2]
+    finally:
+        collection.close()
+
+
+def test_import_bed_rejects_a_two_path_tuple(tmp_path):
+    with pytest.raises(ValueError, match="pass a list"):
+        pbzarr.import_bed(
+            tmp_path / "trap.pbz",
+            ("a.bed.gz", "b.bed.gz"),
+            genome=tmp_path / "genome.sizes",
+        )
 
 
 def test_import_d4_codecs_override_controls_zarr_metadata(tmp_path, write_d4):
@@ -219,3 +247,33 @@ def test_import_d4_codecs_override_controls_zarr_metadata(tmp_path, write_d4):
             chunk_size=100,
             codecs=[{"name": "zstd", "configuration": {"level": 3, "checksum": False}}],
         )
+
+
+@htslib
+def test_import_with_scales_publishes_the_pyramid_level(tmp_path):
+    bed = write_bed_bgzip_tabix(
+        tmp_path,
+        "scaled",
+        ["chrom", "start", "end", "coverage"],
+        [("chr1", 0, 64, ["7"])],
+    )
+    genome = write_sizes(tmp_path, "genome", [("chr1", 64)])
+    destination = tmp_path / "scaled.pbz"
+    pbzarr.create_store(destination)
+
+    pbzarr.import_bed(
+        destination,
+        bed,
+        genome=genome,
+        track="depth",
+        column="coverage",
+        dtype="int32",
+        scales=[16],
+    )
+
+    assert (destination / "depth" / "scales" / "16" / "mean" / "zarr.json").exists()
+    collection, depth = _track(destination, "depth")
+    try:
+        assert depth["values"].values.tolist() == [7] * 64
+    finally:
+        collection.close()

@@ -1,23 +1,28 @@
-//! `MultiValueReader` over one BAM/CRAM alignment file: `read_into` walks
-//! every overlapping record through `walk_record` into scratch
-//! `Accumulators` (depth-only or full composition, per [`ImportMode`]), then
-//! bulk-copies each field into its sink.
+//! Reader over one BAM/CRAM alignment file: `read_into` walks every
+//! overlapping record through `walk_record` into scratch `Accumulators`
+//! (depth-only or full composition, per [`ImportMode`]), then bulk-copies each
+//! field into its sink.
 //!
-//! `MultiValueReader` requires `Sync`, but a `Backend` and its decode scratch
-//! (`Accumulators`, `MateBuffer`) are only ever driven by one worker thread at
-//! a time — each fork gets its own. The `Mutex` here exists purely to satisfy
-//! the trait bound, mirroring `BedMultiReader`'s bgzf reader.
+//! A `Backend` and its decode scratch (`Accumulators`, `MateBuffer`) are only
+//! ever driven by one worker thread at a time, each fork getting its own. The
+//! `Mutex` around them exists because `may_have_data` probes the index
+//! through `&self` while `Backend::has_records` needs `&mut`; `read_into`
+//! takes `&mut self` and goes through `get_mut` instead.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use ndarray::ArrayView1;
+
 use pbzarr::genome::Genome;
-use pbzarr::io::{ColumnSinkMut, Dtype, MultiValueReader, ReaderError, Result};
+use pbzarr::io::{
+    Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader,
+};
 
 use super::DepthFilter;
 use super::backend::Backend;
 use super::mate::MateBuffer;
-use super::walk::{Accumulators, ImportMode, walk_record};
+use super::walk::{Accumulators, FIELDS, ImportMode, walk_record};
 
 /// State shared, read-only, across every fork of one `BamReader`.
 struct Shared {
@@ -26,7 +31,7 @@ struct Shared {
     genome: Genome,
     filter: DepthFilter,
     mode: ImportMode,
-    dtypes: Vec<Dtype>,
+    schema: OutputSchema,
 }
 
 /// Per-fork decode scratch: the open file handle plus the walk's working
@@ -37,8 +42,8 @@ struct Scratch {
     mates: MateBuffer,
 }
 
-/// [`MultiValueReader`] over one BAM/CRAM alignment file, driving the depth
-/// or composition walk (per [`ImportMode`]) into per-fork scratch buffers.
+/// Reader over one BAM/CRAM alignment file, driving the depth or composition
+/// walk (per [`ImportMode`]) into per-fork scratch buffers.
 pub struct BamReader {
     shared: Arc<Shared>,
     scratch: Mutex<Scratch>,
@@ -63,7 +68,7 @@ impl BamReader {
                 genome,
                 filter,
                 mode,
-                dtypes: vec![Dtype::I32; n_fields],
+                schema: schema_for(mode),
             }),
             scratch: Mutex::new(Scratch {
                 backend,
@@ -72,76 +77,8 @@ impl BamReader {
             }),
         })
     }
-}
 
-impl MultiValueReader for BamReader {
-    fn contigs(&self) -> &Genome {
-        &self.shared.genome
-    }
-
-    fn columns(&self) -> &[Dtype] {
-        &self.shared.dtypes
-    }
-
-    fn read_into(
-        &self,
-        contig_name: &str,
-        start: u64,
-        end: u64,
-        sinks: &mut [ColumnSinkMut<'_>],
-    ) -> Result<()> {
-        if end <= start {
-            return Ok(());
-        }
-        let window_len = (end - start) as usize;
-        // Scratch is per-window and fully reset below, so a poisoned lock
-        // (from a panic mid-window on another call) is safe to reuse as-is.
-        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
-        let Scratch {
-            backend,
-            acc,
-            mates,
-        } = &mut *scratch;
-
-        acc.reset(window_len);
-        // Overlap claims never carry across independent walk windows.
-        mates.clear();
-
-        let mode = self.shared.mode;
-        let filter = &self.shared.filter;
-        backend.fetch(contig_name, start, end, &mut |read| {
-            walk_record(read, start, end, filter, mode, acc, mates);
-            Ok(())
-        })?;
-
-        // Fail loudly on a sink/field mismatch rather than silently truncating via `zip`.
-        if sinks.len() != acc.fields.len() {
-            return Err(ReaderError::Other(anyhow::anyhow!(
-                "bam read_into: {} sinks but {} accumulator fields",
-                sinks.len(),
-                acc.fields.len()
-            )));
-        }
-        for (sink, field) in sinks.iter_mut().zip(acc.fields.iter()) {
-            sink.assign_i32(field)?;
-        }
-        Ok(())
-    }
-
-    fn may_have_data(&self, contig_name: &str, start: u64, end: u64) -> bool {
-        // Same poisoned-lock recovery as `read_into`: this fn only returns a
-        // bool, so there's no error path to propagate a poisoned mutex into.
-        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
-        // A probe failure (e.g. a transient query error) shouldn't silently
-        // skip a task; fall back to "assume data present" so the pipeline
-        // still reads (and surfaces the real error there).
-        scratch
-            .backend
-            .has_records(contig_name, start, end)
-            .unwrap_or(true)
-    }
-
-    fn fork(&self) -> Result<Self> {
+    fn fork_handle(&self) -> Result<Self> {
         let (backend, _genome) =
             Backend::open(&self.shared.path, self.shared.reference.as_deref())?;
         let n_fields = self.shared.mode.n_fields();
@@ -153,5 +90,119 @@ impl MultiValueReader for BamReader {
                 mates: MateBuffer::default(),
             }),
         })
+    }
+
+    fn probe(&self, contig_name: &str, start: u64, end: u64) -> bool {
+        // Same poisoned-lock recovery as `read_into`: this fn only returns a
+        // bool, so there's no error path to propagate a poisoned mutex into.
+        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+        // A probe failure (e.g. a transient query error) shouldn't silently
+        // skip a task; fall back to "assume data present" so the pipeline
+        // still reads (and surfaces the real error there).
+        scratch
+            .backend
+            .has_records(contig_name, start, end)
+            .unwrap_or(true)
+    }
+}
+
+/// The leading `FIELDS` prefix this mode writes: `["depth"]` for `Depth`, all
+/// of them for `Composition`.
+fn schema_for(mode: ImportMode) -> OutputSchema {
+    OutputSchema::new(
+        FIELDS[..mode.n_fields()]
+            .iter()
+            .map(|name| OutputField {
+                name: Some((*name).to_owned()),
+                dtype: Dtype::I32,
+            })
+            .collect(),
+    )
+}
+
+/// Walk every record overlapping `[start, end)` into `scratch.acc`, leaving
+/// one filled `window_len` vector per field of the mode's schema.
+fn accumulate(
+    shared: &Shared,
+    scratch: &mut Scratch,
+    contig_name: &str,
+    start: u64,
+    end: u64,
+) -> Result<()> {
+    let window_len = (end - start) as usize;
+    let Scratch {
+        backend,
+        acc,
+        mates,
+    } = scratch;
+
+    acc.reset(window_len);
+    // Overlap claims never carry across independent walk windows.
+    mates.clear();
+
+    let mode = shared.mode;
+    let filter = &shared.filter;
+    backend.fetch(contig_name, start, end, &mut |read| {
+        walk_record(read, start, end, filter, mode, acc, mates);
+        Ok(())
+    })
+}
+
+impl ValueReader for BamReader {
+    fn contigs(&self) -> &Genome {
+        &self.shared.genome
+    }
+
+    fn output_schema(&self) -> &OutputSchema {
+        &self.shared.schema
+    }
+
+    fn read_into(
+        &mut self,
+        contig: &str,
+        start: u64,
+        end: u64,
+        outputs: &mut [OutputSinkMut<'_>],
+    ) -> Result<()> {
+        if end <= start {
+            return Ok(());
+        }
+        let Self { shared, scratch } = self;
+        // Scratch is per-window and fully reset by `accumulate`, so a poisoned
+        // lock (from a panic mid-window on another call) is safe to reuse.
+        let scratch = scratch.get_mut().unwrap_or_else(|e| e.into_inner());
+        accumulate(shared, scratch, contig, start, end)?;
+
+        if outputs.len() != scratch.acc.fields.len() {
+            return Err(ReaderError::SchemaMismatch {
+                message: format!(
+                    "bam reader produces {} field(s) but the engine handed {} sink(s)",
+                    scratch.acc.fields.len(),
+                    outputs.len()
+                ),
+            });
+        }
+        for (sink, field) in outputs.iter_mut().zip(scratch.acc.fields.iter()) {
+            let dst = sink.as_i32_mut()?;
+            if dst.len() != field.len() {
+                return Err(ReaderError::SchemaMismatch {
+                    message: format!(
+                        "bam reader filled {} position(s) but the sink holds {}",
+                        field.len(),
+                        dst.len()
+                    ),
+                });
+            }
+            dst.assign(&ArrayView1::from(field.as_slice()));
+        }
+        Ok(())
+    }
+
+    fn may_have_data(&self, contig: &str, start: u64, end: u64) -> bool {
+        self.probe(contig, start, end)
+    }
+
+    fn fork(&self) -> Result<Self> {
+        self.fork_handle()
     }
 }

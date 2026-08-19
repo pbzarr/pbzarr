@@ -225,6 +225,36 @@ fn unique_schema_two_sources_infers_across_sources_and_keeps_source_labels() {
 }
 
 #[test]
+fn dry_run_prints_plan_and_estimate_without_creating_the_store() {
+    require_htslib();
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed(
+        dir.path(),
+        "wide",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[("chr1", 0, 4, &["4", "60"]), ("chr1", 4, 8, &["9", "30"])],
+    );
+    let genome = write_genome(dir.path());
+    let schema = dir.path().join("schema.tsv");
+    std::fs::write(&schema, "mapq\tmapping\tuint16\ncov\tcoverage\tuint16\n").unwrap();
+    let output = dir.path().join("dry.pbz");
+
+    let mut args = import_args(&output, &genome, &schema, "metric", [bed.into_os_string()]);
+    args.push("--dry-run".into());
+    let command = run_pbz(args);
+    assert!(
+        command.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&command.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&command.stdout);
+    assert!(stdout.contains("track mapping"), "{stdout}");
+    assert!(stdout.contains("track coverage"), "{stdout}");
+    assert!(stdout.contains("tasks/worker"), "{stdout}");
+    assert!(!output.exists(), "dry run created the output store");
+}
+
+#[test]
 fn grouped_schema_two_sources_fails_preflight_without_creating_output() {
     require_htslib();
     let dir = TempDir::new().unwrap();

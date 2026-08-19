@@ -13,10 +13,9 @@ pub mod d4;
 
 pub use bam::{BamReader, DepthFilter, ImportMode, OverlapMode, from_bam};
 pub use bed::{
-    BedColumnSpec, BedImportOptions, BedLayout, BedMultiReader, BedReader, BedSchema,
-    BedSchemaPlan, ColumnSelector, InferRows, column_index_by_name, execute_bed_schema_plan,
-    from_bed, from_bed_matrix, from_bed_multi, infer_bed_dtypes, infer_bed_dtypes_for_sources,
-    plan_bed_schema, read_bed_layout,
+    BedColumnSpec, BedImportOptions, BedLayout, BedMultiReader, BedSchema, BedSchemaPlan,
+    ColumnSelector, InferRows, column_index_by_name, execute_bed_schema_plan, from_bed_matrix,
+    infer_bed_dtypes, infer_bed_dtypes_for_sources, plan_bed_schema, read_bed_layout,
 };
 pub use bigwig::{BigWigReader, from_bigwig};
 pub use d4::{D4Reader, from_d4};

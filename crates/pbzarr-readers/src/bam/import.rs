@@ -1,5 +1,4 @@
-//! BAM/CRAM-specific import glue. Wires `BamReader` into the generic
-//! multi/matrix pipelines.
+//! BAM/CRAM-specific import glue. Wires `BamReader` into the import engine.
 
 use std::path::PathBuf;
 
@@ -8,8 +7,9 @@ use pbzarr::Genome;
 use pbzarr::PbzError;
 use pbzarr::PbzStore;
 use pbzarr::Result;
-use pbzarr::import::{Config, Report, Source, run_matrix_pipeline, run_multi_pipeline};
-use pbzarr::io::{Dtype, MultiValueReader};
+use pbzarr::import::{Config, Import, PipelineOptions, Report, Source};
+use pbzarr::io::Dtype;
+use pbzarr::io::ValueReader as _;
 
 use super::reader::BamReader;
 use super::walk::{FIELDS, ImportMode};
@@ -24,9 +24,10 @@ use super::{DepthFilter, OverlapMode};
 ///
 /// Every source's `Genome` is built from its own header and must
 /// checksum-match the rest (mirrors `from_d4`/`from_bigwig`). CRAM sources
-/// need `reference`; BAM sources ignore it. One source yields scalar tracks
-/// via `run_multi_pipeline`; several yield cohort tracks (column dim from
-/// `config.column_dim`, defaulting to `"sample"`) via `run_matrix_pipeline`.
+/// need `reference`; BAM sources ignore it. One source with no configured
+/// column dimension yields scalar tracks; otherwise the sources become the
+/// columns of cohort tracks, whose dimension name comes from
+/// `config.column_dim` and defaults to `"sample"`.
 pub fn from_bam(
     store: &mut PbzStore,
     track_name: &str,
@@ -78,6 +79,8 @@ pub fn from_bam(
         .map(|s| s.path.display().to_string())
         .collect::<Vec<_>>()
         .join(",");
+    // Several sources, or an explicit column dimension, make 2D tracks; a
+    // single source with neither stays scalar.
     let column_labels = (sources.len() > 1 || config.column_dim.is_some())
         .then(|| sources.iter().map(Source::label).collect::<Vec<_>>());
     let specs = names
@@ -96,21 +99,24 @@ pub fn from_bam(
         })
         .collect();
 
-    // `run_multi_pipeline` only accepts scalar tracks; a single source still
-    // needs `run_matrix_pipeline` when an explicit `column_dim` made the
-    // track 2D (D-1: the 2D gate is source count OR an explicit column_dim).
-    let scalar = column_labels.is_none();
-    store.create_tracks_with(specs, move |tracks| {
-        if scalar {
-            let reader = readers
-                .into_iter()
-                .next()
-                .ok_or_else(|| PbzError::Metadata("bam import lost its only reader".into()))?;
-            run_multi_pipeline(tracks, reader, &config)
-        } else {
-            run_matrix_pipeline(tracks, readers, &config)
+    let options = PipelineOptions {
+        workers: config.workers,
+        progress: config.progress.clone(),
+        ..PipelineOptions::default()
+    };
+    let report = store.create_tracks_with(specs, move |tracks| {
+        let builder = Import::from_readers(readers)?;
+        let mut builder = match mode {
+            ImportMode::Depth => builder.into_track(tracks[0]),
+            ImportMode::Composition => builder.into_tracks(tracks).fields_as_tracks(),
+        };
+        if let Some(labels) = column_labels {
+            builder = builder.readers_as_columns().expect_column_labels(labels);
         }
-    })
+        builder.options(options).run()
+    })?;
+    config.scale_tracks(store, &names)?;
+    Ok(report)
 }
 
 /// The genome shared by every source, taken from the first and required to

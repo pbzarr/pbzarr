@@ -20,7 +20,7 @@ fn walk_window(bam: &std::path::Path, filter: &DepthFilter) -> Vec<i32> {
 
 /// Walk `[win_start, win_end)` only, fetching from the same bounds (so
 /// records entirely outside the window are never even decoded, matching how
-/// `run_pipeline` will drive this per-chunk in the real import path).
+/// the import engine drives this span by span in the real import path).
 fn walk_sub_window(
     bam: &std::path::Path,
     filter: &DepthFilter,

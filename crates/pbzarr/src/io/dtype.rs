@@ -88,11 +88,10 @@ impl std::fmt::Display for Dtype {
     }
 }
 
-/// Numeric value kinds a `ValueReader` may produce.
+/// Numeric element kinds a track can store.
 ///
 /// `const DTYPE` lets generic code recover the runtime tag — needed at the
-/// dtype-erased Zarr-writer boundary. `ZERO` is the type's additive identity
-/// (or `false` for bool); used as scratch-buffer fill in the import pipeline.
+/// dtype-erased Zarr-writer boundary.
 ///
 /// The `zarrs::array::Element + ElementOwned` supertrait bounds are required by
 /// the zarrs I/O methods in `Track::read_region` / `write_region`.
@@ -100,42 +99,32 @@ pub trait Numeric:
     Copy + Send + Sync + 'static + zarrs::array::Element + zarrs::array::ElementOwned
 {
     const DTYPE: Dtype;
-    const ZERO: Self;
 }
 
 impl Numeric for u8 {
     const DTYPE: Dtype = Dtype::U8;
-    const ZERO: Self = 0;
 }
 impl Numeric for u16 {
     const DTYPE: Dtype = Dtype::U16;
-    const ZERO: Self = 0;
 }
 impl Numeric for u32 {
     const DTYPE: Dtype = Dtype::U32;
-    const ZERO: Self = 0;
 }
 impl Numeric for i8 {
     const DTYPE: Dtype = Dtype::I8;
-    const ZERO: Self = 0;
 }
 impl Numeric for i16 {
     const DTYPE: Dtype = Dtype::I16;
-    const ZERO: Self = 0;
 }
 impl Numeric for i32 {
     const DTYPE: Dtype = Dtype::I32;
-    const ZERO: Self = 0;
 }
 impl Numeric for f32 {
     const DTYPE: Dtype = Dtype::F32;
-    const ZERO: Self = 0.0;
 }
 impl Numeric for f64 {
     const DTYPE: Dtype = Dtype::F64;
-    const ZERO: Self = 0.0;
 }
 impl Numeric for bool {
     const DTYPE: Dtype = Dtype::Bool;
-    const ZERO: Self = false;
 }

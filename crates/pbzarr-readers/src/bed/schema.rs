@@ -1,13 +1,46 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fs::File;
 use std::io::BufRead;
 use std::path::Path;
 
 use log::debug;
-use pbzarr::io::Dtype;
+use noodles_bgzf as bgzf;
+use pbzarr::import::Source;
+use pbzarr::io::{Dtype, ReaderError};
 use pbzarr::{PbzError, Result};
 
-use super::reader::open_bgzf;
-use pbzarr::import::Source;
+/// Open a bgzipped file for reading.
+pub(super) fn open_bgzf(path: &Path) -> std::result::Result<bgzf::io::Reader<File>, ReaderError> {
+    let file = File::open(path).map_err(|source| ReaderError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(bgzf::io::Reader::new(file))
+}
+
+/// Read the `#`-prefixed header line and return the 0-based index of `name`.
+pub fn column_index_by_name<P: AsRef<Path>>(
+    bed_gz: P,
+    name: &str,
+) -> std::result::Result<usize, ReaderError> {
+    let path = bed_gz.as_ref();
+    let mut reader = open_bgzf(path)?;
+    let mut line = Vec::new();
+    reader
+        .read_until(b'\n', &mut line)
+        .map_err(|source| ReaderError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let line = String::from_utf8_lossy(&line);
+    let header = line.trim_start_matches('#').trim_end();
+    header.split('\t').position(|c| c == name).ok_or_else(|| {
+        ReaderError::Other(anyhow::anyhow!(
+            "column {name:?} not in header of {}",
+            path.display()
+        ))
+    })
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum InferRows {

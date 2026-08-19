@@ -11,9 +11,8 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use ndarray::ArrayViewMut2;
-use pbzarr::import::{Config, Source, run_pipeline};
-use pbzarr::io::{Dtype, ValueReader};
+use pbzarr::import::{Config, Import, PipelineOptions, Source};
+use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, Genome, PbzStore, TrackConfig};
 use pbzarr_readers::from_d4;
 use tempfile::TempDir;
@@ -81,45 +80,52 @@ impl Args {
 /// stays on the writer (encode + IO) rather than the reader.
 struct SynthReader {
     genome: Genome,
+    schema: OutputSchema,
     seed: u32,
 }
 
-impl ValueReader for SynthReader {
-    type Item = u32;
+impl SynthReader {
+    fn new(genome: Genome, seed: u32) -> Self {
+        Self {
+            genome,
+            schema: OutputSchema::single("depth", Dtype::U32),
+            seed,
+        }
+    }
+}
 
+impl ValueReader for SynthReader {
     fn contigs(&self) -> &Genome {
         &self.genome
     }
 
-    fn n_fields(&self) -> usize {
-        1
+    fn output_schema(&self) -> &OutputSchema {
+        &self.schema
     }
 
     fn read_into(
-        &self,
+        &mut self,
         _contig: &str,
         start: u64,
         end: u64,
-        mut dst: ArrayViewMut2<'_, u32>,
+        outputs: &mut [OutputSinkMut<'_>],
     ) -> pbzarr::io::Result<()> {
         let len = (end - start) as usize;
         let s = self.seed;
+        let dst = outputs[0].as_u32_mut()?;
         for i in 0..len {
             // Cheap LCG-ish mix. Blosc shuffle + zstd still compress some.
             let v = ((start as u32)
                 .wrapping_add(i as u32)
                 .wrapping_mul(2654435761u32))
                 ^ s;
-            dst[[i, 0]] = v & 0x3FF; // depth-like: 0..1024
+            dst[i] = v & 0x3FF; // depth-like: 0..1024
         }
         Ok(())
     }
 
     fn fork(&self) -> pbzarr::io::Result<Self> {
-        Ok(Self {
-            genome: self.genome.clone(),
-            seed: self.seed,
-        })
+        Ok(Self::new(self.genome.clone(), self.seed))
     }
 }
 
@@ -167,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shard_column_size: None,
         column_dim: None,
         codecs: None,
+        scales: Vec::new(),
         progress: None,
     };
 
@@ -188,13 +195,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         store.create_track("depth", genome.clone(), cfg)?;
         let readers: Vec<SynthReader> = (0..args.cols)
-            .map(|i| SynthReader {
-                genome: genome.clone(),
-                seed: 0x9E3779B9u32.wrapping_mul(i as u32 + 1),
-            })
+            .map(|i| SynthReader::new(genome.clone(), 0x9E3779B9u32.wrapping_mul(i as u32 + 1)))
             .collect();
         let track = store.track("depth").unwrap();
-        run_pipeline::<u32, _>(track, readers, &import_cfg)?
+        Import::from_readers(readers)?
+            .into_track(track)
+            .readers_as_columns()
+            .options(PipelineOptions {
+                workers: args.workers,
+                ..PipelineOptions::default()
+            })
+            .run()?
     };
     let elapsed = t0.elapsed();
     let secs = elapsed.as_secs_f64();

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -8,14 +9,17 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use indicatif_log_bridge::LogWrapper;
 use log::{LevelFilter, debug, info, warn};
-use pbzarr::import::Config;
 use pbzarr::import::progress::{self, make_sink};
-use pbzarr::io::Dtype;
+use pbzarr::import::{
+    Config, GenomeGeometry, LayoutEstimate, LayoutKnobs, PipelineOptions, TrackShape,
+};
+use pbzarr::io::{Dtype, ValueReader as _};
 use pbzarr::{ExplicitArraySpec, Genome, PbzStore, ScaleConfig};
 use pbzarr_readers::{
-    BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
-    OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam, from_bed_matrix,
-    infer_bed_dtypes, infer_bed_dtypes_for_sources, plan_bed_schema, read_bed_layout,
+    BamReader, BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode,
+    InferRows, OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam,
+    from_bed_matrix, infer_bed_dtypes, infer_bed_dtypes_for_sources, plan_bed_schema,
+    read_bed_layout,
 };
 
 #[derive(Debug, Parser)]
@@ -167,6 +171,11 @@ struct ImportOptions {
         conflicts_with_all = ["chunk_size", "column_chunk_size", "shard_size", "shard_column_size"]
     )]
     codecs: Option<String>,
+    /// Comma-separated downsampling factors (e.g. 16,256), strictly ascending
+    /// with no duplicates. Builds a multiscale pyramid on each imported track
+    /// after the base import.
+    #[arg(long, value_name = "LIST")]
+    scales: Option<String>,
     /// Show import progress on stderr. This is the default; the flag is
     /// accepted so scripts can be explicit.
     #[arg(long)]
@@ -174,6 +183,10 @@ struct ImportOptions {
     /// Hide the import progress display.
     #[arg(long, conflicts_with = "progress")]
     no_progress: bool,
+    /// Resolve the import, print the destination tracks and the layout
+    /// estimate to stdout, and exit without creating or writing anything.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 impl ImportOptions {
@@ -189,7 +202,13 @@ impl ImportOptions {
             shard_column_size: self.shard_column_size,
             column_dim: self.column_dim.clone(),
             codecs: self.parse_codecs()?,
-            progress: (!self.no_progress).then(|| make_sink(label)),
+            scales: self
+                .scales
+                .as_deref()
+                .map(parse_scales)
+                .transpose()?
+                .unwrap_or_default(),
+            progress: (!self.no_progress && !self.dry_run).then(|| make_sink(label)),
         })
     }
 
@@ -342,7 +361,7 @@ struct BedOptions {
     /// Print a schema TSV for one BED source (BED column, target track,
     /// inferred dtype) to stdout and exit without importing. Edit it and feed
     /// it back via --schema.
-    #[arg(long, conflicts_with_all = ["schema", "fields", "track", "dtype"])]
+    #[arg(long, conflicts_with_all = ["schema", "fields", "track", "dtype", "dry_run"])]
     emit_schema: bool,
     /// Records sampled for dtype inference, or `all`. A sample infers
     /// conservative classes (bool/int32/float32); `all` (or a file smaller
@@ -541,10 +560,14 @@ fn import_bed(args: BedArgs) -> Result<()> {
         let schema = load_schema(schema_path, &sources, infer_rows)?;
         let plan = plan_bed_schema(&sources, &schema, &config).context("plan BED schema")?;
         debug!("BED schema planned against {} source(s)", sources.len());
+        if args.import.dry_run {
+            let tracks = plan_schema_tracks(&schema, &sources, config.column_dim.as_deref())?;
+            print_dry_run(&output, &genome, &tracks, &config, sources.len());
+            return Ok(());
+        }
         let mut store = open_or_create(&output)?;
         execute_bed_schema_plan(&mut store, plan, genome, config).context("import BED schema")?;
     } else {
-        let mut store = open_or_create(&output)?;
         let options = BedImportOptions {
             fields: (!args.bed.fields.is_empty()).then_some(args.bed.fields),
             track: args.bed.track,
@@ -558,11 +581,313 @@ fn import_bed(args: BedArgs) -> Result<()> {
             infer_rows,
             ..BedImportOptions::default()
         };
+        if args.import.dry_run {
+            let tracks = plan_bed_option_tracks(&sources, &options, config.column_dim.as_deref())?;
+            print_dry_run(&output, &genome, &tracks, &config, sources.len());
+            return Ok(());
+        }
+        let mut store = open_or_create(&output)?;
         from_bed_matrix(&mut store, &sources, genome, &options, config)
             .context("import BED columns")?;
     }
     info!("wrote {}", output.display());
     Ok(())
+}
+
+/// One destination track of a `--dry-run` preview.
+struct PlannedTrack {
+    name: String,
+    dtype: Dtype,
+    /// `Some((dimension, labels))` for a rank-2 track; `None` for scalar.
+    columns: Option<(String, Vec<String>)>,
+}
+
+/// Print the destination plan and the layout estimate for a dry run.
+/// Read-only: the output store is only stat'ed, never opened or created.
+fn print_dry_run(
+    output: &Path,
+    genome: &Genome,
+    tracks: &[PlannedTrack],
+    config: &Config,
+    readers: usize,
+) {
+    println!("dry run: nothing is created or written");
+    println!(
+        "output: {} ({})",
+        output.display(),
+        if output.exists() {
+            "exists; a real run would add tracks to it"
+        } else {
+            "a real run would create it"
+        }
+    );
+    println!(
+        "genome: {} contig(s), {} positions",
+        genome.contigs().len(),
+        genome.contigs().iter().map(|c| c.length).sum::<u64>()
+    );
+    for track in tracks {
+        match &track.columns {
+            Some((dim, labels)) => println!(
+                "track {}  {}  rank 2  columns ({dim}): {}",
+                track.name,
+                track.dtype.as_str(),
+                labels.join(", ")
+            ),
+            None => println!("track {}  {}  rank 1", track.name, track.dtype.as_str()),
+        }
+    }
+    println!();
+    let shapes: Vec<TrackShape> = tracks
+        .iter()
+        .map(|track| TrackShape {
+            name: track.name.clone(),
+            dtype: track.dtype,
+            columns: track
+                .columns
+                .as_ref()
+                .map(|(_, labels)| labels.len() as u64),
+        })
+        .collect();
+    let knobs = LayoutKnobs::resolve(
+        config.chunk_size.map(|v| v as u64),
+        config.column_chunk_size.map(|v| v as u64),
+        config.shard_size.map(|v| v as u64),
+        config.shard_column_size.map(|v| v as u64),
+        config.codecs.as_ref(),
+    );
+    let estimate = LayoutEstimate::compute(
+        GenomeGeometry {
+            total_len: genome.contigs().iter().map(|c| c.length).sum(),
+            contigs: genome.contigs().len() as u64,
+        },
+        &shapes,
+        &knobs,
+        readers,
+        config.workers,
+        PipelineOptions::default().in_flight_spans,
+        &config.scales,
+    );
+    print!("{estimate}");
+}
+
+/// Track name a schema spec resolves to: the explicit target, else the
+/// header name a `Name` selector carries.
+fn schema_track_name(spec: &BedColumnSpec) -> Result<&str> {
+    match (&spec.track_name, &spec.selector) {
+        (Some(track), _) => Ok(track),
+        (None, ColumnSelector::Name(name)) => Ok(name),
+        (None, ColumnSelector::Index(index)) => Err(anyhow!(
+            "schema BED column {} needs a target track name",
+            index + 1
+        )),
+    }
+}
+
+/// The tracks a schema import would create, mirroring the grouped/unique
+/// layout split `plan_bed_schema` validated.
+fn plan_schema_tracks(
+    schema: &BedSchema,
+    sources: &[pbzarr::import::Source],
+    column_dim: Option<&str>,
+) -> Result<Vec<PlannedTrack>> {
+    let names = schema
+        .0
+        .iter()
+        .map(schema_track_name)
+        .collect::<Result<Vec<_>>>()?;
+    let unique: HashSet<&str> = names.iter().copied().collect();
+    if unique.len() == 1 && names.len() >= 2 {
+        let layout = read_bed_layout(&sources[0].path)?;
+        let labels = schema
+            .0
+            .iter()
+            .map(|spec| match &spec.selector {
+                ColumnSelector::Name(name) => name.clone(),
+                ColumnSelector::Index(index) => layout
+                    .header
+                    .as_ref()
+                    .and_then(|header| header.get(*index))
+                    .cloned()
+                    .unwrap_or_else(|| format!("column {}", index + 1)),
+            })
+            .collect();
+        return Ok(vec![PlannedTrack {
+            name: names[0].to_owned(),
+            dtype: schema.0[0].dtype,
+            columns: Some((column_dim.unwrap_or("BED column").to_owned(), labels)),
+        }]);
+    }
+    let source_columns = (sources.len() > 1 || column_dim.is_some()).then(|| {
+        (
+            column_dim.unwrap_or("sample").to_owned(),
+            sources
+                .iter()
+                .map(pbzarr::import::Source::label)
+                .collect::<Vec<_>>(),
+        )
+    });
+    Ok(schema
+        .0
+        .iter()
+        .zip(names)
+        .map(|(spec, name)| PlannedTrack {
+            name: name.to_owned(),
+            dtype: spec.dtype,
+            columns: source_columns.clone(),
+        })
+        .collect())
+}
+
+/// The tracks a non-schema BED import would create, mirroring the shape
+/// rules `from_bed_matrix` applies to the same options.
+fn plan_bed_option_tracks(
+    sources: &[pbzarr::import::Source],
+    options: &BedImportOptions,
+    column_dim: Option<&str>,
+) -> Result<Vec<PlannedTrack>> {
+    if sources.len() > 1 && column_dim.is_none() {
+        bail!("2D output requires a column dimension name (--column-dim)");
+    }
+    let layout = read_bed_layout(&sources[0].path)?;
+    let source_columns = (sources.len() > 1 || column_dim.is_some()).then(|| {
+        (
+            column_dim.unwrap_or("sample").to_owned(),
+            sources
+                .iter()
+                .map(pbzarr::import::Source::label)
+                .collect::<Vec<_>>(),
+        )
+    });
+    let single = |track: &Option<String>, dtype: Dtype, need: &str| -> Result<Vec<PlannedTrack>> {
+        let name = track
+            .clone()
+            .with_context(|| format!("a track name is required {need}"))?;
+        Ok(vec![PlannedTrack {
+            name,
+            dtype,
+            columns: source_columns.clone(),
+        }])
+    };
+    if layout.n_cols == 3 {
+        return single(&options.track, Dtype::Bool, "for BED3 input");
+    }
+    let Some(header) = &layout.header else {
+        if layout.n_cols > 4 {
+            bail!(
+                "{} has {} BED value columns and no header; add a header line or use a schema",
+                sources[0].path.display(),
+                layout.n_cols - 3
+            );
+        }
+        let dtype = match options.dtype {
+            Some(dtype) => dtype,
+            None => infer_bed_dtypes_for_sources(sources, &[3], options.infer_rows)?[0],
+        };
+        return single(&options.track, dtype, "for headerless input");
+    };
+    let selected = options
+        .fields
+        .clone()
+        .unwrap_or_else(|| header[3..].to_vec());
+    let columns = selected
+        .iter()
+        .map(|name| {
+            header
+                .iter()
+                .position(|field| field == name)
+                .filter(|index| *index >= 3)
+                .with_context(|| {
+                    format!("BED column {name:?} is not a value BED column of the header")
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let dtypes = infer_bed_dtypes_for_sources(sources, &columns, options.infer_rows)?;
+    if sources.len() == 1 && selected.len() > 1 {
+        if column_dim.is_none() {
+            bail!("2D output requires a column dimension name (--column-dim)");
+        }
+        // The import itself merges raw observations across the selected
+        // columns before choosing one dtype; joining the per-column dtypes
+        // covers the same values but can sit one width class above it.
+        let mut joined: Option<Dtype> = None;
+        for dtype in dtypes {
+            joined = Some(match joined {
+                Some(joined) => join_dtypes(joined, dtype)?,
+                None => dtype,
+            });
+        }
+        let dtype = joined.context("no BED value columns selected")?;
+        let name = options
+            .track
+            .clone()
+            .context("a track name is required when several BED columns form one wide track")?;
+        return Ok(vec![PlannedTrack {
+            name,
+            dtype,
+            columns: Some((column_dim.unwrap_or("column").to_owned(), selected)),
+        }]);
+    }
+    Ok(selected
+        .into_iter()
+        .zip(dtypes)
+        .map(|(name, dtype)| PlannedTrack {
+            name,
+            dtype,
+            columns: source_columns.clone(),
+        })
+        .collect())
+}
+
+/// Smallest dtype whose value range covers both inputs. Floats absorb
+/// integers, matching inference (any decimal column classes as float).
+fn join_dtypes(a: Dtype, b: Dtype) -> Result<Dtype> {
+    if a == b {
+        return Ok(a);
+    }
+    if a == Dtype::F64 || b == Dtype::F64 {
+        return Ok(Dtype::F64);
+    }
+    if a == Dtype::F32 || b == Dtype::F32 {
+        return Ok(Dtype::F32);
+    }
+    fn range(dtype: Dtype) -> (i128, i128) {
+        match dtype {
+            Dtype::Bool => (0, 1),
+            Dtype::U8 => (0, i128::from(u8::MAX)),
+            Dtype::U16 => (0, i128::from(u16::MAX)),
+            Dtype::U32 => (0, i128::from(u32::MAX)),
+            Dtype::I8 => (i128::from(i8::MIN), i128::from(i8::MAX)),
+            Dtype::I16 => (i128::from(i16::MIN), i128::from(i16::MAX)),
+            Dtype::I32 => (i128::from(i32::MIN), i128::from(i32::MAX)),
+            Dtype::F32 | Dtype::F64 => unreachable!("floats are joined above"),
+        }
+    }
+    let (lo_a, hi_a) = range(a);
+    let (lo_b, hi_b) = range(b);
+    let (lo, hi) = (lo_a.min(lo_b), hi_a.max(hi_b));
+    if lo >= 0 {
+        return Ok(if hi <= i128::from(u8::MAX) {
+            Dtype::U8
+        } else if hi <= i128::from(u16::MAX) {
+            Dtype::U16
+        } else {
+            Dtype::U32
+        });
+    }
+    if lo >= i128::from(i8::MIN) && hi <= i128::from(i8::MAX) {
+        Ok(Dtype::I8)
+    } else if lo >= i128::from(i16::MIN) && hi <= i128::from(i16::MAX) {
+        Ok(Dtype::I16)
+    } else if lo >= i128::from(i32::MIN) && hi <= i128::from(i32::MAX) {
+        Ok(Dtype::I32)
+    } else {
+        bail!(
+            "BED columns of dtypes {} and {} cannot share one wide track (range exceeds int32)",
+            a.as_str(),
+            b.as_str()
+        )
+    }
 }
 
 /// Open `path` as a store, creating it when it does not exist yet. Importing
@@ -615,6 +940,41 @@ fn import_bam(args: BamArgs) -> Result<()> {
     };
 
     let output = args.bam.output;
+    if args.import.dry_run {
+        let source = &sources[0];
+        let reader = BamReader::open(&source.path, args.bam.reference.as_deref(), mode, filter)
+            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
+        let source_columns = (n_sources > 1 || config.column_dim.is_some()).then(|| {
+            (
+                config
+                    .column_dim
+                    .clone()
+                    .unwrap_or_else(|| "sample".to_owned()),
+                sources
+                    .iter()
+                    .map(pbzarr::import::Source::label)
+                    .collect::<Vec<_>>(),
+            )
+        });
+        // Field 0 keeps the bare track name and the rest append their field
+        // name, matching `from_bam`'s composition naming.
+        let tracks: Vec<PlannedTrack> = reader
+            .output_schema()
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| PlannedTrack {
+                name: match (index, field.name.as_deref()) {
+                    (0, _) | (_, None) => args.bam.track.clone(),
+                    (_, Some(name)) => format!("{}_{name}", args.bam.track),
+                },
+                dtype: field.dtype,
+                columns: source_columns.clone(),
+            })
+            .collect();
+        print_dry_run(&output, reader.contigs(), &tracks, &config, n_sources);
+        return Ok(());
+    }
     let mut store = open_or_create(&output)?;
 
     let report = from_bam(

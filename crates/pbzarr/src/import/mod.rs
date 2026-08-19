@@ -1,15 +1,23 @@
-//! Import pipeline. Bulk-write per-base data from `ValueReader` sources
-//! into a `PbzStore` track via a `crossbeam-channel` worker pool.
+//! Import: bulk-write per-base data from `ValueReader` sources into `PbzStore`
+//! tracks via a `crossbeam-channel` worker pool.
 //!
-//! The pipeline is format-agnostic: it drives any `ValueReader`. Format
-//! bindings (e.g. d4) live in their own crates and call `run_pipeline`.
+//! The engine is format-agnostic: it drives any `ValueReader`. Format readers
+//! (d4, bigWig, BED, BAM/CRAM) live in their own crates and start runs through
+//! [`Import`].
 
-mod pipeline;
+mod builder;
+mod config;
+mod engine;
+mod estimate;
 pub mod progress;
+mod routing;
 mod source;
 
-pub use pipeline::{
-    Config, ProgressSink, Report, run_matrix_pipeline, run_multi_pipeline, run_pipeline,
-    run_wide_pipeline,
+pub use builder::{Import, ImportBuilder};
+pub use config::{Config, ProgressSink, Report};
+pub use engine::{CostModel, PipelineOptions, TapMessage};
+pub use estimate::{
+    GenomeGeometry, LayoutEstimate, LayoutKnobs, LevelEstimate, TrackEstimate, TrackShape,
 };
+pub use routing::{ImportRouting, SourceAxis, TrackTarget};
 pub use source::Source;
