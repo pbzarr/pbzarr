@@ -48,16 +48,21 @@ pub fn write_bigwig(
     bw_path
 }
 
-/// True if both `bgzip` and `tabix` are on PATH.
+/// True if both `bgzip` and `tabix` are on PATH. With `PBZ_REQUIRE_TOOLS`
+/// set (CI), a missing tool panics instead of letting callers self-skip.
 #[allow(dead_code)]
 pub fn htslib_available() -> bool {
-    ["bgzip", "tabix"].iter().all(|bin| {
+    let ok = ["bgzip", "tabix"].iter().all(|bin| {
         Command::new(bin)
             .arg("--version")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
-    })
+    });
+    if !ok && std::env::var_os("PBZ_REQUIRE_TOOLS").is_some() {
+        panic!("PBZ_REQUIRE_TOOLS is set but bgzip/tabix are not on PATH");
+    }
+    ok
 }
 
 /// Write a plain BED with a `#`-prefixed header, bgzip it, and tabix-index it.

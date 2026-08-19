@@ -13,12 +13,18 @@ use pbzarr::io::ValueReader;
 use pbzarr_readers::D4Reader;
 use tempfile::TempDir;
 
+/// True if `d4tools` is on PATH. With `PBZ_REQUIRE_TOOLS` set (CI), a
+/// missing tool panics instead of letting callers self-skip.
 fn d4tools_available() -> bool {
-    process::Command::new("d4tools")
+    let ok = process::Command::new("d4tools")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !ok && std::env::var_os("PBZ_REQUIRE_TOOLS").is_some() {
+        panic!("PBZ_REQUIRE_TOOLS is set but d4tools is not on PATH");
+    }
+    ok
 }
 
 /// Build a tiny d4 file by piping a bedGraph through `d4tools create`.

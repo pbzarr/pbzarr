@@ -9,6 +9,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Tool-gated e2e tests (samtools/d4tools/htslib) must not silently skip
+      # in CI; the pixi env provides the tools.
+      PBZ_REQUIRE_TOOLS: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -22,3 +26,19 @@ jobs:
       - run: pixi run clippy
 
       - run: pixi run fmt-check
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          pixi-version: v0.70.1
+          cache: true
+
+      - run: pixi run install-wheel
+
+      - run: pixi run test-py
+
+      - run: pixi run validate-roundtrip

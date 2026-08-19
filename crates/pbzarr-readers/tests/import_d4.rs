@@ -10,12 +10,18 @@ use pbzarr::{PbzStore, Region};
 use pbzarr_readers::from_d4;
 use tempfile::TempDir;
 
+/// True if `d4tools` is on PATH. With `PBZ_REQUIRE_TOOLS` set (CI), a
+/// missing tool panics instead of letting callers self-skip.
 fn have_d4tools() -> bool {
-    Command::new("d4tools")
+    let ok = Command::new("d4tools")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !ok && std::env::var_os("PBZ_REQUIRE_TOOLS").is_some() {
+        panic!("PBZ_REQUIRE_TOOLS is set but d4tools is not on PATH");
+    }
+    ok
 }
 
 /// Write a tiny bedGraph-based d4 where positions [i*10, (i+1)*10) carry value

@@ -15,12 +15,18 @@ pub struct Fixture {
     pub fasta: PathBuf,
 }
 
+/// True if `samtools` is on PATH. With `PBZ_REQUIRE_TOOLS` set (CI), a
+/// missing tool panics instead of letting callers self-skip.
 fn have_samtools() -> bool {
-    Command::new("samtools")
+    let ok = Command::new("samtools")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !ok && std::env::var_os("PBZ_REQUIRE_TOOLS").is_some() {
+        panic!("PBZ_REQUIRE_TOOLS is set but samtools is not on PATH");
+    }
+    ok
 }
 
 /// `ref1` is 100bp, `ref2` is 60bp, both a repeating `ACGT` motif so the
