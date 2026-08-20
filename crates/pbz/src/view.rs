@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
@@ -18,9 +19,17 @@ pub(crate) struct ViewSpec {
     pub columns: Vec<String>,
     pub output: Option<PathBuf>,
     pub no_header: bool,
+    pub threads: Option<NonZeroUsize>,
 }
 
 pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
+    // One rayon pool serves both zarrs chunk decode and BGZF compression.
+    if let Some(threads) = spec.threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads.get())
+            .build_global()
+            .context("configure worker thread pool")?;
+    }
     let store = PbzStore::open(&spec.store)
         .with_context(|| format!("open store {}", spec.store.display()))?;
     let track = resolve_track(&store, spec.track.as_deref())?;

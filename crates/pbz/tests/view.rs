@@ -152,3 +152,22 @@ fn gz_output_writes_bgzf_with_identical_content() {
     reader.read_to_string(&mut text).unwrap();
     assert_eq!(text, plain);
 }
+
+#[test]
+fn threads_option_does_not_change_output() {
+    let dir = TempDir::new().unwrap();
+    let store = build_store(dir.path());
+    let default_run = stdout_of(&run_pbz([
+        "view".into(),
+        store.as_os_str().to_owned(),
+        "depth".into(),
+    ]));
+    let capped = stdout_of(&run_pbz([
+        "view".into(),
+        "-t".into(),
+        "1".into(),
+        store.into_os_string(),
+        "depth".into(),
+    ]));
+    assert_eq!(capped, default_run);
+}

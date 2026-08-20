@@ -62,6 +62,10 @@ struct ViewArgs {
     /// Do not write the `#chrom start end ...` header line.
     #[arg(long)]
     no_header: bool,
+    /// Worker threads for chunk decode and BGZF compression.
+    /// Default: all cores.
+    #[arg(short('t'), long, value_name = "N")]
+    threads: Option<std::num::NonZeroUsize>,
 }
 
 #[derive(Debug, Args)]
@@ -478,6 +482,7 @@ fn view(args: ViewArgs) -> Result<()> {
         columns: args.columns,
         output: args.output,
         no_header: args.no_header,
+        threads: args.threads,
     })
 }
 

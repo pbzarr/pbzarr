@@ -17,6 +17,7 @@ log = "0.4"
 noodles-bgzf = "0.48"
 pbzarr = { path = "../pbzarr" }
 pbzarr-readers = { path = "../pbzarr-readers" }
+rayon = "1"
 zmij = "1.0"
 
 [dev-dependencies]

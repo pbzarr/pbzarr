@@ -1870,6 +1870,7 @@ dependencies = [
  "noodles-bgzf 0.48.0",
  "pbzarr",
  "pbzarr-readers",
+ "rayon",
  "tempfile",
  "zmij",
 ]
