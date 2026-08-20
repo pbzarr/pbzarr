@@ -1866,9 +1866,12 @@ dependencies = [
  "env_logger",
  "indicatif-log-bridge",
  "log",
+ "ndarray",
+ "noodles-bgzf 0.48.0",
  "pbzarr",
  "pbzarr-readers",
  "tempfile",
+ "zmij",
 ]
 
 [[package]]

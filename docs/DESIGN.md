@@ -127,7 +127,7 @@ Cross-language validation writes a regular fixture with Rust, opens it through r
 
 The `pbz` CLI ships `import bed`, `import bam`, and `scale` for existing tracks. The import subcommands take positional `PATH[:LABEL]` sources or `--file-list`, plus `--codecs`, `--scales`, `--threads`, and `--dry-run`. `import bed` also takes a `--schema` TSV. `--dry-run` resolves the import, prints the destination tracks and a layout estimate (files, spans, scratch memory, warnings), and creates nothing.
 
-The `view` subcommand is not implemented. d4 and bigWig sources import through Python only.
+`view` exports one track as bedGraph-like TSV: `chrom`, `start`, `end`, then one value column per track column, with equal-value runs collapsed and rows in genome order. Positions whose values are all missing (NaN fill) are skipped. It subsets rank-2 columns with `--columns` and writes BGZF when the output path ends in `.gz`.
 
 ## Deferred work
 

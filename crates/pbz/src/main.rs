@@ -22,6 +22,8 @@ use pbzarr_readers::{
     read_bed_layout,
 };
 
+mod view;
+
 #[derive(Debug, Parser)]
 #[command(name = "pbz", version, about = "Per-base Zarr tools")]
 struct Cli {
@@ -31,7 +33,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Inspect a PBZ store.
+    /// Export one track as bedGraph-like text.
     View(ViewArgs),
     /// Import data into a PBZ store.
     Import(Box<ImportArgs>),
@@ -40,13 +42,26 @@ enum Command {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_help = "Examples:\n  pbz view cohort.pbz depth\n  pbz view -o depth.bedgraph.gz cohort.pbz depth\n  pbz view -c s1,s2 cohort.pbz af"
+)]
 struct ViewArgs {
     #[command(flatten)]
     global: GlobalOptions,
-    /// PBZ store to inspect.
+    /// PBZ store to export.
     store: PathBuf,
-    /// Track to view (defaults to first track if multiple present)
+    /// Track to export. Optional when the store holds exactly one track.
     track: Option<String>,
+    /// Column labels of a rank-2 track, comma-separated or repeated.
+    /// Default: all columns in stored order.
+    #[arg(short('c'), long, value_name = "LABEL", value_delimiter = ',')]
+    columns: Vec<String>,
+    /// Output path. A `.gz` suffix writes BGZF; default is stdout.
+    #[arg(short('o'), long, value_name = "PATH")]
+    output: Option<PathBuf>,
+    /// Do not write the `#chrom start end ...` header line.
+    #[arg(long)]
+    no_header: bool,
 }
 
 #[derive(Debug, Args)]
@@ -457,7 +472,13 @@ fn main() -> Result<()> {
 
 fn view(args: ViewArgs) -> Result<()> {
     init_logging(&args.global);
-    bail!("view is not implemented yet for {}", args.store.display())
+    view::run_view(&view::ViewSpec {
+        store: args.store,
+        track: args.track,
+        columns: args.columns,
+        output: args.output,
+        no_header: args.no_header,
+    })
 }
 
 fn scale_cmd(args: ScaleArgs) -> Result<()> {
