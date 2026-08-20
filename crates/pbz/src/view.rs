@@ -38,7 +38,8 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
         {
             let file =
                 File::create(path).with_context(|| format!("create output {}", path.display()))?;
-            let mut out = bgzf::io::Writer::new(file);
+            // Deflate dominates the export cost; compress blocks on a pool.
+            let mut out = bgzf::io::MultithreadedWriter::new(file);
             stream(track, &columns, &names, spec.no_header, &mut out)?;
             out.finish()?;
         }
