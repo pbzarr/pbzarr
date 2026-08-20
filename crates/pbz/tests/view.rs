@@ -105,8 +105,8 @@ fn float_track_skips_all_missing_positions() {
     assert_eq!(
         stdout_of(&output),
         "#chrom\tstart\tend\ts1\ts2\n\
-         chr1\t2\t4\t0.5\t1.0\n\
-         chr1\t4\t6\t0.25\t1.0\n"
+         chr1\t2\t4\t0.5\t1\n\
+         chr1\t4\t6\t0.25\t1\n"
     );
 }
 
@@ -122,7 +122,7 @@ fn column_subset_and_no_header() {
         store.into_os_string(),
         "af".into(),
     ]);
-    assert_eq!(stdout_of(&output), "chr1\t2\t6\t1.0\n");
+    assert_eq!(stdout_of(&output), "chr1\t2\t6\t1\n");
 }
 
 #[test]

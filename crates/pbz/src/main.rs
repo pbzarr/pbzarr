@@ -66,6 +66,10 @@ struct ViewArgs {
     /// Default: all cores.
     #[arg(short('t'), long, value_name = "N")]
     threads: Option<std::num::NonZeroUsize>,
+    /// Significant digits for float values, `%g` style (UCSC bigWig
+    /// convention).
+    #[arg(short('p'), long, value_name = "N", default_value_t = 6)]
+    precision: u8,
 }
 
 #[derive(Debug, Args)]
@@ -483,6 +487,7 @@ fn view(args: ViewArgs) -> Result<()> {
         output: args.output,
         no_header: args.no_header,
         threads: args.threads,
+        precision: args.precision,
     })
 }
 
