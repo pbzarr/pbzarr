@@ -24,6 +24,9 @@ pub struct Config {
     /// Open spans allowed at once in the engine; `0` = auto (see
     /// `PipelineOptions::in_flight_spans`).
     pub in_flight_spans: usize,
+    /// Reader handle budget across all readers; 0 = auto (see
+    /// `PipelineOptions::handle_budget`).
+    pub handle_budget: usize,
     /// Position chunk size for the track being imported. Consumed by the
     /// format entry points when they create the track; the engine always
     /// steps by the track's on-disk chunk grid.
@@ -60,6 +63,7 @@ impl Default for Config {
         Self {
             workers: 4,
             in_flight_spans: 0,
+            handle_budget: 0,
             chunk_size: None,
             column_chunk_size: None,
             shard_size: None,
@@ -156,4 +160,6 @@ pub struct Report {
     pub worker_idle_seconds: f64,
     /// Producer time blocked on the in-flight span gate.
     pub gate_wait_seconds: f64,
+    /// Summed time workers spent blocked on reader handle checkout.
+    pub handle_wait_seconds: f64,
 }

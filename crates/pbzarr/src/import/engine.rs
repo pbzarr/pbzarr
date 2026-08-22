@@ -49,6 +49,11 @@ pub struct PipelineOptions {
     /// runnable pieces target 3x the worker count, clamped to `[8, 256]` and
     /// to the span count.
     pub in_flight_spans: usize,
+    /// Reader handles (forks) allowed across all readers at once. `0` = auto:
+    /// derived from the soft fd limit with a margin for the store and
+    /// indexes, see `auto_handle_budget`. Each reader's pool gets
+    /// `budget / readers`, at least 1, at most `workers`.
+    pub handle_budget: usize,
     pub progress: Option<Arc<dyn ProgressSink>>,
 }
 
@@ -57,6 +62,7 @@ impl Default for PipelineOptions {
         Self {
             workers: 4,
             in_flight_spans: 0,
+            handle_budget: 0,
             progress: None,
         }
     }
@@ -68,6 +74,40 @@ pub fn auto_in_flight_spans(workers: usize, n_readers: usize) -> usize {
     (3 * workers.max(1))
         .div_ceil(n_readers.max(1))
         .clamp(8, 256)
+}
+
+/// The auto rule for `PipelineOptions::handle_budget` = 0. Two fds per handle
+/// (data + index); a quarter of the limit plus 128 fds stay free for the
+/// store, shard files, and the base readers.
+pub fn auto_handle_budget(soft_fd_limit: u64, n_readers: usize) -> usize {
+    let usable = (soft_fd_limit * 3 / 4).saturating_sub(128) / 2;
+    usize::try_from(usable)
+        .unwrap_or(usize::MAX)
+        .max(n_readers.max(1))
+}
+
+/// The process soft `RLIMIT_NOFILE`, capped so an unlimited rlimit does not
+/// blow up the budget arithmetic.
+#[cfg(unix)]
+pub(crate) fn soft_fd_limit() -> u64 {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes into the provided struct and has no other effect.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0 {
+        // `rlim_t` is not u64 on every unix target.
+        #[allow(clippy::useless_conversion)]
+        let current = u64::try_from(lim.rlim_cur).unwrap_or(u64::MAX);
+        current.min(1 << 20)
+    } else {
+        1024
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn soft_fd_limit() -> u64 {
+    1024
 }
 
 /// When attached, spans are opened in descending order of summed cost
@@ -399,6 +439,70 @@ struct SpanGroup {
     remaining: usize,
 }
 
+/// Idle forks of one reader, capped at `capacity` live forks. Forks are
+/// created on demand, so a reader no worker ever decodes opens nothing.
+struct HandlePool<R> {
+    /// `(idle handles, handles created)`.
+    idle: Mutex<(Vec<R>, usize)>,
+    cv: Condvar,
+    capacity: usize,
+}
+
+impl<R: ValueReader> HandlePool<R> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            idle: Mutex::new((Vec::new(), 0)),
+            cv: Condvar::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// Blocks while every handle is checked out; returns `Ok(None)` once the
+    /// engine has aborted so a waiting worker can drain.
+    fn checkout(
+        &self,
+        fork: impl FnOnce() -> std::result::Result<R, crate::io::ReaderError>,
+        aborted: &AtomicBool,
+    ) -> Result<Option<R>> {
+        let mut guard = self.idle.lock().expect("handle pool poisoned");
+        loop {
+            if let Some(handle) = guard.0.pop() {
+                return Ok(Some(handle));
+            }
+            if guard.1 < self.capacity {
+                guard.1 += 1;
+                drop(guard);
+                return match fork() {
+                    Ok(handle) => Ok(Some(handle)),
+                    Err(e) => {
+                        self.idle.lock().expect("handle pool poisoned").1 -= 1;
+                        self.cv.notify_one();
+                        Err(PbzError::Reader(e))
+                    }
+                };
+            }
+            if aborted.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            // The timeout is what lets a blocked checkout notice an abort.
+            guard = self
+                .cv
+                .wait_timeout(guard, Duration::from_millis(50))
+                .expect("handle pool poisoned")
+                .0;
+        }
+    }
+
+    fn checkin(&self, handle: R) {
+        self.idle
+            .lock()
+            .expect("handle pool poisoned")
+            .0
+            .push(handle);
+        self.cv.notify_one();
+    }
+}
+
 /// One stage's accumulated timing: sum, event count, and slowest event.
 #[derive(Default)]
 struct StageTimer {
@@ -443,6 +547,8 @@ struct RunTimings {
     decode: StageTimer,
     /// Per piece: the `may_have_data` probe alone (also inside `decode`).
     probe: StageTimer,
+    /// Per piece: time blocked checking a reader handle out of its pool.
+    handle_wait: StageTimer,
     /// Per touched buffer: time blocked acquiring the slot's lock at merge.
     slot_wait: StageTimer,
     /// Per touched buffer: the region copy into the shared buffer, under
@@ -1004,11 +1110,17 @@ pub(crate) fn run_import<R: ValueReader>(
         0 => auto_in_flight_spans(workers, n_readers).min(n_spans.max(1)),
         n => n,
     };
+    let handle_budget = match options.handle_budget {
+        0 => auto_handle_budget(soft_fd_limit(), n_readers),
+        n => n,
+    };
+    let pool_size = (handle_budget / n_readers.max(1)).clamp(1, workers);
     let started = Instant::now();
     let names: Vec<&str> = tracks.iter().map(|t| t.name()).collect();
     info!(
         "import pipeline: {} track(s) {names:?}, {total} positions, {n_spans} span(s) of \
-         {chunk_len}, {n_readers} reader(s), {workers} workers, {in_flight} span(s) in flight",
+         {chunk_len}, {n_readers} reader(s), {workers} workers, {in_flight} span(s) in flight, \
+         {handle_budget} handle(s) budget, {pool_size} per reader",
         tracks.len()
     );
 
@@ -1040,9 +1152,10 @@ pub(crate) fn run_import<R: ValueReader>(
         group_sizes,
     };
 
-    // Workers fork lazily on first use and cache the fork by reader index, so
-    // this lock is taken at most once per (worker, reader) pair.
+    // `fork` takes `&self`, but `ValueReader` is not `Sync`, so the base
+    // readers are reached under a lock held only across the fork call.
     let originals = Mutex::new(readers);
+    let pools: Vec<HandlePool<R>> = (0..n_readers).map(|_| HandlePool::new(pool_size)).collect();
 
     let (piece_tx, piece_rx) = bounded::<Piece>((workers * 2).max(1));
 
@@ -1051,8 +1164,8 @@ pub(crate) fn run_import<R: ValueReader>(
             let piece_rx = piece_rx.clone();
             let ctx = &ctx;
             let originals = &originals;
+            let pools = &pools;
             scope.spawn(move || {
-                let mut forks: HashMap<usize, R> = HashMap::new();
                 let mut busy = Duration::ZERO;
                 let mut idle = Duration::ZERO;
                 loop {
@@ -1060,30 +1173,33 @@ pub(crate) fn run_import<R: ValueReader>(
                     let Ok(piece) = piece_rx.recv() else { break };
                     idle += wait_start.elapsed();
                     let work_start = Instant::now();
+                    // Stalling on a pool is not work, so it comes back out of
+                    // `busy` below and is reported as its own stage.
+                    let mut stalled = Duration::ZERO;
                     'piece: {
                         if ctx.state.has_err() {
                             // Drain so the channel closes cleanly; the gate is
                             // already aborted, so nothing blocks on us.
                             break 'piece;
                         }
-                        if let std::collections::hash_map::Entry::Vacant(slot) =
-                            forks.entry(piece.reader)
-                        {
-                            let fork = originals.lock().expect("readers poisoned")[piece.reader]
-                                .fork()
-                                .map_err(PbzError::Reader);
-                            match fork {
-                                Ok(fork) => {
-                                    slot.insert(fork);
-                                }
-                                Err(e) => {
-                                    ctx.state.record_err(e);
-                                    break 'piece;
-                                }
+                        let checkout_start = Instant::now();
+                        let checked_out = pools[piece.reader].checkout(
+                            || originals.lock().expect("readers poisoned")[piece.reader].fork(),
+                            &ctx.state.err_flag,
+                        );
+                        stalled = checkout_start.elapsed();
+                        ctx.state.timings.handle_wait.record(stalled);
+                        let mut reader = match checked_out {
+                            Ok(Some(reader)) => reader,
+                            Ok(None) => break 'piece,
+                            Err(e) => {
+                                ctx.state.record_err(e);
+                                break 'piece;
                             }
-                        }
-                        let reader = forks.get_mut(&piece.reader).expect("fork cached above");
-                        if let Err(e) = process_piece(ctx, reader, piece) {
+                        };
+                        let result = process_piece(ctx, &mut reader, piece);
+                        pools[piece.reader].checkin(reader);
+                        if let Err(e) = result {
                             ctx.state.record_err(e);
                             break 'piece;
                         }
@@ -1092,7 +1208,7 @@ pub(crate) fn run_import<R: ValueReader>(
                             ctx.state.gate.release();
                         }
                     }
-                    busy += work_start.elapsed();
+                    busy += work_start.elapsed().saturating_sub(stalled);
                 }
                 let timings = &ctx.state.timings;
                 timings
@@ -1173,7 +1289,8 @@ pub(crate) fn run_import<R: ValueReader>(
          shard wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s\n\
          write  : total {:.1}s  stores {}  mean {:.2}s  max {:.2}s\n\
          worker busy {busy:.0}s / idle {idle:.0}s ({busy_pct:.0}% busy)\n\
-         gate wait: {gate_wait:.1}s",
+         gate wait: {gate_wait:.1}s\n\
+         handle wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s",
         timings.decode.total_secs(),
         timings.decode.count(),
         timings.decode.mean_secs(),
@@ -1195,6 +1312,10 @@ pub(crate) fn run_import<R: ValueReader>(
         timings.write.count(),
         timings.write.mean_secs(),
         timings.write.max_secs(),
+        timings.handle_wait.total_secs(),
+        timings.handle_wait.count(),
+        timings.handle_wait.mean_secs(),
+        timings.handle_wait.max_secs(),
     );
 
     if let Some(e) = state.first_err.lock().expect("error slot poisoned").take() {
@@ -1213,6 +1334,7 @@ pub(crate) fn run_import<R: ValueReader>(
         worker_busy_seconds: busy,
         worker_idle_seconds: idle,
         gate_wait_seconds: gate_wait,
+        handle_wait_seconds: timings.handle_wait.total_secs(),
     })
 }
 
@@ -1759,5 +1881,157 @@ mod tests {
             chunk_file_count(&dir.path().join("sharded.pbz/depth/values")),
             4
         );
+    }
+
+    /// Counts live forks of one reader so a test can assert the pool cap.
+    struct ForkCounter {
+        genome: Genome,
+        schema: OutputSchema,
+        live: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    impl Drop for ForkCounter {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl ValueReader for ForkCounter {
+        fn contigs(&self) -> &Genome {
+            &self.genome
+        }
+
+        fn output_schema(&self) -> &OutputSchema {
+            &self.schema
+        }
+
+        fn read_into(
+            &mut self,
+            _contig: &str,
+            _start: u64,
+            _end: u64,
+            outputs: &mut [OutputSinkMut<'_>],
+        ) -> std::result::Result<(), crate::io::ReaderError> {
+            thread::sleep(Duration::from_millis(5));
+            outputs[0].as_i32_mut()?.fill(1);
+            Ok(())
+        }
+
+        fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
+            let n = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(n, Ordering::SeqCst);
+            Ok(Self {
+                genome: self.genome.clone(),
+                schema: self.schema.clone(),
+                live: Arc::clone(&self.live),
+                peak: Arc::clone(&self.peak),
+            })
+        }
+    }
+
+    #[test]
+    fn auto_handle_budget_reserves_margin() {
+        assert_eq!(auto_handle_budget(1024, 10), (1024 * 3 / 4 - 128) / 2);
+        // The floor is one handle per reader.
+        assert_eq!(auto_handle_budget(256, 100), 100);
+    }
+
+    /// One reader, many workers, a budget of two handles: forks never exceed
+    /// the pool size, every piece completes, and the wait is accounted.
+    #[test]
+    fn handle_pool_caps_forks_and_completes() {
+        let dir = TempDir::new().unwrap();
+        let genome = one_contig(64);
+        let mut store = PbzStore::create(dir.path().join("pool.pbz")).unwrap();
+        store
+            .create_track(
+                "v",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32).chunk_size(4),
+            )
+            .unwrap();
+
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let reader = ForkCounter {
+            genome: genome.clone(),
+            schema: OutputSchema::single("value", Dtype::I32),
+            live: Arc::clone(&live),
+            peak: Arc::clone(&peak),
+        };
+        let report = Import::from_readers(vec![reader])
+            .unwrap()
+            .into_track(store.track("v").unwrap())
+            .options(PipelineOptions {
+                workers: 8,
+                handle_budget: 2,
+                ..PipelineOptions::default()
+            })
+            .run()
+            .unwrap();
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(peak <= 2, "peak forks {peak}");
+        assert_eq!(report.tasks_completed, 16);
+        // Six of the eight workers stall on the two handles, so the stall
+        // outweighs the work. Counting the stall as busy would invert this.
+        assert!(
+            report.worker_busy_seconds < report.handle_wait_seconds,
+            "handle wait leaked into worker busy time: busy {} vs wait {}",
+            report.worker_busy_seconds,
+            report.handle_wait_seconds
+        );
+
+        let values = store
+            .track("v")
+            .unwrap()
+            .read_region::<i32>(&whole(&store, "v", 64))
+            .unwrap()
+            .into_dimensionality::<Ix1>()
+            .unwrap();
+        assert!(values.iter().all(|&x| x == 1));
+    }
+
+    /// Budget below the reader count: every reader still gets one handle.
+    #[test]
+    fn handle_budget_floor_finishes_import() {
+        let dir = TempDir::new().unwrap();
+        let genome = one_contig(32);
+        let labels = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut store = PbzStore::create(dir.path().join("floor.pbz")).unwrap();
+        store
+            .create_track(
+                "v",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32)
+                    .columns(labels.clone())
+                    .chunk_size(8),
+            )
+            .unwrap();
+
+        let readers: Vec<SynthReader> = (0..3)
+            .map(|i| SynthReader::new(genome.clone(), Dtype::I32, 0..32, (i + 1) * 100))
+            .collect();
+        Import::from_readers(readers)
+            .unwrap()
+            .into_track(store.track("v").unwrap())
+            .readers_as_columns()
+            .expect_column_labels(labels)
+            .options(PipelineOptions {
+                workers: 4,
+                handle_budget: 1,
+                ..PipelineOptions::default()
+            })
+            .run()
+            .unwrap();
+
+        let values = store
+            .track("v")
+            .unwrap()
+            .read_region::<i32>(&whole(&store, "v", 32))
+            .unwrap()
+            .into_dimensionality::<Ix2>()
+            .unwrap();
+        assert_eq!(values[[5, 2]], 300 + 5);
     }
 }

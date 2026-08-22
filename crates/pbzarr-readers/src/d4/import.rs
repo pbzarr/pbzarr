@@ -50,6 +50,7 @@ pub fn from_d4(
     let options = PipelineOptions {
         workers: config.workers,
         in_flight_spans: config.in_flight_spans,
+        handle_budget: config.handle_budget,
         progress: config.progress.clone(),
     };
     let report = store.create_tracks_with(

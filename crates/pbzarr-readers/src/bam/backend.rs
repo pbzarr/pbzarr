@@ -190,6 +190,23 @@ fn append_ext(path: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// htslib hides errno in its open errors. Opening the data file and its
+/// index with std first surfaces the OS error (EMFILE, ENOENT, EACCES)
+/// when there is one. A missing index is left to htslib's own message,
+/// since that case is a legitimate "no index" rather than an OS failure.
+fn os_open_error(path: &Path) -> Option<ReaderError> {
+    let candidates = [path.to_path_buf(), append_ext(path, "crai")];
+    for p in candidates {
+        if let Err(source) = File::open(&p) {
+            if source.kind() == std::io::ErrorKind::NotFound && p != path {
+                continue;
+            }
+            return Some(ReaderError::Io { path: p, source });
+        }
+    }
+    None
+}
+
 fn open_cram(path: &Path, reference: Option<&Path>) -> Result<(Backend, Genome)> {
     let Some(reference) = reference else {
         return Err(ReaderError::Other(anyhow::anyhow!(
@@ -199,10 +216,12 @@ fn open_cram(path: &Path, reference: Option<&Path>) -> Result<(Backend, Genome)>
     };
 
     let mut reader = rust_htslib::bam::IndexedReader::from_path(path).map_err(|source| {
-        ReaderError::Other(anyhow::anyhow!(
-            "opening CRAM {} (index missing or invalid?): {source}",
-            path.display()
-        ))
+        os_open_error(path).unwrap_or_else(|| {
+            ReaderError::Other(anyhow::anyhow!(
+                "opening CRAM {} (index missing or invalid?): {source}",
+                path.display()
+            ))
+        })
     })?;
     reader.set_reference(reference).map_err(|source| {
         ReaderError::Other(anyhow::anyhow!(

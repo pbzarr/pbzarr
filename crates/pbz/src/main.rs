@@ -225,6 +225,7 @@ impl ImportOptions {
         Ok(Config {
             workers: self.threads,
             in_flight_spans: self.in_flight.unwrap_or(0),
+            handle_budget: 0,
             chunk_size: self.chunk_size,
             column_chunk_size: self.column_chunk_size,
             shard_size: self.shard_size,

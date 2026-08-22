@@ -443,6 +443,7 @@ fn report_to_dict(py: Python<'_>, report: &Report) -> PyResult<Py<PyAny>> {
     dict.set_item("worker_busy_seconds", report.worker_busy_seconds)?;
     dict.set_item("worker_idle_seconds", report.worker_idle_seconds)?;
     dict.set_item("gate_wait_seconds", report.gate_wait_seconds)?;
+    dict.set_item("handle_wait_seconds", report.handle_wait_seconds)?;
     Ok(dict.into_any().unbind())
 }
 

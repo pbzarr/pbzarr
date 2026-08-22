@@ -1883,6 +1883,7 @@ dependencies = [
  "fs-err",
  "hashbrown 0.17.1",
  "indicatif",
+ "libc",
  "log",
  "md5",
  "ndarray",

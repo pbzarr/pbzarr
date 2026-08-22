@@ -15,7 +15,9 @@ mod source;
 
 pub use builder::{Import, ImportBuilder};
 pub use config::{Config, ProgressSink, Report};
-pub use engine::{CostModel, PipelineOptions, TapMessage, auto_in_flight_spans};
+pub use engine::{
+    CostModel, PipelineOptions, TapMessage, auto_handle_budget, auto_in_flight_spans,
+};
 pub use estimate::{
     GenomeGeometry, LayoutEstimate, LayoutKnobs, LevelEstimate, TrackEstimate, TrackShape,
 };
