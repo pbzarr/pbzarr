@@ -47,6 +47,9 @@ use crate::io::{Dtype, OutputSinkMut, ReaderError, ValueReader, WindowSink};
 use crate::track::Track;
 
 pub struct PipelineOptions {
+    /// Decode worker thread count. On the first import in a process, this
+    /// also sizes rayon's global pool (which zarrs uses for encoding),
+    /// unless `RAYON_NUM_THREADS` is set.
     pub workers: usize,
     /// Open decode spans allowed at once. Bounds the open chunk buffers:
     /// each span holds up to `decode_chunks` buffers per track, and the
@@ -1373,6 +1376,16 @@ pub(crate) fn run_import<R: ValueReader>(
     let pools: Vec<HandlePool<R>> = (0..n_readers).map(|_| HandlePool::new(pool_size)).collect();
 
     let (piece_tx, piece_rx) = bounded::<Piece>((workers * 2).max(1));
+
+    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        // zarrs encodes subchunks on rayon's global pool, which defaults to
+        // one thread per logical CPU and contends with the decode workers
+        // above. `build_global` only takes effect the first time it succeeds
+        // in a process, hence the ignored error here.
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build_global();
+    }
 
     thread::scope(|scope| {
         for _ in 0..workers {

@@ -1887,6 +1887,7 @@ dependencies = [
  "log",
  "md5",
  "ndarray",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",
