@@ -21,6 +21,74 @@ pub use reader::BamReader;
 pub use record::{AlignedRead, CigarKind};
 pub use walk::ImportMode;
 
+/// Which per-record fields a decode pass has to fill.
+///
+/// Depth mode with `min_bq == 0` never consults a base quality and never
+/// looks at a base letter, so both backends can leave `AlignedRead::seq` and
+/// `AlignedRead::qual` empty. On CRAM that is worth more than the skipped
+/// copy: htslib is told through `CRAM_OPT_REQUIRED_FIELDS` not to decode the
+/// SEQ and QUAL data series at all.
+///
+/// `pub` rather than `pub(crate)` because `Backend::open` takes it and is
+/// itself `pub` in a `pub` module, which makes a `pub(crate)` parameter type
+/// trip `private_interfaces` under `-D warnings`. `#[doc(hidden)]` keeps it
+/// out of the generated docs, same as the submodules above.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordFields {
+    /// Decode everything, including SEQ and QUAL.
+    Full,
+    /// Decode only what the depth walk reads; SEQ and QUAL stay empty.
+    DepthOnly,
+}
+
+impl RecordFields {
+    /// The depth walk reads a quality only to compare it against `min_bq`,
+    /// and reads a base letter only in composition mode.
+    pub fn for_pass(mode: ImportMode, filter: &DepthFilter) -> Self {
+        if mode == ImportMode::Depth && filter.min_bq == 0 {
+            RecordFields::DepthOnly
+        } else {
+            RecordFields::Full
+        }
+    }
+}
+
+#[cfg(test)]
+mod record_fields_tests {
+    use super::*;
+
+    fn filter(min_bq: u8) -> DepthFilter {
+        DepthFilter {
+            min_bq,
+            ..DepthFilter::default()
+        }
+    }
+
+    /// All four corners of the `(mode, min_bq)` grid. Only depth with an
+    /// ungated base quality may drop SEQ and QUAL; composition reads a base
+    /// letter at every position, whatever `min_bq` says.
+    #[test]
+    fn for_pass_drops_seq_and_qual_only_for_ungated_depth() {
+        assert_eq!(
+            RecordFields::for_pass(ImportMode::Depth, &filter(0)),
+            RecordFields::DepthOnly
+        );
+        assert_eq!(
+            RecordFields::for_pass(ImportMode::Depth, &filter(20)),
+            RecordFields::Full
+        );
+        assert_eq!(
+            RecordFields::for_pass(ImportMode::Composition, &filter(0)),
+            RecordFields::Full
+        );
+        assert_eq!(
+            RecordFields::for_pass(ImportMode::Composition, &filter(20)),
+            RecordFields::Full
+        );
+    }
+}
+
 /// How mate-overlap dedup gates on the `PROPER_PAIR` flag (0x2).
 ///
 /// `ProperOnly` (the default) matches mosdepth: only pairs both flagged

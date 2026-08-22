@@ -86,8 +86,10 @@ impl Accumulators {
     }
 }
 
-/// The no-gate, depth-only Match-block inner loop: bumps `depth[i]` for
-/// every base whose quality clears `min_bq`. Kept as a standalone function so
+/// The no-gate, depth-only Match-block inner loop for a `min_bq` above zero:
+/// bumps `depth[i]` for every base whose quality clears it. A `min_bq` of
+/// zero takes the unconditional block increment in `walk_record` instead and
+/// never calls this. Kept as a standalone function so
 /// it can be SIMD-optimized without touching the gated/composition paths,
 /// which still need the per-base branch for claim recording and base
 /// tallies. The 16-lane `wide::u8x16` body adds the 0/1 mask onto the `i32`
@@ -203,19 +205,31 @@ pub fn walk_record(
 
                     if mode == ImportMode::Depth && matches!(state, State::None) {
                         let depth = &mut acc.fields[DEPTH][local_lo..local_hi];
-                        match read.qual.get(read_lo..read_lo + (hi - lo) as usize) {
-                            Some(quals) => bump_depth(depth, quals, filter.min_bq),
-                            // The quality buffer doesn't cover this block, so
-                            // fall back to the per-position rule the gated path
-                            // uses (`qual_at`): real score where there is one,
-                            // pass where there isn't. `bump_depth` can't be
-                            // handed the short slice instead -- it stops at the
-                            // shorter of the two, which would drop the
-                            // uncovered positions rather than pass them.
-                            None => {
-                                for (i, d) in depth.iter_mut().enumerate() {
-                                    if qual_at(read, read_lo + i) >= filter.min_bq {
-                                        *d += 1;
+                        if filter.min_bq == 0 {
+                            // No quality can fall below 0, so the whole block
+                            // counts without consulting one. This is the case
+                            // `RecordFields::DepthOnly` leaves `read.qual`
+                            // empty for, so it must not read the buffer at
+                            // all.
+                            for d in depth.iter_mut() {
+                                *d += 1;
+                            }
+                        } else {
+                            match read.qual.get(read_lo..read_lo + (hi - lo) as usize) {
+                                Some(quals) => bump_depth(depth, quals, filter.min_bq),
+                                // The quality buffer doesn't cover this block,
+                                // so fall back to the per-position rule the
+                                // gated path uses (`qual_at`): real score
+                                // where there is one, pass where there isn't.
+                                // `bump_depth` can't be handed the short slice
+                                // instead -- it stops at the shorter of the
+                                // two, which would drop the uncovered
+                                // positions rather than pass them.
+                                None => {
+                                    for (i, d) in depth.iter_mut().enumerate() {
+                                        if qual_at(read, read_lo + i) >= filter.min_bq {
+                                            *d += 1;
+                                        }
                                     }
                                 }
                             }

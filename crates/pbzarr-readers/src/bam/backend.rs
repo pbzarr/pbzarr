@@ -14,6 +14,7 @@ use pbzarr::io::{ReaderError, Result};
 
 use crate::coords::{noodles_query_interval, pos_to_zero_based};
 
+use super::RecordFields;
 use super::record::{AlignedRead, CigarKind};
 
 /// A BAM index, read into a concrete type rather than relying on
@@ -40,9 +41,11 @@ pub enum Backend {
         reader: Box<bam::io::Reader<bgzf::io::Reader<File>>>,
         header: Box<sam::Header>,
         index: BamIndex,
+        fields: RecordFields,
     },
     Cram {
         reader: rust_htslib::bam::IndexedReader,
+        fields: RecordFields,
     },
 }
 
@@ -51,12 +54,17 @@ impl Backend {
     /// extension) and derive its `Genome`
     /// from the header's `@SQ` lines. `reference` is the FASTA a CRAM needs
     /// to decode records; required up front so a missing reference fails at
-    /// open rather than on the first `fetch`.
-    pub fn open(path: &Path, reference: Option<&Path>) -> Result<(Backend, Genome)> {
+    /// open rather than on the first `fetch`. `fields` says how much of each
+    /// record the caller will actually read (see [`RecordFields`]).
+    pub fn open(
+        path: &Path,
+        reference: Option<&Path>,
+        fields: RecordFields,
+    ) -> Result<(Backend, Genome)> {
         if is_cram(path) {
-            open_cram(path, reference)
+            open_cram(path, reference, fields)
         } else {
-            open_bam(path)
+            open_bam(path, fields)
         }
     }
 
@@ -72,8 +80,11 @@ impl Backend {
                 reader,
                 header,
                 index,
-            } => fetch_bam(reader, header, index, contig, start, end, visit),
-            Backend::Cram { reader } => fetch_cram(reader, contig, start, end, visit),
+                fields,
+            } => fetch_bam(reader, header, index, *fields, contig, start, end, visit),
+            Backend::Cram { reader, fields } => {
+                fetch_cram(reader, *fields, contig, start, end, visit)
+            }
         }
     }
 
@@ -85,8 +96,9 @@ impl Backend {
                 reader,
                 header,
                 index,
+                ..
             } => has_records_bam(reader, header, index, contig, start, end),
-            Backend::Cram { reader } => has_records_cram(reader, contig, start, end),
+            Backend::Cram { reader, .. } => has_records_cram(reader, contig, start, end),
         }
     }
 }
@@ -115,7 +127,7 @@ fn is_cram_by_extension(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("cram"))
 }
 
-fn open_bam(path: &Path) -> Result<(Backend, Genome)> {
+fn open_bam(path: &Path, fields: RecordFields) -> Result<(Backend, Genome)> {
     let file = File::open(path).map_err(|source| ReaderError::Io {
         path: path.to_path_buf(),
         source,
@@ -148,6 +160,7 @@ fn open_bam(path: &Path) -> Result<(Backend, Genome)> {
             reader: Box::new(reader),
             header: Box::new(header),
             index,
+            fields,
         },
         genome,
     ))
@@ -207,7 +220,29 @@ fn os_open_error(path: &Path) -> Option<ReaderError> {
     None
 }
 
-fn open_cram(path: &Path, reference: Option<&Path>) -> Result<(Backend, Genome)> {
+/// Every `sam_fields` bit except `SAM_SEQ` and `SAM_QUAL`: QNAME, FLAG,
+/// RNAME, POS, MAPQ, CIGAR, RNEXT, PNEXT, TLEN and AUX. Handed to htslib as
+/// `CRAM_OPT_REQUIRED_FIELDS` under [`RecordFields::DepthOnly`] so the SEQ
+/// and QUAL data series are never decoded.
+const CRAM_FIELDS_NO_SEQ_QUAL: rust_htslib::htslib::sam_fields = {
+    use rust_htslib::htslib as hts;
+    hts::sam_fields_SAM_QNAME
+        | hts::sam_fields_SAM_FLAG
+        | hts::sam_fields_SAM_RNAME
+        | hts::sam_fields_SAM_POS
+        | hts::sam_fields_SAM_MAPQ
+        | hts::sam_fields_SAM_CIGAR
+        | hts::sam_fields_SAM_RNEXT
+        | hts::sam_fields_SAM_PNEXT
+        | hts::sam_fields_SAM_TLEN
+        | hts::sam_fields_SAM_AUX
+};
+
+fn open_cram(
+    path: &Path,
+    reference: Option<&Path>,
+    fields: RecordFields,
+) -> Result<(Backend, Genome)> {
     let Some(reference) = reference else {
         return Err(ReaderError::Other(anyhow::anyhow!(
             "CRAM {} requires an explicit reference FASTA",
@@ -230,6 +265,19 @@ fn open_cram(path: &Path, reference: Option<&Path>) -> Result<(Backend, Genome)>
             path.display()
         ))
     })?;
+    if fields == RecordFields::DepthOnly {
+        reader
+            .set_cram_options(
+                rust_htslib::htslib::hts_fmt_option_CRAM_OPT_REQUIRED_FIELDS,
+                CRAM_FIELDS_NO_SEQ_QUAL,
+            )
+            .map_err(|source| {
+                ReaderError::Other(anyhow::anyhow!(
+                    "restricting CRAM fields for {}: {source}",
+                    path.display()
+                ))
+            })?;
+    }
 
     let header = reader.header();
     if header.target_count() == 0 {
@@ -252,7 +300,7 @@ fn open_cram(path: &Path, reference: Option<&Path>) -> Result<(Backend, Genome)>
         .collect();
     let genome = Genome::new(contigs).map_err(|e| ReaderError::Other(anyhow::anyhow!(e)))?;
 
-    Ok((Backend::Cram { reader }, genome))
+    Ok((Backend::Cram { reader, fields }, genome))
 }
 
 /// Builds the half-open `[start, end)` query region (0-based) as noodles'
@@ -278,10 +326,12 @@ fn bam_query_region<'r>(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fetch_bam(
     reader: &mut bam::io::Reader<bgzf::io::Reader<File>>,
     header: &sam::Header,
     index: &BamIndex,
+    fields: RecordFields,
     contig: &str,
     start: u64,
     end: u64,
@@ -300,7 +350,7 @@ fn fetch_bam(
         if n == 0 {
             break;
         }
-        decode_bam_record(&record, &mut read)?;
+        decode_bam_record(&record, fields, &mut read)?;
         visit(&read)?;
     }
     Ok(())
@@ -350,7 +400,11 @@ fn has_records_cram(
     }
 }
 
-fn decode_bam_record(record: &noodles_bam::Record, out: &mut AlignedRead) -> Result<()> {
+fn decode_bam_record(
+    record: &noodles_bam::Record,
+    fields: RecordFields,
+    out: &mut AlignedRead,
+) -> Result<()> {
     out.clear();
 
     let flags = record.flags();
@@ -394,8 +448,10 @@ fn decode_bam_record(record: &noodles_bam::Record, out: &mut AlignedRead) -> Res
             .push((map_sam_cigar_kind(op.kind()), op.len() as u32));
     }
 
-    out.seq.extend(record.sequence().iter());
-    out.qual.extend(record.quality_scores().iter());
+    if fields == RecordFields::Full {
+        out.seq.extend(record.sequence().iter());
+        out.qual.extend(record.quality_scores().iter());
+    }
 
     Ok(())
 }
@@ -414,6 +470,7 @@ fn map_sam_cigar_kind(kind: sam::alignment::record::cigar::op::Kind) -> CigarKin
 
 fn fetch_cram(
     reader: &mut rust_htslib::bam::IndexedReader,
+    fields: RecordFields,
     contig: &str,
     start: u64,
     end: u64,
@@ -435,7 +492,7 @@ fn fetch_cram(
                 result.map_err(|source| {
                     ReaderError::Other(anyhow::anyhow!("decode CRAM record: {source}"))
                 })?;
-                decode_cram_record(&record, &mut read);
+                decode_cram_record(&record, fields, &mut read);
                 visit(&read)?;
             }
         }
@@ -443,7 +500,11 @@ fn fetch_cram(
     Ok(())
 }
 
-fn decode_cram_record(record: &rust_htslib::bam::Record, out: &mut AlignedRead) {
+fn decode_cram_record(
+    record: &rust_htslib::bam::Record,
+    fields: RecordFields,
+    out: &mut AlignedRead,
+) {
     out.clear();
 
     out.flags = record.flags();
@@ -468,13 +529,15 @@ fn decode_cram_record(record: &rust_htslib::bam::Record, out: &mut AlignedRead) 
         out.cigar.push((kind, len));
     }
 
-    let seq = record.seq();
-    out.seq.reserve(seq.len());
-    for i in 0..seq.len() {
-        out.seq.push(seq[i]);
-    }
+    if fields == RecordFields::Full {
+        let seq = record.seq();
+        out.seq.reserve(seq.len());
+        for i in 0..seq.len() {
+            out.seq.push(seq[i]);
+        }
 
-    out.qual.extend_from_slice(record.qual());
+        out.qual.extend_from_slice(record.qual());
+    }
 }
 
 fn map_htslib_cigar(cigar: &HtslibCigar) -> (CigarKind, u32) {

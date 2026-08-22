@@ -21,10 +21,10 @@ use pbzarr::io::{
     Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader, WindowSink,
 };
 
-use super::DepthFilter;
 use super::backend::Backend;
 use super::mate::MateBuffer;
 use super::walk::{Accumulators, FIELDS, ImportMode, walk_record};
+use super::{DepthFilter, RecordFields};
 
 /// State shared, read-only, across every fork of one `BamReader`.
 struct Shared {
@@ -33,6 +33,7 @@ struct Shared {
     genome: Genome,
     filter: DepthFilter,
     mode: ImportMode,
+    fields: RecordFields,
     schema: OutputSchema,
 }
 
@@ -61,7 +62,34 @@ impl BamReader {
         mode: ImportMode,
         filter: DepthFilter,
     ) -> Result<Self> {
-        let (backend, genome) = Backend::open(path, reference)?;
+        Self::open_with_fields(
+            path,
+            reference,
+            mode,
+            filter,
+            RecordFields::for_pass(mode, &filter),
+        )
+    }
+
+    /// [`BamReader::open`] with the decode breadth pinned instead of derived.
+    /// Only the parity tests pass anything but `RecordFields::for_pass`.
+    #[doc(hidden)]
+    pub fn open_with_fields(
+        path: &Path,
+        reference: Option<&Path>,
+        mode: ImportMode,
+        filter: DepthFilter,
+        fields: RecordFields,
+    ) -> Result<Self> {
+        // `Full` always decodes enough. `DepthOnly` against a pass that reads
+        // qualities would silently pass every base, so only the pass that
+        // derives it may ask for it.
+        debug_assert!(
+            fields == RecordFields::Full || fields == RecordFields::for_pass(mode, &filter),
+            "{fields:?} cannot serve mode {mode:?} with min_bq {}",
+            filter.min_bq
+        );
+        let (backend, genome) = Backend::open(path, reference, fields)?;
         let n_fields = mode.n_fields();
         Ok(Self {
             shared: Arc::new(Shared {
@@ -70,6 +98,7 @@ impl BamReader {
                 genome,
                 filter,
                 mode,
+                fields,
                 schema: schema_for(mode),
             }),
             scratch: Mutex::new(Scratch {
@@ -81,8 +110,11 @@ impl BamReader {
     }
 
     fn fork_handle(&self) -> Result<Self> {
-        let (backend, _genome) =
-            Backend::open(&self.shared.path, self.shared.reference.as_deref())?;
+        let (backend, _genome) = Backend::open(
+            &self.shared.path,
+            self.shared.reference.as_deref(),
+            self.shared.fields,
+        )?;
         let n_fields = self.shared.mode.n_fields();
         Ok(Self {
             shared: Arc::clone(&self.shared),

@@ -11,7 +11,7 @@ use pbzarr_readers::BamReader;
 use pbzarr_readers::bam::backend::Backend;
 use pbzarr_readers::bam::mate::{MateBuffer, Probe};
 use pbzarr_readers::bam::walk::{Accumulators, FIELDS, ImportMode, walk_record};
-use pbzarr_readers::bam::{AlignedRead, CigarKind, DepthFilter, OverlapMode};
+use pbzarr_readers::bam::{AlignedRead, CigarKind, DepthFilter, OverlapMode, RecordFields};
 
 // Hand-computed depth ground truth (r1a+r1b mate overlap counted once, r2
 // M/D/M, r3 M with N skipped, r5, r6 M/Ins-skipped/M, r7, r8) lives in
@@ -31,7 +31,7 @@ fn walk_sub_window(
     win_start: u64,
     win_end: u64,
 ) -> Vec<i32> {
-    let (mut backend, _genome) = Backend::open(bam, None).unwrap();
+    let (mut backend, _genome) = Backend::open(bam, None, RecordFields::Full).unwrap();
     let window_len = (win_end - win_start) as usize;
     let mut acc = Accumulators::new(1, window_len);
     let mut mates = MateBuffer::default();
@@ -155,7 +155,7 @@ fn del_run_does_not_claim_overlap_slot_when_deletions_uncounted() {
             count_deletions,
             ..DepthFilter::default()
         };
-        let (mut backend, _genome) = Backend::open(&bam, None).unwrap();
+        let (mut backend, _genome) = Backend::open(&bam, None, RecordFields::Full).unwrap();
         let mut acc = Accumulators::new(1, 60);
         let mut mates = MateBuffer::default();
         backend
@@ -209,7 +209,7 @@ fn overlap_mode_gates_on_proper_pair_flag() {
             overlap: mode,
             ..DepthFilter::default()
         };
-        let (mut backend, _genome) = Backend::open(&bam, None).unwrap();
+        let (mut backend, _genome) = Backend::open(&bam, None, RecordFields::Full).unwrap();
         let mut acc = Accumulators::new(1, 60);
         let mut mates = MateBuffer::default();
         backend
@@ -251,7 +251,8 @@ fn qual_star_record_counts_at_every_min_bq() {
             ("bam", &fx.bam, None),
             ("cram", &fx.cram, Some(fx.fasta.as_path())),
         ] {
-            let (mut backend, _genome) = Backend::open(path, reference).unwrap();
+            let (mut backend, _genome) =
+                Backend::open(path, reference, RecordFields::Full).unwrap();
             let mut acc = Accumulators::new(1, 100);
             let mut mates = MateBuffer::default();
             backend
@@ -309,7 +310,7 @@ fn walk_fields(
     mode: ImportMode,
 ) -> Vec<Vec<i32>> {
     let n_fields = mode.n_fields();
-    let (mut backend, _genome) = Backend::open(bam, None).unwrap();
+    let (mut backend, _genome) = Backend::open(bam, None, RecordFields::Full).unwrap();
     let mut acc = Accumulators::new(n_fields, len as usize);
     let mut mates = MateBuffer::default();
     backend
@@ -515,7 +516,7 @@ fn nameless_records_never_pair_on_either_backend() {
     }
 
     for (label, path, reference) in [("bam", &bam, None), ("cram", &cram, Some(fasta.as_path()))] {
-        let (mut backend, _genome) = Backend::open(path, reference).unwrap();
+        let (mut backend, _genome) = Backend::open(path, reference, RecordFields::Full).unwrap();
         let mut acc = Accumulators::new(1, 60);
         let mut mates = MateBuffer::default();
         let filter = DepthFilter::default();
@@ -655,4 +656,74 @@ fn read_windows_matches_read_into_and_reports_coverage() {
         .collect();
     assert_eq!(uncovered, [0], "only [0,7) has no record overlapping it");
     assert!(got.covered.iter().any(|&c| c));
+}
+
+/// Read `[0, 100)` on `ref1` with the decode breadth pinned to `fields`.
+fn depth_with_fields(
+    path: &std::path::Path,
+    reference: Option<&std::path::Path>,
+    fields: RecordFields,
+) -> Vec<i32> {
+    let mut reader = BamReader::open_with_fields(
+        path,
+        reference,
+        ImportMode::Depth,
+        DepthFilter::default(),
+        fields,
+    )
+    .unwrap();
+    let mut got = vec![0i32; 100];
+    let mut view = ArrayViewMut1::from(&mut got[..]);
+    reader
+        .read_into("ref1", 0, 100, &mut [OutputSinkMut::I32(view.view_mut())])
+        .unwrap();
+    got
+}
+
+/// `RecordFields::DepthOnly` leaves SEQ and QUAL undecoded. With the default
+/// filter (`min_bq = 0`) the depth walk never reads either, so the depth it
+/// produces must match the full decode position for position.
+#[test]
+fn depth_only_decode_matches_full_decode_on_bam() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let Some(fx) = bam_common::fixture(dir.path()) else {
+        return;
+    };
+    let full = depth_with_fields(&fx.bam, None, RecordFields::Full);
+    let depth_only = depth_with_fields(&fx.bam, None, RecordFields::DepthOnly);
+    assert_eq!(full, expected_default().to_vec());
+    assert_eq!(depth_only, full);
+}
+
+/// Same parity on CRAM, where `DepthOnly` also tells htslib through
+/// `CRAM_OPT_REQUIRED_FIELDS` not to decode the SEQ and QUAL data series at
+/// all. The `Backend` pass pins the decoder contract that the walk relies on,
+/// that `DepthOnly` hands the walk empty `seq` and `qual`; it says nothing
+/// about the mask itself, since the decoder skips those copies either way.
+/// The depth parity above is what shows the CIGAR survives the mask.
+#[test]
+fn depth_only_decode_matches_full_decode_on_cram() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let Some(fx) = bam_common::fixture(dir.path()) else {
+        return;
+    };
+    let reference = Some(fx.fasta.as_path());
+    let full = depth_with_fields(&fx.cram, reference, RecordFields::Full);
+    let depth_only = depth_with_fields(&fx.cram, reference, RecordFields::DepthOnly);
+    assert_eq!(full, expected_default().to_vec());
+    assert_eq!(depth_only, full);
+
+    let (mut backend, _genome) =
+        Backend::open(&fx.cram, reference, RecordFields::DepthOnly).unwrap();
+    let mut n = 0;
+    backend
+        .fetch("ref1", 0, 100, &mut |read| {
+            assert!(read.seq.is_empty(), "seq decoded under the field mask");
+            assert!(read.qual.is_empty(), "qual decoded under the field mask");
+            assert!(!read.cigar.is_empty(), "cigar must still decode");
+            n += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(n, 9);
 }
