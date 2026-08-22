@@ -1,7 +1,9 @@
 //! Reader over one BAM/CRAM alignment file: `read_into` walks every
 //! overlapping record through `walk_record` into scratch `Accumulators`
 //! (depth-only or full composition, per [`ImportMode`]), then bulk-copies each
-//! field into its sink.
+//! field into its sink. `read_windows` does the same for a run of adjacent
+//! windows, with one `fetch` for the whole span instead of one index seek per
+//! window.
 //!
 //! A `Backend` and its decode scratch (`Accumulators`, `MateBuffer`) are only
 //! ever driven by one worker thread at a time, each fork getting its own. The
@@ -16,7 +18,7 @@ use ndarray::ArrayView1;
 
 use pbzarr::genome::Genome;
 use pbzarr::io::{
-    Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader,
+    Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader, WindowSink,
 };
 
 use super::DepthFilter;
@@ -121,13 +123,16 @@ fn schema_for(mode: ImportMode) -> OutputSchema {
 }
 
 /// Walk every record overlapping `[start, end)` into `scratch.acc`, leaving
-/// one filled `window_len` vector per field of the mode's schema.
+/// one filled `window_len` vector per field of the mode's schema. `mark` is
+/// called with each visited record's reference span, before any filtering, so
+/// a caller can record which sub-ranges a record reaches.
 fn accumulate(
     shared: &Shared,
     scratch: &mut Scratch,
     contig_name: &str,
     start: u64,
     end: u64,
+    mut mark: impl FnMut(u64, u64),
 ) -> Result<()> {
     let window_len = (end - start) as usize;
     let Scratch {
@@ -143,9 +148,46 @@ fn accumulate(
     let mode = shared.mode;
     let filter = &shared.filter;
     backend.fetch(contig_name, start, end, &mut |read| {
+        let span = read.ref_span();
+        if span > 0 {
+            mark(read.start, read.start + span);
+        }
         walk_record(read, start, end, filter, mode, acc, mates);
         Ok(())
     })
+}
+
+/// Copy `acc.fields[..][lo..hi]` into one sink each, in schema order.
+fn copy_fields(
+    acc: &Accumulators,
+    lo: usize,
+    hi: usize,
+    outputs: &mut [OutputSinkMut<'_>],
+) -> Result<()> {
+    if outputs.len() != acc.fields.len() {
+        return Err(ReaderError::SchemaMismatch {
+            message: format!(
+                "bam reader produces {} field(s) but the engine handed {} sink(s)",
+                acc.fields.len(),
+                outputs.len()
+            ),
+        });
+    }
+    for (sink, field) in outputs.iter_mut().zip(acc.fields.iter()) {
+        let src = &field[lo..hi];
+        let dst = sink.as_i32_mut()?;
+        if dst.len() != src.len() {
+            return Err(ReaderError::SchemaMismatch {
+                message: format!(
+                    "bam reader filled {} position(s) but the sink holds {}",
+                    src.len(),
+                    dst.len()
+                ),
+            });
+        }
+        dst.assign(&ArrayView1::from(src));
+    }
+    Ok(())
 }
 
 impl ValueReader for BamReader {
@@ -171,29 +213,62 @@ impl ValueReader for BamReader {
         // Scratch is per-window and fully reset by `accumulate`, so a poisoned
         // lock (from a panic mid-window on another call) is safe to reuse.
         let scratch = scratch.get_mut().unwrap_or_else(|e| e.into_inner());
-        accumulate(shared, scratch, contig, start, end)?;
+        accumulate(shared, scratch, contig, start, end, |_, _| {})?;
+        copy_fields(&scratch.acc, 0, (end - start) as usize, outputs)
+    }
 
-        if outputs.len() != scratch.acc.fields.len() {
-            return Err(ReaderError::SchemaMismatch {
-                message: format!(
-                    "bam reader produces {} field(s) but the engine handed {} sink(s)",
-                    scratch.acc.fields.len(),
-                    outputs.len()
-                ),
-            });
+    /// One `fetch` over the whole span, then one sink per window out of the
+    /// single accumulator. Coverage comes from the visited records' reference
+    /// spans rather than one index probe per window, which matches what
+    /// `may_have_data` reports and costs no extra seek.
+    fn read_windows(
+        &mut self,
+        contig: &str,
+        start: u64,
+        end: u64,
+        cuts: &[u64],
+        sink: &mut dyn WindowSink,
+    ) -> Result<()> {
+        if end <= start {
+            return Ok(());
         }
-        for (sink, field) in outputs.iter_mut().zip(scratch.acc.fields.iter()) {
-            let dst = sink.as_i32_mut()?;
-            if dst.len() != field.len() {
-                return Err(ReaderError::SchemaMismatch {
-                    message: format!(
-                        "bam reader filled {} position(s) but the sink holds {}",
-                        field.len(),
-                        dst.len()
-                    ),
-                });
+        let bounds: Vec<u64> = std::iter::once(start)
+            .chain(cuts.iter().copied())
+            .chain(std::iter::once(end))
+            .collect();
+        let mut covered = vec![false; bounds.len() - 1];
+
+        let Self { shared, scratch } = self;
+        let scratch = scratch.get_mut().unwrap_or_else(|e| e.into_inner());
+        accumulate(shared, scratch, contig, start, end, |lo, hi| {
+            let lo = lo.max(start);
+            let hi = hi.min(end);
+            if hi <= lo {
+                return;
             }
-            dst.assign(&ArrayView1::from(field.as_slice()));
+            // Clamped to the span, so both land inside `covered`.
+            let first = bounds.partition_point(|&b| b <= lo) - 1;
+            let last = bounds.partition_point(|&b| b < hi) - 1;
+            for flag in &mut covered[first..=last] {
+                *flag = true;
+            }
+        })?;
+
+        for (window, pair) in bounds.windows(2).enumerate() {
+            let (lo, hi) = (pair[0], pair[1]);
+            if hi <= lo {
+                continue;
+            }
+            if covered[window] {
+                let mut outputs = sink.sinks(lo, hi)?;
+                copy_fields(
+                    &scratch.acc,
+                    (lo - start) as usize,
+                    (hi - start) as usize,
+                    &mut outputs,
+                )?;
+            }
+            sink.done(lo, hi, covered[window])?;
         }
         Ok(())
     }

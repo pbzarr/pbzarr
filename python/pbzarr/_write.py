@@ -129,6 +129,7 @@ def import_d4(
     column_dim: str | None = None,
     workers: int | None = None,
     in_flight: int | None = None,
+    decode_chunks: int | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
     shard_size: int | None = None,
@@ -142,7 +143,8 @@ def import_d4(
     `scales=` builds a multiscale pyramid on the new track with the given
     downsampling factors; `None` or empty builds no pyramid. `in_flight=`
     caps the position spans the engine holds open at once (`None` = auto).
-    Returns the import report dict.
+    `decode_chunks=` sets the position chunks each reader decodes per pass
+    (default auto). Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
     normalized_sources = _sources(sources)
@@ -161,6 +163,7 @@ def import_d4(
         codecs=_codecs_json(codecs),
         scales=_scales(scales),
         in_flight=in_flight,
+        decode_chunks=decode_chunks,
     )
 
 
@@ -172,6 +175,7 @@ def import_bigwig(
     column_dim: str | None = None,
     workers: int | None = None,
     in_flight: int | None = None,
+    decode_chunks: int | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
     shard_size: int | None = None,
@@ -185,7 +189,8 @@ def import_bigwig(
     `scales=` builds a multiscale pyramid on the new track with the given
     downsampling factors; `None` or empty builds no pyramid. `in_flight=`
     caps the position spans the engine holds open at once (`None` = auto).
-    Returns the import report dict.
+    `decode_chunks=` sets the position chunks each reader decodes per pass
+    (default auto). Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
     normalized_sources = _sources(sources)
@@ -204,6 +209,7 @@ def import_bigwig(
         codecs=_codecs_json(codecs),
         scales=_scales(scales),
         in_flight=in_flight,
+        decode_chunks=decode_chunks,
     )
 
 
@@ -239,6 +245,7 @@ def import_bed(
     codecs: list | dict | None = None,
     workers: int | None = None,
     in_flight: int | None = None,
+    decode_chunks: int | None = None,
     progress: bool = False,
     scales: Sequence[int] | None = None,
 ) -> dict[str, int | float]:
@@ -263,7 +270,8 @@ def import_bed(
     `scales=` builds a multiscale pyramid on each new track with the given
     downsampling factors; `None` or empty builds no pyramid. `in_flight=`
     caps the position spans the engine holds open at once (`None` = auto).
-    Returns the import report dict.
+    `decode_chunks=` sets the position chunks each reader decodes per pass
+    (default auto). Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
     normalized_sources = _sources(sources)
@@ -301,6 +309,7 @@ def import_bed(
         codecs=_codecs_json(codecs),
         scales=_scales(scales),
         in_flight=in_flight,
+        decode_chunks=decode_chunks,
     )
 
 
@@ -324,6 +333,7 @@ def import_bam(
     shard_column_size: int | None = None,
     workers: int | None = None,
     in_flight: int | None = None,
+    decode_chunks: int | None = None,
     progress: bool = False,
     codecs: list | dict | None = None,
     scales: Sequence[int] | None = None,
@@ -343,7 +353,9 @@ def import_bam(
     overlapping pair's shared span. `scales=` builds a multiscale pyramid on
     each new track with the given downsampling factors; `None` or empty
     builds no pyramid. `in_flight=` caps the position spans the engine holds
-    open at once (`None` = auto). Returns the import report dict.
+    open at once (`None` = auto). `decode_chunks=` sets the position chunks
+    each reader decodes per pass (default auto). Returns the import report
+    dict.
     """
     destination_path = _path(destination, "destination")
     if overlap not in ("proper", "all", "none"):
@@ -384,4 +396,5 @@ def import_bam(
         codecs=_codecs_json(codecs),
         scales=_scales(scales),
         in_flight=in_flight,
+        decode_chunks=decode_chunks,
     )

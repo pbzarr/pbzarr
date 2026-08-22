@@ -48,7 +48,7 @@ fn apply_codecs_kwarg(
 /// The track is created from the source headers; it must NOT already exist.
 /// d4 stores depths as `int32` natively, so import is zero-conversion.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None))]
+#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_d4(
     py: Python<'_>,
@@ -65,6 +65,7 @@ fn import_d4(
     codecs: Option<String>,
     scales: Option<Vec<u64>>,
     in_flight: Option<usize>,
+    decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
         let mut store =
@@ -85,6 +86,9 @@ fn import_d4(
         }
         if let Some(n) = in_flight {
             config.in_flight_spans = n;
+        }
+        if let Some(n) = decode_chunks {
+            config.decode_chunks = n;
         }
         if let Some(c) = chunk_size {
             config.chunk_size = Some(c);
@@ -125,7 +129,7 @@ fn import_d4(
 /// uncovered base, so uncovered positions read back as `NaN` and reductions
 /// skip them.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None))]
+#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bigwig(
     py: Python<'_>,
@@ -142,6 +146,7 @@ fn import_bigwig(
     codecs: Option<String>,
     scales: Option<Vec<u64>>,
     in_flight: Option<usize>,
+    decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
         let mut store =
@@ -162,6 +167,9 @@ fn import_bigwig(
         }
         if let Some(n) = in_flight {
             config.in_flight_spans = n;
+        }
+        if let Some(n) = decode_chunks {
+            config.decode_chunks = n;
         }
         if let Some(c) = chunk_size {
             config.chunk_size = Some(c);
@@ -307,7 +315,7 @@ fn build_bed_schema(
 /// Any 2D output (several sources, or a wide track) requires `column_dim`.
 /// Returns the import report dict.
 #[pyfunction]
-#[pyo3(signature = (store_path, sources, genome, schema=None, track=None, column=None, dtype=None, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None))]
+#[pyo3(signature = (store_path, sources, genome, schema=None, track=None, column=None, dtype=None, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bed(
     py: Python<'_>,
@@ -328,6 +336,7 @@ fn import_bed(
     codecs: Option<String>,
     scales: Option<Vec<u64>>,
     in_flight: Option<usize>,
+    decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
         let bed_sources: Vec<Source> = sources
@@ -351,6 +360,9 @@ fn import_bed(
         }
         if let Some(n) = in_flight {
             config.in_flight_spans = n;
+        }
+        if let Some(n) = decode_chunks {
+            config.decode_chunks = n;
         }
         if let Some(c) = chunk_size {
             config.chunk_size = Some(c);
@@ -436,6 +448,7 @@ fn report_to_dict(py: Python<'_>, report: &Report) -> PyResult<Py<PyAny>> {
     dict.set_item("bytes_written", report.bytes_written)?;
     dict.set_item("tasks_completed", report.tasks_completed)?;
     dict.set_item("tasks_skipped", report.tasks_skipped)?;
+    dict.set_item("pieces", report.pieces)?;
     dict.set_item("wall_seconds", report.wall_seconds)?;
     dict.set_item("decode_seconds", report.decode_seconds)?;
     dict.set_item("probe_seconds", report.probe_seconds)?;
@@ -457,7 +470,7 @@ fn report_to_dict(py: Python<'_>, report: &Report) -> PyResult<Py<PyAny>> {
 /// overlapping mates are deduped), `"all"` (riker/samtools-mpileup-style
 /// unconditional dedup), or `"none"` (dedup disabled).
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), reference=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None))]
+#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), reference=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bam(
     py: Python<'_>,
@@ -481,6 +494,7 @@ fn import_bam(
     codecs: Option<String>,
     scales: Option<Vec<u64>>,
     in_flight: Option<usize>,
+    decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let mode = match mode.as_str() {
         "depth" => ImportMode::Depth,
@@ -527,6 +541,9 @@ fn import_bam(
         }
         if let Some(n) = in_flight {
             config.in_flight_spans = n;
+        }
+        if let Some(n) = decode_chunks {
+            config.decode_chunks = n;
         }
         if let Some(c) = chunk_size {
             config.chunk_size = Some(c);

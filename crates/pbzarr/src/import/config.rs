@@ -21,9 +21,12 @@ pub trait ProgressSink: Send + Sync {
 pub struct Config {
     /// Number of reader/writer worker threads.
     pub workers: usize,
-    /// Open spans allowed at once in the engine; `0` = auto (see
+    /// Open decode spans allowed at once in the engine; `0` = auto (see
     /// `PipelineOptions::in_flight_spans`).
     pub in_flight_spans: usize,
+    /// Inner chunks each reader decodes per piece; 0 = auto (see
+    /// `PipelineOptions::decode_chunks`).
+    pub decode_chunks: usize,
     /// Reader handle budget across all readers; 0 = auto (see
     /// `PipelineOptions::handle_budget`).
     pub handle_budget: usize,
@@ -63,6 +66,7 @@ impl Default for Config {
         Self {
             workers: 4,
             in_flight_spans: 0,
+            decode_chunks: 0,
             handle_budget: 0,
             chunk_size: None,
             column_chunk_size: None,
@@ -140,6 +144,8 @@ impl Config {
 /// Summary of a finished import.
 pub struct Report {
     pub contigs_written: usize,
+    /// Pieces dispatched: decode spans times readers.
+    pub pieces: usize,
     pub bytes_written: u64,
     /// Number of buffers written.
     pub tasks_completed: usize,
@@ -148,7 +154,9 @@ pub struct Report {
     pub tasks_skipped: usize,
     /// Wall-clock duration of the engine run.
     pub wall_seconds: f64,
-    /// Summed per-piece source read time across workers, probe included.
+    /// Summed per-piece decode time across workers: the coverage probe, the
+    /// source read, and the merges and chunk writes the stream runs inside
+    /// it.
     pub decode_seconds: f64,
     /// Summed `may_have_data` probe time across workers.
     pub probe_seconds: f64,

@@ -321,7 +321,9 @@ impl LayoutEstimate {
     }
 }
 
-fn human_bytes(bytes: u64) -> String {
+/// Format a byte count with a binary unit that scales (e.g. "512.0 MiB",
+/// "1.5 GiB").
+pub(super) fn human_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{bytes} B");
     }

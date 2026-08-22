@@ -167,11 +167,16 @@ struct ImportOptions {
     /// Number of import workers.
     #[arg(short = 't', long, default_value_t = 4)]
     threads: usize,
-    /// Position spans open at once in the import engine. Bounds scratch
-    /// memory; more keeps workers busy near span boundaries. Default: auto
-    /// (targets 3x the worker count in runnable pieces, clamped to 8..256).
+    /// Position spans open at once in the import engine. Bounds the open
+    /// chunk buffers, this many times --decode-chunks; more keeps workers
+    /// busy near span boundaries. Default: auto (targets 3x the worker
+    /// count in runnable pieces, clamped to 8..256).
     #[arg(long = "in-flight", value_name = "N")]
     in_flight: Option<usize>,
+    /// Position chunks each reader decodes per read pass. Default: auto
+    /// (up to 4M positions, fewer when that leaves workers short of pieces).
+    #[arg(long = "decode-chunks", value_name = "N")]
+    decode_chunks: Option<usize>,
     /// Position chunk size.
     #[arg(long)]
     chunk_size: Option<usize>,
@@ -225,6 +230,7 @@ impl ImportOptions {
         Ok(Config {
             workers: self.threads,
             in_flight_spans: self.in_flight.unwrap_or(0),
+            decode_chunks: self.decode_chunks.unwrap_or(0),
             handle_budget: 0,
             chunk_size: self.chunk_size,
             column_chunk_size: self.column_chunk_size,

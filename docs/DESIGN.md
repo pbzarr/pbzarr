@@ -77,7 +77,7 @@ By default, every `values` array uses Blosc with zstd level 5 and byte shuffle. 
 
 Sharding is optional and has an outer position-first shard grid with full declared column width by default. The normal Zarr chunk shape is retained as the shard’s subchunk shape. Sharded writes append encoded subchunks through Zarr partial encoding instead of rewriting whole shards.
 
-One import engine drives every format. The engine splits the flat position axis into spans of one inner chunk. Each reader decodes each span once and fills every schema field in that one pass. The engine pre-fills every buffer with the destination track’s declared fill value.
+One import engine drives every format. A chunk is one inner position chunk, and it is the unit the engine writes. A span is a run of consecutive chunks, and it is the window one reader decodes in one pass. By default the engine sizes the span automatically: up to 4 million positions, and fewer when that leaves the workers short of pieces. A piece is one reader and one span. Each reader decodes each span once and fills every schema field in that one pass. Buffers still close and write per chunk, so the engine still skips an uncovered chunk inside a covered span. The engine pre-fills every buffer with the destination track’s declared fill value.
 
 The worker that completes a buffer writes it. On an unsharded track, the buffer is one whole chunk. On a sharded track, the worker compresses the buffer and appends it to its shard exactly once, and a per-shard lock serializes the appends. The engine never writes a chunk that no reader covers. An absent chunk reads back as the fill value.
 

@@ -15,6 +15,14 @@ pub enum CigarKind {
     Other,
 }
 
+impl CigarKind {
+    /// True for the ops that advance the reference: `M` (with `=`/`X` folded
+    /// into it), `D` and `N`.
+    pub fn consumes_reference(self) -> bool {
+        matches!(self, CigarKind::Match | CigarKind::Del | CigarKind::RefSkip)
+    }
+}
+
 /// One alignment record, backend-agnostic. Callers recycle a single instance
 /// across a `fetch` loop via [`AlignedRead::clear`] to avoid a per-record
 /// allocation for `qname`/`cigar`/`seq`/`qual`.
@@ -48,6 +56,17 @@ impl AlignedRead {
         if name != b"*" {
             self.qname.extend_from_slice(name);
         }
+    }
+
+    /// How far this read's alignment extends along the reference, i.e. the
+    /// sum of its reference-consuming CIGAR op lengths. A record with no such
+    /// op (fully clipped) spans nothing.
+    pub fn ref_span(&self) -> u64 {
+        self.cigar
+            .iter()
+            .filter(|(kind, _)| kind.consumes_reference())
+            .map(|(_, len)| u64::from(*len))
+            .sum()
     }
 
     /// Reset all buffers for reuse. Scalar fields are overwritten by the next

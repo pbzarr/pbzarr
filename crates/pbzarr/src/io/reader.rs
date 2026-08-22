@@ -105,6 +105,16 @@ output_sink! {
     Bool => bool, as_bool_mut;
 }
 
+/// Receives one window at a time from `ValueReader::read_windows`.
+pub trait WindowSink {
+    /// One sink per schema field for `[start, end)`, pre-filled with the
+    /// target's fill value.
+    fn sinks(&mut self, start: u64, end: u64) -> Result<Vec<OutputSinkMut<'_>>, ReaderError>;
+    /// `[start, end)` is complete. `covered == false` means the source has
+    /// no record overlapping it; `sinks` may not have been called for it.
+    fn done(&mut self, start: u64, end: u64, covered: bool) -> Result<(), ReaderError>;
+}
+
 /// One source, decoded in a single pass into one sink per schema field.
 ///
 /// `Send` but not `Sync`: each worker gets its own fork, so a reader holds
@@ -137,6 +147,34 @@ pub trait ValueReader: Send + Sized {
     /// A worker-local handle. Shared state (index, header) is reused through
     /// `Arc`; per-thread state (file handle, decode buffers) is reallocated.
     fn fork(&self) -> Result<Self, ReaderError>;
+
+    /// Decode `[start, end)` as consecutive windows split at `cuts`
+    /// (ascending, strictly inside the range), calling `sink` per window in
+    /// order. The default probes and reads one window at a time; a reader
+    /// that can open the range once and stream should override it.
+    fn read_windows(
+        &mut self,
+        contig: &str,
+        start: u64,
+        end: u64,
+        cuts: &[u64],
+        sink: &mut dyn WindowSink,
+    ) -> Result<(), ReaderError> {
+        let mut lo = start;
+        for &hi in cuts.iter().chain(std::iter::once(&end)) {
+            if hi <= lo {
+                continue;
+            }
+            let covered = self.may_have_data(contig, lo, hi);
+            if covered {
+                let mut outputs = sink.sinks(lo, hi)?;
+                self.read_into(contig, lo, hi, &mut outputs)?;
+            }
+            sink.done(lo, hi, covered)?;
+            lo = hi;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +194,69 @@ mod tests {
             Err(ReaderError::SchemaMismatch { .. })
         ));
         assert_eq!(buf[2], 7);
+    }
+
+    /// The default `read_windows` visits every window in order, probes each
+    /// one, and reads only the covered ones.
+    #[test]
+    fn default_read_windows_visits_each_window_once() {
+        struct Log(Vec<(u64, u64, bool)>, Vec<i32>);
+        impl WindowSink for Log {
+            fn sinks(
+                &mut self,
+                start: u64,
+                end: u64,
+            ) -> Result<Vec<OutputSinkMut<'_>>, ReaderError> {
+                self.1 = vec![0; (end - start) as usize];
+                Ok(vec![OutputSinkMut::I32(ArrayViewMut1::from(
+                    self.1.as_mut_slice(),
+                ))])
+            }
+            fn done(&mut self, start: u64, end: u64, covered: bool) -> Result<(), ReaderError> {
+                self.0.push((start, end, covered));
+                Ok(())
+            }
+        }
+        struct Half; // covers [0, 10) only
+        impl ValueReader for Half {
+            fn contigs(&self) -> &Genome {
+                unimplemented!()
+            }
+            fn output_schema(&self) -> &OutputSchema {
+                unimplemented!()
+            }
+            fn read_into(
+                &mut self,
+                _: &str,
+                start: u64,
+                end: u64,
+                outputs: &mut [OutputSinkMut<'_>],
+            ) -> Result<(), ReaderError> {
+                assert!(
+                    end <= 10,
+                    "read_into called on an uncovered window {start}..{end}"
+                );
+                outputs[0].as_i32_mut()?.fill(1);
+                Ok(())
+            }
+            fn may_have_data(&self, _: &str, start: u64, _end: u64) -> bool {
+                start < 10
+            }
+            fn fork(&self) -> Result<Self, ReaderError> {
+                Ok(Half)
+            }
+        }
+        let mut log = Log(Vec::new(), Vec::new());
+        Half.read_windows("c", 2, 18, &[5, 10, 15], &mut log)
+            .unwrap();
+        assert_eq!(
+            log.0,
+            vec![
+                (2, 5, true),
+                (5, 10, true),
+                (10, 15, false),
+                (15, 18, false)
+            ]
+        );
     }
 }

@@ -836,6 +836,7 @@ fn pipeline_options(config: &Config) -> PipelineOptions {
     PipelineOptions {
         workers: config.workers,
         in_flight_spans: config.in_flight_spans,
+        decode_chunks: config.decode_chunks,
         handle_budget: config.handle_budget,
         progress: config.progress.clone(),
     }

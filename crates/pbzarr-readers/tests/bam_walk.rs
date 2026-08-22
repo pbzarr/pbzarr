@@ -4,6 +4,10 @@
 
 mod bam_common;
 
+use ndarray::ArrayViewMut1;
+
+use pbzarr::io::{OutputSinkMut, ReaderError, ValueReader, WindowSink};
+use pbzarr_readers::BamReader;
 use pbzarr_readers::bam::backend::Backend;
 use pbzarr_readers::bam::mate::{MateBuffer, Probe};
 use pbzarr_readers::bam::walk::{Accumulators, FIELDS, ImportMode, walk_record};
@@ -570,4 +574,85 @@ fn seq_star_record_counts_depth_and_tallies_n() {
     assert!(acc.fields[5][10..30].iter().all(|&v| v == 1), "n");
     let bases: i32 = (1..=4).map(|f| acc.fields[f][10]).sum();
     assert_eq!(bases, 0, "no a/c/g/t tally without a sequence");
+}
+
+/// Windowed decode of one span must agree, position for position, with one
+/// `read_into` per window, and must report a window that no record overlaps
+/// as uncovered. The fixture's `ref1` has no record before position 10, so
+/// the leading window is the uncovered one.
+#[test]
+fn read_windows_matches_read_into_and_reports_coverage() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let Some(fx) = bam_common::fixture(dir.path()) else {
+        return;
+    };
+    let mut reader =
+        BamReader::open(&fx.bam, None, ImportMode::Depth, DepthFilter::default()).unwrap();
+    let len = 100u64;
+    // 30 is where r1a and r5 end, so one window boundary falls exactly on a
+    // record end.
+    let mut cuts: Vec<u64> = (1..len / 7)
+        .map(|i| i * 7)
+        .chain(std::iter::once(30))
+        .collect();
+    cuts.sort_unstable();
+
+    struct Collect {
+        depth: Vec<i32>,
+        covered: Vec<bool>,
+        buf: Vec<i32>,
+    }
+    impl WindowSink for Collect {
+        fn sinks(&mut self, start: u64, end: u64) -> Result<Vec<OutputSinkMut<'_>>, ReaderError> {
+            self.buf = vec![0; (end - start) as usize];
+            Ok(vec![OutputSinkMut::I32(ArrayViewMut1::from(
+                self.buf.as_mut_slice(),
+            ))])
+        }
+        fn done(&mut self, start: u64, end: u64, covered: bool) -> Result<(), ReaderError> {
+            let n = (end - start) as usize;
+            if covered {
+                self.depth.extend_from_slice(&self.buf[..n]);
+            } else {
+                self.depth.extend(std::iter::repeat_n(0, n));
+            }
+            self.covered.push(covered);
+            Ok(())
+        }
+    }
+    let mut got = Collect {
+        depth: Vec::new(),
+        covered: Vec::new(),
+        buf: Vec::new(),
+    };
+    reader
+        .read_windows("ref1", 0, len, &cuts, &mut got)
+        .unwrap();
+
+    let mut want = vec![0i32; len as usize];
+    let mut lo = 0;
+    for &hi in cuts.iter().chain(std::iter::once(&len)) {
+        let mut buf = vec![0i32; (hi - lo) as usize];
+        reader
+            .read_into(
+                "ref1",
+                lo,
+                hi,
+                &mut [OutputSinkMut::I32(ArrayViewMut1::from(buf.as_mut_slice()))],
+            )
+            .unwrap();
+        want[lo as usize..hi as usize].copy_from_slice(&buf);
+        lo = hi;
+    }
+
+    assert_eq!(got.depth, want);
+    assert_eq!(want, expected_default().to_vec());
+    let uncovered: Vec<usize> = got
+        .covered
+        .iter()
+        .enumerate()
+        .filter_map(|(window, &covered)| (!covered).then_some(window))
+        .collect();
+    assert_eq!(uncovered, [0], "only [0,7) has no record overlapping it");
+    assert!(got.covered.iter().any(|&c| c));
 }

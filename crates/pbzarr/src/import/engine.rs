@@ -1,9 +1,13 @@
 //! The import engine: one driver for every routing shape.
 //!
-//! A SPAN is one inner-chunk-length window of the flat position axis; a PIECE
-//! is `(reader, span)`, the unit workers pull from the channel; a BUFFER is one
-//! inner chunk of one target track (`(track, span, column chunk)`), pre-filled
-//! with that track's fill value. The worker that finishes a buffer's last piece
+//! A CHUNK is one inner-chunk-length window of the flat position axis and the
+//! write unit; a SPAN is `decode_chunks` consecutive chunks, the window one
+//! reader decodes in one pass; a PIECE is `(reader, span)`, the unit workers
+//! pull from the channel; a BUFFER is one chunk of one target track
+//! `(track, chunk, column chunk)`, pre-filled with that track's fill value.
+//! A piece streams its span chunk by chunk, merging each chunk's slice into
+//! the shared buffer as the walk crosses the boundary, so scratch stays one
+//! chunk per active piece. The worker that finishes a buffer's last piece
 //! writes it.
 //!
 //! Sharded tracks write through `store_array_subset_opt` with
@@ -11,13 +15,13 @@
 //! partial encoder reads only the shard index, encodes the subchunks in
 //! parallel, and APPENDS them instead of rewriting the shard. Each subchunk
 //! must be written exactly once, and appends to one shard need a per-shard
-//! mutex because every call rewrites that index. So a sharded span's buffers
+//! mutex because every call rewrites that index. So a sharded chunk's buffers
 //! flush together when its last buffer closes: one rectangular store call per
 //! touched column shard.
 //!
 //! When no reader `may_have_data` over any of a buffer's pieces, the buffer is
 //! never allocated. An unsharded buffer with no data elides its write; a
-//! sharded span elides per column shard. An absent chunk already reads back
+//! sharded chunk elides per column shard. An absent chunk already reads back
 //! as the fill value.
 
 use std::collections::HashMap;
@@ -37,18 +41,24 @@ use crate::Result;
 use crate::error::PbzError;
 use crate::genome::Genome;
 use crate::import::config::{ProgressSink, Report};
+use crate::import::estimate::human_bytes;
 use crate::import::routing::{ImportRouting, SourceAxis, TrackTarget};
-use crate::io::{Dtype, OutputSinkMut, ValueReader};
+use crate::io::{Dtype, OutputSinkMut, ReaderError, ValueReader, WindowSink};
 use crate::track::Track;
 
 pub struct PipelineOptions {
     pub workers: usize,
-    /// Open spans allowed at once. Bounds peak scratch memory: open buffers
-    /// never exceed this many spans' worth, plus the pieces individual
-    /// workers are holding. `0` = auto: `ceil(3 * workers / readers)`, so the
-    /// runnable pieces target 3x the worker count, clamped to `[8, 256]` and
-    /// to the span count.
+    /// Open decode spans allowed at once. Bounds the open chunk buffers:
+    /// each span holds up to `decode_chunks` buffers per track, and the
+    /// merge scratch is bounded by the worker count instead. `0` = auto:
+    /// `ceil(3 * workers / readers)`, so the runnable pieces target 3x the
+    /// worker count, clamped to `[8, 256]` and to the span count.
     pub in_flight_spans: usize,
+    /// Inner position chunks each reader decodes per piece. `0` = auto, see
+    /// `auto_decode_chunks`; an explicit value is clamped to
+    /// `[1, chunk count]`. Larger values cut per-piece fixed cost (one index
+    /// seek per piece); buffers still close per chunk.
+    pub decode_chunks: usize,
     /// Reader handles (forks) allowed across all readers at once. `0` = auto:
     /// derived from the soft fd limit with a margin for the store and
     /// indexes, see `auto_handle_budget`. Each reader's pool gets
@@ -62,6 +72,7 @@ impl Default for PipelineOptions {
         Self {
             workers: 4,
             in_flight_spans: 0,
+            decode_chunks: 0,
             handle_budget: 0,
             progress: None,
         }
@@ -74,6 +85,20 @@ pub fn auto_in_flight_spans(workers: usize, n_readers: usize) -> usize {
     (3 * workers.max(1))
         .div_ceil(n_readers.max(1))
         .clamp(8, 256)
+}
+
+/// Decode span cap in positions: 4M keeps a piece near one second of
+/// decode on a deep BAM while bounding open chunk buffers per span.
+const DECODE_SPAN_CAP: u64 = 4 << 20;
+
+/// Auto rule for `PipelineOptions::decode_chunks` = 0: as many chunks as the
+/// 4M cap allows, reduced so every worker sees about eight pieces.
+pub fn auto_decode_chunks(total: u64, chunk_len: u64, n_readers: usize, workers: usize) -> usize {
+    let chunk_len = chunk_len.max(1);
+    let n_chunks = total.div_ceil(chunk_len).max(1);
+    let cap = (DECODE_SPAN_CAP / chunk_len).max(1);
+    let balance = total * n_readers.max(1) as u64 / (8 * workers.max(1) as u64 * chunk_len);
+    usize::try_from(balance.clamp(1, cap).min(n_chunks)).unwrap_or(usize::MAX)
 }
 
 /// The auto rule for `PipelineOptions::handle_budget` = 0. Two fds per handle
@@ -221,12 +246,29 @@ macro_rules! tile_buffer {
                 }
             }
 
-            /// Copies `src` (same dtype and row count, `cols.len()` columns
-            /// wide) into the `cols` column range of this buffer.
-            fn copy_columns_from(&mut self, src: &TileBuffer, cols: Range<usize>) -> Result<()> {
+            /// Overwrites every element with the track's fill value, so one
+            /// allocation serves window after window.
+            fn refill(&mut self, fill: &FillValue) -> Result<()> {
+                match self {
+                    $( TileBuffer::$variant(a) => {
+                        a.fill(<$ty as FillDecode>::decode(fill)?);
+                        Ok(())
+                    } )*
+                }
+            }
+
+            /// Copies `src[src_rows, ..]` into `self[dst_rows, cols]`.
+            fn copy_rows_from(
+                &mut self,
+                src: &TileBuffer,
+                src_rows: Range<usize>,
+                dst_rows: Range<usize>,
+                cols: Range<usize>,
+            ) -> Result<()> {
                 match (self, src) {
                     $( (TileBuffer::$variant(dst), TileBuffer::$variant(src)) => {
-                        dst.slice_mut(s![.., cols.start..cols.end]).assign(src);
+                        dst.slice_mut(s![dst_rows, cols])
+                            .assign(&src.slice(s![src_rows, ..]));
                         Ok(())
                     } )*
                     _ => Err(PbzError::Metadata(
@@ -307,7 +349,7 @@ struct TargetGeom<'t> {
     /// Destination column range from the routing target.
     columns: Range<u64>,
     /// Inner position chunk length (the subchunk length when sharded): the
-    /// engine's span length.
+    /// engine's buffer height.
     array_chunk_len: u64,
 }
 
@@ -322,7 +364,7 @@ impl TargetGeom<'_> {
     }
 }
 
-/// One contig's overlap with a span.
+/// One contig's overlap with a decode span.
 struct ContigWindow<'g> {
     name: &'g str,
     row_lo: usize,
@@ -397,6 +439,8 @@ impl SpanGate {
     }
 }
 
+/// One reader's work over one decode span: `[start, end)` covers
+/// `decode_chunks` chunks, clamped at the end of the genome.
 #[derive(Clone, Copy)]
 struct Piece {
     reader: usize,
@@ -414,7 +458,7 @@ struct TouchEntry {
     fields: Vec<(usize, usize)>,
 }
 
-type SlotKey = (usize, usize, u64); // (target, span, column chunk)
+type SlotKey = (usize, usize, u64); // (target, chunk, column chunk)
 
 /// `(target, position shard, column shard)` -> its append-serializing mutex.
 type ShardLockMap = HashMap<(usize, u64, u64), Arc<Mutex<()>>>;
@@ -431,9 +475,9 @@ struct SlotHandle {
     inner: Mutex<SlotInner>,
 }
 
-/// Closed buffers of one sharded `(target, span)`, held until the last one
-/// arrives so the span flushes as one rectangle per column shard.
-struct SpanGroup {
+/// Closed buffers of one sharded `(target, chunk)`, held until the last one
+/// arrives so the chunk flushes as one rectangle per column shard.
+struct ChunkGroup {
     /// `(column chunk, buffer)`; an uncovered buffer stays `None`.
     parts: Vec<(u64, Option<TileBuffer>)>,
     remaining: usize,
@@ -543,7 +587,8 @@ impl StageTimer {
 
 #[derive(Default)]
 struct RunTimings {
-    /// Per piece: source read incl. contig windows and the coverage probe.
+    /// Per piece: the coverage probe, the source read, and the merges and
+    /// chunk closes the stream runs inside it.
     decode: StageTimer,
     /// Per piece: the `may_have_data` probe alone (also inside `decode`).
     probe: StageTimer,
@@ -612,11 +657,13 @@ struct RunCtx<'a> {
     tap: Option<&'a Sender<TapMessage>>,
     partial_opts: CodecOptions,
     shard_locks: Mutex<ShardLockMap>,
-    /// Sharded `(target, span)` groups awaiting their last buffer.
-    span_groups: Mutex<HashMap<(usize, usize), SpanGroup>>,
-    /// Distinct column chunks per target: a sharded span group closes after
+    /// Sharded `(target, chunk)` groups awaiting their last buffer.
+    chunk_groups: Mutex<HashMap<(usize, usize), ChunkGroup>>,
+    /// Distinct column chunks per target: a sharded chunk group closes after
     /// this many buffers.
     group_sizes: Vec<usize>,
+    /// Flat position count, so a piece can clamp its last chunk.
+    total: u64,
 }
 
 impl RunCtx<'_> {
@@ -655,21 +702,21 @@ impl RunCtx<'_> {
         Arc::clone(map.entry(key).or_default())
     }
 
-    fn record_skipped(&self, geom: &TargetGeom<'_>, span: Range<u64>, columns: Range<u64>) {
+    fn record_skipped(&self, geom: &TargetGeom<'_>, chunk: Range<u64>, columns: Range<u64>) {
         self.state.tasks_skipped.fetch_add(1, Ordering::Relaxed);
         if let Some(tap) = self.tap {
             // A dropped receiver detaches the tap; not an error.
             let _ = tap.send(TapMessage::Skipped {
                 track: geom.track.name().to_owned(),
-                position: span,
+                position: chunk,
                 columns,
             });
         }
     }
 
-    fn record_written(&self, geom: &TargetGeom<'_>, span: Range<u64>, columns: Range<u64>) {
+    fn record_written(&self, geom: &TargetGeom<'_>, chunk: Range<u64>, columns: Range<u64>) {
         let bytes =
-            (span.end - span.start) * (columns.end - columns.start) * dtype_bytes(geom.dtype);
+            (chunk.end - chunk.start) * (columns.end - columns.start) * dtype_bytes(geom.dtype);
         self.state.bytes_written.fetch_add(bytes, Ordering::Relaxed);
         self.state.tasks_completed.fetch_add(1, Ordering::Relaxed);
         if let Some(p) = self.progress {
@@ -678,7 +725,7 @@ impl RunCtx<'_> {
         if let Some(tap) = self.tap {
             let _ = tap.send(TapMessage::Filled {
                 track: geom.track.name().to_owned(),
-                position: span,
+                position: chunk,
                 columns,
             });
         }
@@ -689,8 +736,8 @@ impl RunCtx<'_> {
         &self,
         t_idx: usize,
         cc: u64,
-        span_idx: usize,
-        span: Range<u64>,
+        chunk_idx: usize,
+        chunk: Range<u64>,
         data: Option<TileBuffer>,
         any_data: bool,
     ) -> Result<()> {
@@ -701,64 +748,64 @@ impl RunCtx<'_> {
         }
         let geom = &self.geoms[t_idx];
         if geom.sharded {
-            return self.close_sharded(t_idx, span_idx, span, cc, data);
+            return self.close_sharded(t_idx, chunk_idx, chunk, cc, data);
         }
         let columns = geom.buffer_columns(cc);
         let Some(data) = data else {
-            self.record_skipped(geom, span, columns);
+            self.record_skipped(geom, chunk, columns);
             return Ok(());
         };
         let write_start = Instant::now();
-        data.write_unsharded(geom.track, span.clone(), columns.clone())?;
+        data.write_unsharded(geom.track, chunk.clone(), columns.clone())?;
         self.state.timings.write.record(write_start.elapsed());
-        self.record_written(geom, span, columns);
+        self.record_written(geom, chunk, columns);
         Ok(())
     }
 
-    /// Stash one closed sharded buffer in its `(target, span)` group; the
+    /// Stash one closed sharded buffer in its `(target, chunk)` group; the
     /// group flushes when its last buffer arrives. Every append into a shard
     /// rewrites the shard index under that shard's mutex, so the batch gives
-    /// one index rewrite and one lock acquisition per span instead of one per
+    /// one index rewrite and one lock acquisition per chunk instead of one per
     /// buffer.
     fn close_sharded(
         &self,
         t_idx: usize,
-        span_idx: usize,
-        span: Range<u64>,
+        chunk_idx: usize,
+        chunk: Range<u64>,
         cc: u64,
         data: Option<TileBuffer>,
     ) -> Result<()> {
         let done = {
-            let mut groups = self.span_groups.lock().expect("span group map poisoned");
+            let mut groups = self.chunk_groups.lock().expect("chunk group map poisoned");
             let group = groups
-                .entry((t_idx, span_idx))
-                .or_insert_with(|| SpanGroup {
+                .entry((t_idx, chunk_idx))
+                .or_insert_with(|| ChunkGroup {
                     parts: Vec::with_capacity(self.group_sizes[t_idx]),
                     remaining: self.group_sizes[t_idx],
                 });
             group.parts.push((cc, data));
             group.remaining -= 1;
             if group.remaining == 0 {
-                groups.remove(&(t_idx, span_idx))
+                groups.remove(&(t_idx, chunk_idx))
             } else {
                 None
             }
         };
         match done {
-            Some(group) => self.flush_span_group(t_idx, span, group),
+            Some(group) => self.flush_chunk_group(t_idx, chunk, group),
             None => Ok(()),
         }
     }
 
-    fn flush_span_group(&self, t_idx: usize, span: Range<u64>, group: SpanGroup) -> Result<()> {
+    fn flush_chunk_group(&self, t_idx: usize, chunk: Range<u64>, group: ChunkGroup) -> Result<()> {
         let geom = &self.geoms[t_idx];
-        let rows = (span.end - span.start) as usize;
+        let rows = (chunk.end - chunk.start) as usize;
         let shard_w = geom.shard_col.max(1);
         let mut parts = group.parts;
         parts.sort_unstable_by_key(|&(cc, _)| cc);
 
-        // A span is one subchunk long and subchunks tile the shard, so the
-        // span rectangle can only straddle shards on the column axis.
+        // A chunk is one subchunk long and subchunks tile the shard, so the
+        // chunk rectangle can only straddle shards on the column axis.
         let mut lo = 0;
         while lo < parts.len() {
             let seg_start = geom.buffer_columns(parts[lo].0).start;
@@ -777,7 +824,7 @@ impl RunCtx<'_> {
             // columns encode to almost nothing.
             if parts[lo..hi].iter().all(|(_, data)| data.is_none()) {
                 for &(cc, _) in &parts[lo..hi] {
-                    self.record_skipped(geom, span.clone(), geom.buffer_columns(cc));
+                    self.record_skipped(geom, chunk.clone(), geom.buffer_columns(cc));
                 }
                 lo = hi;
                 continue;
@@ -799,8 +846,10 @@ impl RunCtx<'_> {
                     if let Some(data) = data.take() {
                         let cols = geom.buffer_columns(*cc);
                         let dst_lo = (cols.start - seg.start) as usize;
-                        rect.copy_columns_from(
+                        rect.copy_rows_from(
                             &data,
+                            0..rows,
+                            0..rows,
                             dst_lo..dst_lo + (cols.end - cols.start) as usize,
                         )?;
                     }
@@ -808,7 +857,7 @@ impl RunCtx<'_> {
                 rect
             };
 
-            let lock = self.shard_lock(t_idx, span.start, seg.start);
+            let lock = self.shard_lock(t_idx, chunk.start, seg.start);
             let wait_start = Instant::now();
             let guard = lock.lock().expect("shard mutex poisoned");
             self.state.timings.shard_wait.record(wait_start.elapsed());
@@ -817,7 +866,7 @@ impl RunCtx<'_> {
                 &geom.array,
                 geom.track.name(),
                 geom.rank,
-                span.clone(),
+                chunk.clone(),
                 seg,
                 &self.partial_opts,
             )?;
@@ -825,10 +874,177 @@ impl RunCtx<'_> {
             drop(guard);
 
             for &(cc, _) in &parts[lo..hi] {
-                self.record_written(geom, span.clone(), geom.buffer_columns(cc));
+                self.record_written(geom, chunk.clone(), geom.buffer_columns(cc));
             }
             lo = hi;
         }
+        Ok(())
+    }
+}
+
+fn to_reader_err(err: PbzError) -> ReaderError {
+    ReaderError::Other(anyhow::anyhow!("{err}"))
+}
+
+/// Per-piece streaming state: one chunk of scratch per touch entry, merged
+/// into the shared buffers each time the walk leaves a chunk.
+struct PieceSink<'a, 'c> {
+    ctx: &'a RunCtx<'c>,
+    piece: Piece,
+    entries: &'a [TouchEntry],
+    scratch: Vec<TileBuffer>,
+    /// Flat and contig-local start of the contig window being streamed.
+    window_flat_base: u64,
+    window_local_base: u64,
+    /// The chunk the last window belonged to, and whether any window of it
+    /// was covered.
+    current: Option<(u64, bool)>,
+}
+
+impl PieceSink<'_, '_> {
+    fn chunk_len(&self) -> u64 {
+        self.ctx.geoms[0].array_chunk_len.max(1)
+    }
+
+    fn flat(&self, local: u64) -> u64 {
+        self.window_flat_base + (local - self.window_local_base)
+    }
+
+    /// Drop this piece's claim on every buffer of `chunk_idx` and write the
+    /// ones it finished. Called exactly once per chunk of the span, covered
+    /// or not, so the counts stay exact.
+    fn finish_chunk(&self, chunk_idx: u64, covered: bool) -> Result<()> {
+        let chunk_len = self.chunk_len();
+        let lo = chunk_idx * chunk_len;
+        let hi = (lo + chunk_len).min(self.ctx.total);
+        let mut closed: Vec<(usize, u64, Option<TileBuffer>, bool)> = Vec::new();
+        for entry in self.entries {
+            let handle = self.ctx.slot((entry.t_idx, chunk_idx as usize, entry.cc));
+            let mut guard = handle.inner.lock().expect("buffer slot poisoned");
+            guard.remaining -= 1;
+            guard.any_data |= covered;
+            if guard.remaining == 0 {
+                closed.push((entry.t_idx, entry.cc, guard.data.take(), guard.any_data));
+            }
+        }
+        for (t_idx, cc, data, any_data) in closed {
+            self.ctx
+                .state
+                .slots
+                .lock()
+                .expect("slot map poisoned")
+                .remove(&(t_idx, chunk_idx as usize, cc));
+            self.ctx
+                .close_buffer(t_idx, cc, chunk_idx as usize, lo..hi, data, any_data)?;
+        }
+        Ok(())
+    }
+
+    /// Merge scratch rows `0..n` for the window at flat `flat_lo` into that
+    /// chunk's buffers. Each lock covers one region copy, so pieces sharing a
+    /// buffer stay concurrent through decode.
+    fn merge(&self, flat_lo: u64, n: usize) -> Result<()> {
+        let chunk_len = self.chunk_len();
+        let chunk_idx = flat_lo / chunk_len;
+        let chunk_lo = chunk_idx * chunk_len;
+        let row0 = (flat_lo - chunk_lo) as usize;
+        let rows = ((chunk_lo + chunk_len).min(self.ctx.total) - chunk_lo) as usize;
+        for (idx, entry) in self.entries.iter().enumerate() {
+            let wait_start = Instant::now();
+            let handle = self.ctx.slot((entry.t_idx, chunk_idx as usize, entry.cc));
+            let mut guard = handle.inner.lock().expect("buffer slot poisoned");
+            self.ctx
+                .state
+                .timings
+                .slot_wait
+                .record(wait_start.elapsed());
+            let merge_start = Instant::now();
+            if guard.data.is_none() {
+                let geom = &self.ctx.geoms[entry.t_idx];
+                let columns = geom.buffer_columns(entry.cc);
+                guard.data = Some(TileBuffer::filled(
+                    geom.dtype,
+                    rows,
+                    (columns.end - columns.start) as usize,
+                    &geom.fill,
+                )?);
+            }
+            let dst_lo = entry.fields[0].1;
+            guard
+                .data
+                .as_mut()
+                .expect("buffer allocated above")
+                .copy_rows_from(
+                    &self.scratch[idx],
+                    0..n,
+                    row0..row0 + n,
+                    dst_lo..dst_lo + entry.fields.len(),
+                )?;
+            self.ctx.state.timings.merge.record(merge_start.elapsed());
+        }
+        Ok(())
+    }
+
+    /// Finish every chunk of the span from `from_chunk` on with no data.
+    fn finish_rest(&self, from_chunk: u64) -> Result<()> {
+        let last = (self.piece.end - 1) / self.chunk_len();
+        for chunk_idx in from_chunk..=last {
+            self.finish_chunk(chunk_idx, false)?;
+        }
+        Ok(())
+    }
+}
+
+impl WindowSink for PieceSink<'_, '_> {
+    fn sinks(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> std::result::Result<Vec<OutputSinkMut<'_>>, ReaderError> {
+        let ctx = self.ctx;
+        let entries = self.entries;
+        let n = (end - start) as usize;
+        let n_fields: usize = entries.iter().map(|e| e.fields.len()).sum();
+        let mut staged: Vec<Option<OutputSinkMut<'_>>> = (0..n_fields).map(|_| None).collect();
+        for (local, entry) in self.scratch.iter_mut().zip(entries) {
+            local
+                .refill(&ctx.geoms[entry.t_idx].fill)
+                .map_err(to_reader_err)?;
+            let cols: Vec<usize> = (0..entry.fields.len()).collect();
+            for (&(field, _), sink) in entry.fields.iter().zip(local.column_sinks(0..n, &cols)) {
+                staged[field] = Some(sink);
+            }
+        }
+        Ok(staged
+            .into_iter()
+            .map(|s| s.expect("routing covers every schema field"))
+            .collect())
+    }
+
+    fn done(
+        &mut self,
+        start: u64,
+        end: u64,
+        covered: bool,
+    ) -> std::result::Result<(), ReaderError> {
+        let flat_lo = self.flat(start);
+        let chunk_idx = flat_lo / self.chunk_len();
+        // Windows arrive in ascending order, so leaving a chunk means the
+        // piece is done with it. A chunk split by a contig boundary keeps its
+        // coverage flag across both windows.
+        let carried = match self.current {
+            Some((cur, cur_covered)) if cur == chunk_idx => cur_covered,
+            Some((cur, cur_covered)) => {
+                self.finish_chunk(cur, cur_covered).map_err(to_reader_err)?;
+                false
+            }
+            None => false,
+        };
+        if covered {
+            self.merge(flat_lo, (end - start) as usize)
+                .map_err(to_reader_err)?;
+        }
+        self.current = Some((chunk_idx, carried | covered));
         Ok(())
     }
 }
@@ -843,95 +1059,60 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
     ctx.state.timings.probe.record(decode);
 
     let entries = &ctx.touch_plan[piece.reader];
-    let rows = (piece.end - piece.start) as usize;
+    let chunk_len = ctx.geoms[0].array_chunk_len.max(1);
+    let first_chunk = piece.start / chunk_len;
+    let mut sink = PieceSink {
+        ctx,
+        piece,
+        entries,
+        scratch: Vec::new(),
+        window_flat_base: 0,
+        window_local_base: 0,
+        current: None,
+    };
 
-    // Piece-local scratch, one buffer per touched entry, sized to this
-    // piece's own columns. Peak scratch memory gains one such set per active
-    // worker (typically a few MB each).
-    let mut scratch: Vec<TileBuffer> = Vec::new();
     if covered {
         let read_start = Instant::now();
-        let n_fields = entries.iter().map(|e| e.fields.len()).sum::<usize>();
+        // One chunk of scratch per touched entry, reused window after window.
+        // Peak scratch memory gains one such set per active worker.
         for entry in entries {
             let geom = &ctx.geoms[entry.t_idx];
-            scratch.push(TileBuffer::filled(
+            sink.scratch.push(TileBuffer::filled(
                 geom.dtype,
-                rows,
+                chunk_len as usize,
                 entry.fields.len(),
                 &geom.fill,
             )?);
         }
         for w in &windows {
-            let mut staged: Vec<Option<OutputSinkMut<'_>>> = (0..n_fields).map(|_| None).collect();
-            for (local, entry) in scratch.iter_mut().zip(entries) {
-                let cols: Vec<usize> = (0..entry.fields.len()).collect();
-                let sinks = local.column_sinks(w.row_lo..w.row_hi, &cols);
-                for (&(field, _), sink) in entry.fields.iter().zip(sinks) {
-                    staged[field] = Some(sink);
-                }
+            let flat_lo = piece.start + w.row_lo as u64;
+            let flat_hi = piece.start + w.row_hi as u64;
+            sink.window_flat_base = flat_lo;
+            sink.window_local_base = w.local_lo;
+            let mut cuts = Vec::new();
+            let mut boundary = (flat_lo / chunk_len + 1) * chunk_len;
+            while boundary < flat_hi {
+                cuts.push(w.local_lo + (boundary - flat_lo));
+                boundary += chunk_len;
             }
-            let mut outputs: Vec<OutputSinkMut<'_>> = staged
-                .into_iter()
-                .map(|s| s.expect("routing covers every schema field"))
-                .collect();
-            reader.read_into(w.name, w.local_lo, w.local_hi, &mut outputs)?;
+            reader
+                .read_windows(w.name, w.local_lo, w.local_hi, &cuts, &mut sink)
+                .map_err(PbzError::Reader)?;
         }
         decode += read_start.elapsed();
     }
     ctx.state.timings.decode.record(decode);
 
-    // Merge into the shared buffers. Decode ran without slot locks so pieces
-    // sharing a buffer stay concurrent; each lock covers only the region
-    // copy. Buffers this piece finished are written outside the locks.
-    let mut closed: Vec<(usize, u64, Option<TileBuffer>, bool)> = Vec::new();
-    for (idx, entry) in entries.iter().enumerate() {
-        let wait_start = Instant::now();
-        let handle = ctx.slot((entry.t_idx, piece.span, entry.cc));
-        let mut guard = handle.inner.lock().expect("buffer slot poisoned");
-        ctx.state.timings.slot_wait.record(wait_start.elapsed());
-        if covered {
-            let merge_start = Instant::now();
-            if guard.data.is_none() {
-                let geom = &ctx.geoms[entry.t_idx];
-                let columns = geom.buffer_columns(entry.cc);
-                guard.data = Some(TileBuffer::filled(
-                    geom.dtype,
-                    rows,
-                    (columns.end - columns.start) as usize,
-                    &geom.fill,
-                )?);
-            }
-            let dst_lo = entry.fields[0].1;
-            guard
-                .data
-                .as_mut()
-                .expect("buffer allocated above for covered piece")
-                .copy_columns_from(&scratch[idx], dst_lo..dst_lo + entry.fields.len())?;
-            ctx.state.timings.merge.record(merge_start.elapsed());
+    // Finish the last streamed chunk, then every chunk the stream never
+    // reached, so an uncovered chunk inside a covered span still elides.
+    let next = match sink.current.take() {
+        Some((chunk_idx, chunk_covered)) => {
+            sink.finish_chunk(chunk_idx, chunk_covered)?;
+            chunk_idx + 1
         }
-        guard.remaining -= 1;
-        guard.any_data |= covered;
-        if guard.remaining == 0 {
-            closed.push((entry.t_idx, entry.cc, guard.data.take(), guard.any_data));
-        }
-    }
-
-    for (t_idx, cc, data, any_data) in closed {
-        ctx.state
-            .slots
-            .lock()
-            .expect("slot map poisoned")
-            .remove(&(t_idx, piece.span, cc));
-        ctx.close_buffer(
-            t_idx,
-            cc,
-            piece.span,
-            piece.start..piece.end,
-            data,
-            any_data,
-        )?;
-    }
-    Ok(())
+        None => first_chunk,
+    };
+    sink.finish_rest(next)
 }
 
 fn build_touch_plan(
@@ -1061,16 +1242,24 @@ pub(crate) fn run_import<R: ValueReader>(
 
     let genome = Arc::clone(tracks[0].genome());
     let total = tracks[0].total_len();
+    let workers = options.workers.max(1);
     let chunk_len = geoms[0].array_chunk_len.max(1);
-    let n_spans = usize::try_from(total.div_ceil(chunk_len))
+    let n_chunks = usize::try_from(total.div_ceil(chunk_len))
+        .map_err(|_| PbzError::Metadata("chunk count exceeds usize".into()))?;
+    let decode_chunks = match options.decode_chunks {
+        0 => auto_decode_chunks(total, chunk_len, n_readers, workers),
+        n => n.clamp(1, n_chunks.max(1)),
+    };
+    let span_len = chunk_len * decode_chunks as u64;
+    let n_spans = usize::try_from(total.div_ceil(span_len))
         .map_err(|_| PbzError::Metadata("span count exceeds usize".into()))?;
 
     let spans: Vec<(u64, u64)> = (0..n_spans as u64)
-        .map(|i| (i * chunk_len, ((i + 1) * chunk_len).min(total)))
+        .map(|i| (i * span_len, ((i + 1) * span_len).min(total)))
         .collect();
 
-    // Buffers and counters key on the span INDEX, so the open order is free
-    // to change.
+    // The gate and its counters key on the span INDEX, so the open order is
+    // free to change.
     let mut span_order: Vec<usize> = (0..n_spans).collect();
     if let Some(model) = cost_model {
         let costs: Vec<u64> = spans
@@ -1105,7 +1294,6 @@ pub(crate) fn run_import<R: ValueReader>(
         ccs.into_iter().map(|set| set.len()).collect()
     };
 
-    let workers = options.workers.max(1);
     let in_flight = match options.in_flight_spans {
         0 => auto_in_flight_spans(workers, n_readers).min(n_spans.max(1)),
         n => n,
@@ -1115,13 +1303,39 @@ pub(crate) fn run_import<R: ValueReader>(
         n => n,
     };
     let pool_size = (handle_budget / n_readers.max(1)).clamp(1, workers);
+    let pieces = n_spans * n_readers;
+
+    // Open buffers are bounded by the spans in flight; scratch by the
+    // workers. Both are whole chunks.
+    let chunk_row_bytes: u64 = geoms
+        .iter()
+        .map(|g| chunk_len * (g.columns.end - g.columns.start) * dtype_bytes(g.dtype))
+        .sum();
+    let scratch_chunk_bytes: u64 = touch_plan
+        .iter()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|e| chunk_len * e.fields.len() as u64 * dtype_bytes(geoms[e.t_idx].dtype))
+                .sum::<u64>()
+        })
+        .max()
+        .unwrap_or(0);
+    let buffer_ceiling = (in_flight as u64)
+        .saturating_mul(decode_chunks as u64)
+        .saturating_mul(chunk_row_bytes)
+        .saturating_add((workers as u64).saturating_mul(scratch_chunk_bytes));
+
     let started = Instant::now();
     let names: Vec<&str> = tracks.iter().map(|t| t.name()).collect();
     info!(
-        "import pipeline: {} track(s) {names:?}, {total} positions, {n_spans} span(s) of \
-         {chunk_len}, {n_readers} reader(s), {workers} workers, {in_flight} span(s) in flight, \
-         {handle_budget} handle(s) budget, {pool_size} per reader",
-        tracks.len()
+        "import pipeline: {} track(s) {names:?}, {total} positions, {n_chunks} chunk(s) of \
+         {chunk_len}, {n_spans} span(s) of {decode_chunks} chunk(s), {n_readers} reader(s), \
+         {pieces} piece(s), {workers} workers, {in_flight} span(s) in flight, {handle_budget} \
+         handle(s) budget ({pool_size} per reader), buffer ceiling {} (reader scratch \
+         excluded)",
+        tracks.len(),
+        human_bytes(buffer_ceiling)
     );
 
     let state = EngineState {
@@ -1148,8 +1362,9 @@ pub(crate) fn run_import<R: ValueReader>(
         tap,
         partial_opts,
         shard_locks: Mutex::new(HashMap::new()),
-        span_groups: Mutex::new(HashMap::new()),
+        chunk_groups: Mutex::new(HashMap::new()),
         group_sizes,
+        total,
     };
 
     // `fork` takes `&self`, but `ValueReader` is not `Sync`, so the base
@@ -1282,7 +1497,7 @@ pub(crate) fn run_import<R: ValueReader>(
     };
     info!(
         "import timing: wall {wall:.1}s workers {workers}\n\
-         decode : total {:.1}s  pieces {}  mean {:.2}s  max {:.2}s\n\
+         decode (incl. merge+write): total {:.1}s  pieces {}  mean {:.2}s  max {:.2}s\n\
          probe  : total {:.1}s\n\
          slot wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s\n\
          merge  : total {:.1}s  copies {}  mean {:.2}s  max {:.2}s\n\
@@ -1322,8 +1537,25 @@ pub(crate) fn run_import<R: ValueReader>(
         return Err(e);
     }
 
+    // Every piece drops its claim on every chunk of its span, so a clean run
+    // ends with nothing open. A reader that skipped a window would otherwise
+    // leave that chunk unwritten, uncounted, and unreported.
+    let open = state.slots.lock().expect("slot map poisoned").len()
+        + ctx
+            .chunk_groups
+            .lock()
+            .expect("chunk group map poisoned")
+            .len();
+    if open > 0 {
+        return Err(PbzError::Metadata(format!(
+            "engine invariant: {open} chunk buffer(s) never closed; a reader did not \
+             report every window of its span"
+        )));
+    }
+
     Ok(Report {
         contigs_written: genome.iter().filter(|(_, c)| c.length > 0).count(),
+        pieces,
         bytes_written: bytes,
         tasks_completed: completed,
         tasks_skipped: skipped,
@@ -1354,12 +1586,14 @@ mod tests {
     use crate::track::TrackConfig;
 
     /// Synthetic single-field reader over one contig: position `p` inside
-    /// `covered` reads as `base + p`; everything else is left untouched.
+    /// `covered` (or `extra`) reads as `base + p`; everything else is left
+    /// untouched.
     #[derive(Clone)]
     struct SynthReader {
         genome: Genome,
         schema: OutputSchema,
         covered: Range<u64>,
+        extra: Option<Range<u64>>,
         base: i64,
     }
 
@@ -1369,8 +1603,19 @@ mod tests {
                 genome,
                 schema: OutputSchema::single("value", dtype),
                 covered,
+                extra: None,
                 base,
             }
+        }
+
+        /// A second covered range, disjoint from the first.
+        fn with_extra_cover(mut self, extra: Range<u64>) -> Self {
+            self.extra = Some(extra);
+            self
+        }
+
+        fn ranges(&self) -> impl Iterator<Item = &Range<u64>> {
+            std::iter::once(&self.covered).chain(self.extra.iter())
         }
     }
 
@@ -1390,26 +1635,28 @@ mod tests {
             end: u64,
             outputs: &mut [OutputSinkMut<'_>],
         ) -> std::result::Result<(), crate::io::ReaderError> {
-            let lo = start.max(self.covered.start);
-            let hi = end.min(self.covered.end);
-            match &mut outputs[0] {
-                OutputSinkMut::I32(dst) => {
-                    for pos in lo..hi {
-                        dst[(pos - start) as usize] = (self.base + pos as i64) as i32;
+            for range in self.ranges() {
+                let lo = start.max(range.start);
+                let hi = end.min(range.end);
+                match &mut outputs[0] {
+                    OutputSinkMut::I32(dst) => {
+                        for pos in lo..hi {
+                            dst[(pos - start) as usize] = (self.base + pos as i64) as i32;
+                        }
                     }
-                }
-                OutputSinkMut::F32(dst) => {
-                    for pos in lo..hi {
-                        dst[(pos - start) as usize] = (self.base + pos as i64) as f32;
+                    OutputSinkMut::F32(dst) => {
+                        for pos in lo..hi {
+                            dst[(pos - start) as usize] = (self.base + pos as i64) as f32;
+                        }
                     }
+                    _ => panic!("test reader supports i32/f32 sinks only"),
                 }
-                _ => panic!("test reader supports i32/f32 sinks only"),
             }
             Ok(())
         }
 
         fn may_have_data(&self, _contig: &str, start: u64, end: u64) -> bool {
-            start < self.covered.end && end > self.covered.start
+            self.ranges().any(|r| start < r.end && end > r.start)
         }
 
         fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
@@ -1462,6 +1709,173 @@ mod tests {
     }
 
     #[test]
+    fn auto_decode_chunks_rule() {
+        // Cohort at 16k chunks: capped at 4M positions per span.
+        assert_eq!(auto_decode_chunks(3_100_000_000, 16384, 100, 128), 256);
+        // Small genome: balance rule, at least one chunk.
+        assert_eq!(auto_decode_chunks(100, 16, 1, 4), 1);
+        // 128 workers on one reader: balance rule below the cap.
+        assert_eq!(auto_decode_chunks(3_100_000_000, 16384, 1, 128), 184);
+        // Never more chunks than the genome has.
+        assert_eq!(auto_decode_chunks(1000, 16, 64, 1), 63);
+    }
+
+    /// A sharded small-chunk import with multi-chunk decode spans reads back
+    /// identical to the default-chunk import and to the unsharded one, and
+    /// the piece count follows ceil(total / span) * readers.
+    #[test]
+    fn decode_spans_match_single_chunk_spans() {
+        let len = 100u64;
+        let genome = one_contig(len);
+        let labels: Vec<String> = (0..4).map(|i| format!("s{i}")).collect();
+        let readers = || -> Vec<SynthReader> {
+            (0..4)
+                .map(|i| SynthReader::new(genome.clone(), Dtype::I32, 5..95, (i + 1) * 1000))
+                .collect()
+        };
+        let run = |dir: &Path, name: &str, cfg: TrackConfig, decode_chunks: usize| {
+            let mut store = PbzStore::create(dir.join(name)).unwrap();
+            store
+                .create_track("v", genome.clone(), cfg.columns(labels.clone()))
+                .unwrap();
+            let report = Import::from_readers(readers())
+                .unwrap()
+                .into_track(store.track("v").unwrap())
+                .readers_as_columns()
+                .expect_column_labels(labels.clone())
+                .options(PipelineOptions {
+                    workers: 3,
+                    decode_chunks,
+                    ..PipelineOptions::default()
+                })
+                .run()
+                .unwrap();
+            (store, report)
+        };
+        let sharded = || {
+            TrackConfig::new(Dtype::I32)
+                .chunk_size(16)
+                .column_chunk_size(2)
+                .shard_size(48)
+                .shard_column_size(2)
+        };
+        let dir = TempDir::new().unwrap();
+        let (a, ra) = run(dir.path(), "a.pbz", sharded(), 3);
+        let (b, _) = run(dir.path(), "b.pbz", sharded(), 1);
+        let (c, _) = run(
+            dir.path(),
+            "c.pbz",
+            TrackConfig::new(Dtype::I32)
+                .chunk_size(16)
+                .column_chunk_size(2),
+            3,
+        );
+        assert_eq!(ra.pieces, (len.div_ceil(48) as usize) * 4);
+        let read = |s: &PbzStore| -> ndarray::Array2<i32> {
+            s.track("v")
+                .unwrap()
+                .read_region::<i32>(&whole(s, "v", len))
+                .unwrap()
+                .into_dimensionality::<Ix2>()
+                .unwrap()
+        };
+        assert_eq!(read(&a), read(&b));
+        assert_eq!(read(&a), read(&c));
+    }
+
+    /// A chunk no reader covers still elides when it sits inside a covered
+    /// decode span.
+    #[test]
+    fn uncovered_chunk_inside_covered_span_elides() {
+        let dir = TempDir::new().unwrap();
+        let genome = one_contig(64);
+        let mut store = PbzStore::create(dir.path().join("elide.pbz")).unwrap();
+        store
+            .create_track(
+                "v",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32).chunk_size(16),
+            )
+            .unwrap();
+        // Covered: chunk 0 (0..16) and chunk 3 (48..64); chunks 1 and 2 empty.
+        let reader =
+            SynthReader::new(genome.clone(), Dtype::I32, 0..16, 7).with_extra_cover(48..64);
+        let report = Import::from_readers(vec![reader])
+            .unwrap()
+            .into_track(store.track("v").unwrap())
+            .options(PipelineOptions {
+                workers: 1,
+                decode_chunks: 4,
+                ..PipelineOptions::default()
+            })
+            .run()
+            .unwrap();
+        assert_eq!(report.pieces, 1);
+        assert_eq!(report.tasks_skipped, 2);
+        assert_eq!(chunk_file_count(&dir.path().join("elide.pbz/v/values")), 2);
+    }
+
+    /// A decode span crossing a contig boundary mid-chunk: the split chunk
+    /// takes two windows from one piece, closes once, and keeps each contig's
+    /// rows in place.
+    #[test]
+    fn span_crossing_contig_boundary_places_both_contigs() {
+        let dir = TempDir::new().unwrap();
+        let genome = Genome::new(vec![
+            Contig {
+                name: "chr1".into(),
+                length: 10,
+            },
+            Contig {
+                name: "chr2".into(),
+                length: 22,
+            },
+        ])
+        .unwrap();
+        let mut store = PbzStore::create(dir.path().join("split.pbz")).unwrap();
+        store
+            .create_track(
+                "v",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32).chunk_size(8),
+            )
+            .unwrap();
+
+        let reader = SynthReader::new(genome, Dtype::I32, 0..22, 100);
+        let report = Import::from_readers(vec![reader])
+            .unwrap()
+            .into_track(store.track("v").unwrap())
+            .options(PipelineOptions {
+                workers: 1,
+                decode_chunks: 4,
+                ..PipelineOptions::default()
+            })
+            .run()
+            .unwrap();
+        assert_eq!(report.pieces, 1);
+        assert_eq!(report.tasks_completed, 4);
+        assert_eq!(report.tasks_skipped, 0);
+
+        for (contig, len) in [("chr1", 10u64), ("chr2", 22u64)] {
+            let region = Region {
+                contig: store.genome_for("v").unwrap().id(contig).unwrap(),
+                start: 0,
+                end: len,
+            };
+            let values = store
+                .track("v")
+                .unwrap()
+                .read_region::<i32>(&region)
+                .unwrap()
+                .into_dimensionality::<Ix1>()
+                .unwrap();
+            for pos in 0..len as usize {
+                assert_eq!(values[pos], 100 + pos as i32, "{contig} position {pos}");
+            }
+        }
+    }
+
+    #[test]
     fn nan_fill_prefill_and_elision() {
         let dir = TempDir::new().unwrap();
         let genome = one_contig(40);
@@ -1481,7 +1895,7 @@ mod tests {
             .into_track(store.track("signal").unwrap())
             .run()
             .unwrap();
-        // Spans 16,16,8: only the first has coverage.
+        // Chunks 16,16,8: only the first has coverage.
         assert_eq!(report.tasks_completed, 1);
         assert_eq!(report.tasks_skipped, 2);
 
@@ -1506,8 +1920,8 @@ mod tests {
         );
     }
 
-    /// `ReverseCost` reverses span open order, so buffers complete out of
-    /// genome order; the written data must be unaffected.
+    /// `ReverseCost` reverses decode span open order, so buffers complete out
+    /// of genome order; the written data must be unaffected.
     #[test]
     fn out_of_order_buffer_completion() {
         struct ReverseCost;
@@ -1802,9 +2216,9 @@ mod tests {
         );
     }
 
-    /// Width-1 column chunks on a sharded track: the batched span flush must
+    /// Width-1 column chunks on a sharded track: the batched chunk flush must
     /// round-trip identical to the unsharded import, split correctly across
-    /// column shards, and still elide fully uncovered spans.
+    /// column shards, and still elide fully uncovered chunks.
     #[test]
     fn sharded_width_one_columns_match_unsharded() {
         let len = 96u64;
@@ -1854,7 +2268,7 @@ mod tests {
                 })
                 .run()
                 .unwrap();
-            // 6 spans x 4 column chunks; spans 64..96 have no coverage.
+            // 6 chunks x 4 column chunks; chunks 64..96 have no coverage.
             assert_eq!(report.tasks_completed, 16);
             assert_eq!(report.tasks_skipped, 8);
         }
