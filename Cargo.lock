@@ -1634,6 +1634,7 @@ checksum = "da1dbf501b46281ca402b458211653bc8c510ea605400a1192d272a35360aa54"
 dependencies = [
  "bytes",
  "crossbeam-channel",
+ "libdeflater",
  "rayon",
  "zlib-rs",
 ]
@@ -1646,6 +1647,7 @@ checksum = "280d401d0358893ad706fb6094a18e7f9e8f3002630f4960889cb702b6e2714e"
 dependencies = [
  "bytes",
  "crossbeam-channel",
+ "libdeflater",
  "rayon",
  "zlib-rs",
 ]

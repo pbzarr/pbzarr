@@ -22,7 +22,7 @@ d4 = { git = "https://github.com/cademirch/d4-format.git", rev = "f836299", defa
 # hard-deps tokio regardless, but the read path is fully synchronous, so the
 # reader never touches a runtime.
 bigtools = { version = "0.5.8", default-features = false, features = ["read"] }
-noodles-bgzf = "0.48"
+noodles-bgzf = { version = "0.48", features = ["libdeflate"] }
 noodles-csi = "0.57"
 noodles-tabix = "0.63"
 noodles-core = "0.20"
@@ -32,7 +32,7 @@ noodles-sam = "0.89"
 # (0.48, capped by noodles-tabix 0.63's own noodles-csi 0.57 pin). Renamed so
 # the BAM backend can name its indexed-reader field type against the same
 # bgzf version noodles-bam itself resolves to, instead of the two colliding.
-noodles-bgzf-bam = { package = "noodles-bgzf", version = "0.51" }
+noodles-bgzf-bam = { package = "noodles-bgzf", version = "0.51", features = ["libdeflate"] }
 # noodles-bam 0.94 pins noodles-csi 0.60 (newer than the bed/tabix path's
 # 0.57). `Reader::query`'s `I: BinningIndex` bound is version-specific, so the
 # BAM backend's own `.csi`-fallback index must be read with the same 0.60
