@@ -444,3 +444,12 @@ def test_gather_block_fuses_cross_boundary_pieces_in_order():
     )
 
     np.testing.assert_array_equal(gathered, [2, 3, 4, 5])
+
+
+def test_contig_ids_accepts_stringdtype_contigs():
+    from pbzarr._regions import _contig_ids
+
+    contigs = np.array(["chr1", "chr2", "HLA-A*01:01"], dtype=np.dtypes.StringDType())
+    names = np.asarray(["chr2", "HLA-A*01:01", "chr1"])
+    ids = _contig_ids(contigs, names)
+    assert ids.tolist() == [1, 2, 0]

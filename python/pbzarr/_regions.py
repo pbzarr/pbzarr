@@ -209,7 +209,7 @@ def _validate_packed_dataset(ds: xr.Dataset) -> np.ndarray:
         raise ValueError("region_input_index must be a permutation of region indices")
 
     contigs = np.asarray(ds["region_contig"].data)
-    if contigs.dtype.kind not in "OU" or any(
+    if contigs.dtype.kind not in "OUT" or any(
         not isinstance(value, str) or not value for value in contigs.tolist()
     ):
         raise ValueError("region_contig must contain non-empty strings")
@@ -1512,6 +1512,10 @@ def _integer_column(values, name: str) -> np.ndarray:
 
 
 def _contig_ids(contigs: np.ndarray, names: np.ndarray) -> np.ndarray:
+    if contigs.dtype != names.dtype:
+        # Stores opened under numpy 2 hold contigs as StringDType while
+        # query names arrive fixed-width; searchsorted refuses to mix them.
+        names = names.astype(contigs.dtype)
     order = np.argsort(contigs, kind="stable")
     sorted_contigs = contigs[order]
     positions = np.searchsorted(sorted_contigs, names)
