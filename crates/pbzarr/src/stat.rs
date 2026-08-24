@@ -1,5 +1,8 @@
 //! `pbz stat` compute engine: region statistics over one track.
 
+// Consumed by the stat engine in a later commit; drop with it.
+#![allow(dead_code)]
+
 use std::str::FromStr;
 
 use crate::error::{PbzError, Result};
