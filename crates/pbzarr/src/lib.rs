@@ -5,6 +5,7 @@ pub mod import;
 pub mod io;
 pub mod region_query;
 pub mod scale;
+pub mod stat;
 pub mod store;
 pub mod track;
 
