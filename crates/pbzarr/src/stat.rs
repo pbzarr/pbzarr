@@ -255,6 +255,93 @@ impl Accumulator for CountAcc {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlatRange {
+    pub region_pos: usize,
+    pub lo: u64,
+    pub hi: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct Batch {
+    pub span: std::ops::Range<u64>,
+    pub items: Vec<FlatRange>,
+}
+
+/// Cut sorted flat ranges into pieces at chunk boundaries and pack
+/// consecutive touched chunks into batches. Each chunk lands in exactly one
+/// batch, so overlapping regions never decode a chunk twice.
+pub(crate) fn plan_batches(ranges: &[FlatRange], chunk: u64, max_chunks: u64) -> Vec<Batch> {
+    let max_chunks = max_chunks.max(1);
+    let mut pieces: Vec<(u64, FlatRange)> = Vec::new();
+    for r in ranges {
+        let mut lo = r.lo;
+        while lo < r.hi {
+            let chunk_index = lo / chunk;
+            let hi = r.hi.min((chunk_index + 1) * chunk);
+            pieces.push((
+                chunk_index,
+                FlatRange {
+                    region_pos: r.region_pos,
+                    lo,
+                    hi,
+                },
+            ));
+            lo = hi;
+        }
+    }
+    pieces.sort_by_key(|(c, p)| (*c, p.region_pos, p.lo));
+
+    struct Open {
+        first_chunk: u64,
+        last_chunk: u64,
+        batch: Batch,
+    }
+    let mut batches = Vec::new();
+    let mut open: Option<Open> = None;
+    for (chunk_index, piece) in pieces {
+        let start_new = match &open {
+            None => true,
+            Some(o) => chunk_index > o.last_chunk + 1 || chunk_index - o.first_chunk >= max_chunks,
+        };
+        if start_new {
+            if let Some(o) = open.take() {
+                batches.push(o.batch);
+            }
+            open = Some(Open {
+                first_chunk: chunk_index,
+                last_chunk: chunk_index,
+                batch: Batch {
+                    span: piece.lo..piece.hi,
+                    items: Vec::new(),
+                },
+            });
+        }
+        let o = open.as_mut().expect("batch opened above");
+        o.last_chunk = chunk_index;
+        o.batch.span.start = o.batch.span.start.min(piece.lo);
+        o.batch.span.end = o.batch.span.end.max(piece.hi);
+        o.batch.items.push(piece);
+    }
+    if let Some(o) = open {
+        batches.push(o.batch);
+    }
+    batches
+}
+
+/// Union mask for hist: sort, then merge overlapping or touching ranges.
+pub(crate) fn coalesce(ranges: &mut Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    ranges.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    for &(lo, hi) in ranges.iter() {
+        match out.last_mut() {
+            Some((_, last_hi)) if lo <= *last_hi => *last_hi = (*last_hi).max(hi),
+            _ => out.push((lo, hi)),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +417,80 @@ mod tests {
         }
         assert_eq!(acc.observed(), vec![(-128, 2), (127, 1)]);
         assert_eq!(acc.median(), -128);
+    }
+
+    fn range(region_pos: usize, lo: u64, hi: u64) -> FlatRange {
+        FlatRange { region_pos, lo, hi }
+    }
+
+    fn touched_chunks(batch: &Batch, chunk: u64) -> std::collections::BTreeSet<u64> {
+        batch
+            .items
+            .iter()
+            .flat_map(|i| (i.lo / chunk)..=((i.hi - 1) / chunk))
+            .collect()
+    }
+
+    #[test]
+    fn planner_shares_one_chunk_among_small_regions() {
+        let ranges: Vec<FlatRange> = (0..100)
+            .map(|i| range(i, i as u64 * 5, i as u64 * 5 + 3))
+            .collect();
+        let batches = plan_batches(&ranges, 1000, 16);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items.len(), 100);
+        assert_eq!(batches[0].span, 0..498);
+    }
+
+    #[test]
+    fn planner_splits_oversized_region_at_chunk_boundaries() {
+        let batches = plan_batches(&[range(0, 0, 100)], 10, 3);
+        // 10 chunks, at most 3 per batch -> 4 batches, chunks disjoint
+        assert_eq!(batches.len(), 4);
+        let mut seen = std::collections::BTreeSet::new();
+        for batch in &batches {
+            for c in touched_chunks(batch, 10) {
+                assert!(seen.insert(c), "chunk {c} appears in two batches");
+            }
+        }
+        assert_eq!(seen.len(), 10);
+        let total: u64 = batches
+            .iter()
+            .flat_map(|b| &b.items)
+            .map(|i| i.hi - i.lo)
+            .sum();
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn planner_breaks_at_chunk_gaps() {
+        let ranges = [range(0, 5, 10), range(1, 90_000, 90_010)];
+        let batches = plan_batches(&ranges, 100, 1_000_000);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].span, 5..10);
+        assert_eq!(batches[1].span, 90_000..90_010);
+    }
+
+    #[test]
+    fn planner_keeps_overlapping_regions_in_one_batch() {
+        let ranges = [range(0, 0, 50), range(1, 0, 50), range(2, 30, 80)];
+        let batches = plan_batches(&ranges, 1000, 16);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].span, 0..80);
+        assert_eq!(batches[0].items.len(), 3);
+    }
+
+    #[test]
+    fn coalesce_merges_overlaps() {
+        let mut ranges = vec![(30, 80), (0, 50), (0, 50), (100, 110)];
+        assert_eq!(coalesce(&mut ranges), vec![(0, 80), (100, 110)]);
+    }
+
+    #[test]
+    fn planner_treats_zero_max_chunks_as_one() {
+        let ranges = [range(0, 0, 50), range(1, 0, 50), range(2, 30, 80)];
+        let batches = plan_batches(&ranges, 1000, 0);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items.len(), 3);
     }
 }
