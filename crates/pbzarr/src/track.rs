@@ -522,6 +522,43 @@ impl Track {
             .map_err(|e| PbzError::Store(format!("read {}: {e}", self.name)))
     }
 
+    /// Read a half-open flat position range, which may span contig
+    /// boundaries. Full column width for rank-2 tracks.
+    pub(crate) fn read_flat<T: Numeric>(
+        &self,
+        position: std::ops::Range<u64>,
+    ) -> Result<ArrayD<T>> {
+        if T::DTYPE != self.dtype {
+            return Err(PbzError::InvalidDtype {
+                dtype: format!(
+                    "track {:?} is {} but caller requested {}",
+                    self.name,
+                    self.dtype,
+                    T::DTYPE
+                ),
+            });
+        }
+        let array = self.values_array()?;
+        let shape = array.shape();
+        if position.start >= position.end || position.end > shape[0] {
+            return Err(PbzError::InvalidRegion {
+                message: format!(
+                    "flat range {}..{} is outside track {:?}",
+                    position.start, position.end, self.name
+                ),
+            });
+        }
+        #[allow(clippy::single_range_in_vec_init)]
+        let subset = if self.rank == 1 {
+            ArraySubset::new_with_ranges(&[position])
+        } else {
+            ArraySubset::new_with_ranges(&[position, 0..shape[1]])
+        };
+        array
+            .retrieve_array_subset::<ArrayD<T>>(&subset)
+            .map_err(|e| PbzError::Store(format!("read {}: {e}", self.name)))
+    }
+
     /// Write data into an arbitrary region.
     ///
     /// Takes ownership of `data` because zarrs' `store_array_subset` consumes
@@ -754,5 +791,46 @@ mod tests {
             store.track("depth").unwrap().write_unit_shape().unwrap(),
             vec![8, 4]
         );
+    }
+
+    #[test]
+    fn read_flat_crosses_contig_boundary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let genome = Genome::new(vec![
+            Contig {
+                name: "chr1".into(),
+                length: 10,
+            },
+            Contig {
+                name: "chr2".into(),
+                length: 6,
+            },
+        ])
+        .unwrap();
+        let mut store = PbzStore::create(dir.path().join("t.pbz")).unwrap();
+        store
+            .create_track("depth", genome.clone(), TrackConfig::new(Dtype::I32))
+            .unwrap();
+        let track = store.track("depth").unwrap();
+        let chr1 = genome.resolve(&"chr1".parse().unwrap()).unwrap();
+        track
+            .write_region(
+                &chr1,
+                ndarray::Array1::from((0..10).collect::<Vec<i32>>()).into_dyn(),
+            )
+            .unwrap();
+        let chr2 = genome.resolve(&"chr2".parse().unwrap()).unwrap();
+        track
+            .write_region(
+                &chr2,
+                ndarray::Array1::from((100..106).collect::<Vec<i32>>()).into_dyn(),
+            )
+            .unwrap();
+
+        let flat = track.read_flat::<i32>(8..12).unwrap();
+        assert_eq!(flat.into_raw_vec_and_offset().0, vec![8, 9, 100, 101]);
+
+        assert!(track.read_flat::<i32>(5..5).is_err());
+        assert!(track.read_flat::<i32>(10..17).is_err());
     }
 }
