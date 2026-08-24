@@ -23,6 +23,7 @@ use pbzarr_readers::{
 };
 
 mod fmt;
+mod stat;
 mod view;
 
 #[derive(Debug, Parser)]

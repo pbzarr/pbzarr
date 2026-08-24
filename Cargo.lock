@@ -1866,6 +1866,7 @@ dependencies = [
  "anyhow",
  "clap",
  "env_logger",
+ "flate2",
  "indicatif-log-bridge",
  "log",
  "ndarray",

@@ -12,6 +12,7 @@ publish = false
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
+flate2 = "1.1"
 indicatif-log-bridge = "0.2"
 log = "0.4"
 noodles-bgzf = "0.48"
