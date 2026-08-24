@@ -22,6 +22,7 @@ use pbzarr_readers::{
     read_bed_layout,
 };
 
+mod fmt;
 mod view;
 
 #[derive(Debug, Parser)]
