@@ -68,7 +68,7 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
     Ok(())
 }
 
-fn resolve_track<'s>(store: &'s PbzStore, requested: Option<&str>) -> Result<&'s Track> {
+pub(crate) fn resolve_track<'s>(store: &'s PbzStore, requested: Option<&str>) -> Result<&'s Track> {
     let mut available: Vec<&str> = store.track_names().collect();
     available.sort_unstable();
     match requested {

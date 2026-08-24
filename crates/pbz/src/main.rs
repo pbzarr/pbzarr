@@ -37,6 +37,8 @@ struct Cli {
 enum Command {
     /// Export one track as bedGraph-like text.
     View(ViewArgs),
+    /// Compute summary statistics for one track.
+    Stat(StatArgs),
     /// Import data into a PBZ store.
     Import(Box<ImportArgs>),
     /// Compute and publish a multiscale pyramid for a track.
@@ -70,6 +72,42 @@ struct ViewArgs {
     threads: Option<std::num::NonZeroUsize>,
     /// Significant digits for float values, `%g` style (UCSC bigWig
     /// convention).
+    #[arg(short('p'), long, value_name = "N", default_value_t = 6)]
+    precision: u8,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Examples:\n  pbz stat cohort.pbz depth\n  pbz stat -s median -r targets.bed cohort.pbz depth\n  pbz stat -s hist -c s1,s2 cohort.pbz af"
+)]
+struct StatArgs {
+    #[command(flatten)]
+    global: GlobalOptions,
+    /// PBZ store to read.
+    store: PathBuf,
+    /// Track to compute over. Optional when the store holds exactly one track.
+    track: Option<String>,
+    /// BED file with the regions to compute over. Default: one region per
+    /// chromosome.
+    #[arg(short('r'), long, value_name = "BED")]
+    region: Option<PathBuf>,
+    /// Statistic: mean, min, max, median, or hist.
+    #[arg(short('s'), long, value_name = "STAT", default_value = "mean")]
+    stat: String,
+    /// Column labels of a rank-2 track, comma-separated or repeated.
+    /// Default: all columns in stored order.
+    #[arg(short('c'), long, value_name = "LABEL", value_delimiter = ',')]
+    columns: Vec<String>,
+    /// Output path. A `.gz` suffix writes BGZF; default is stdout.
+    #[arg(short('o'), long, value_name = "PATH")]
+    output: Option<PathBuf>,
+    /// Do not write the header line.
+    #[arg(long)]
+    no_header: bool,
+    /// Worker threads for chunk decode and stat batches. Default: all cores.
+    #[arg(short('t'), long, value_name = "N")]
+    threads: Option<std::num::NonZeroUsize>,
+    /// Significant digits for float values, `%g` style.
     #[arg(short('p'), long, value_name = "N", default_value_t = 6)]
     precision: u8,
 }
@@ -479,6 +517,7 @@ enum OverlapModeArg {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::View(args) => view(args),
+        Command::Stat(args) => stat(args),
         Command::Import(import) => match import.format {
             ImportCommand::Bed(args) => import_bed(args),
             ImportCommand::Bam(args) => import_bam(args),
@@ -492,6 +531,21 @@ fn view(args: ViewArgs) -> Result<()> {
     view::run_view(&view::ViewSpec {
         store: args.store,
         track: args.track,
+        columns: args.columns,
+        output: args.output,
+        no_header: args.no_header,
+        threads: args.threads,
+        precision: args.precision,
+    })
+}
+
+fn stat(args: StatArgs) -> Result<()> {
+    init_logging(&args.global);
+    stat::run_stat(&stat::StatSpec {
+        store: args.store,
+        track: args.track,
+        region: args.region,
+        stat: args.stat,
         columns: args.columns,
         output: args.output,
         no_header: args.no_header,
