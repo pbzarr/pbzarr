@@ -3,6 +3,7 @@
 // Consumed by the stat engine in a later commit; drop with it.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use crate::error::{PbzError, Result};
@@ -145,6 +146,115 @@ impl Accumulator for MaxAcc {
     }
 }
 
+#[derive(Debug)]
+enum Counts {
+    Dense { base: i64, counts: Vec<u64> },
+    Sparse(BTreeMap<i64, u64>),
+}
+
+/// Exact value -> count map. Dense over the full dtype range for narrow
+/// dtypes, sparse for i32/u32 where coverage clusters at small values.
+#[derive(Debug)]
+pub(crate) struct CountAcc {
+    counts: Counts,
+    total: u64,
+}
+
+impl CountAcc {
+    pub(crate) fn dense(base: i64, len: usize) -> Self {
+        Self {
+            counts: Counts::Dense {
+                base,
+                counts: vec![0; len],
+            },
+            total: 0,
+        }
+    }
+
+    pub(crate) fn sparse() -> Self {
+        Self {
+            counts: Counts::Sparse(BTreeMap::new()),
+            total: 0,
+        }
+    }
+
+    pub(crate) fn total(&self) -> u64 {
+        self.total
+    }
+
+    pub(crate) fn count_of(&self, value: i64) -> u64 {
+        match &self.counts {
+            Counts::Dense { base, counts } => usize::try_from(value - base)
+                .ok()
+                .and_then(|i| counts.get(i).copied())
+                .unwrap_or(0),
+            Counts::Sparse(map) => map.get(&value).copied().unwrap_or(0),
+        }
+    }
+
+    pub(crate) fn observed(&self) -> Vec<(i64, u64)> {
+        match &self.counts {
+            Counts::Dense { base, counts } => counts
+                .iter()
+                .enumerate()
+                .filter(|&(_, c)| *c > 0)
+                .map(|(i, &c)| (base + i as i64, c))
+                .collect(),
+            Counts::Sparse(map) => map.iter().map(|(&v, &c)| (v, c)).collect(),
+        }
+    }
+
+    /// Lower of the two middle values for an even total.
+    pub(crate) fn median(&self) -> i64 {
+        let target = (self.total.saturating_sub(1)) / 2;
+        let mut cumulative = 0u64;
+        for (value, count) in self.observed() {
+            cumulative += count;
+            if cumulative > target {
+                return value;
+            }
+        }
+        0
+    }
+}
+
+impl Accumulator for CountAcc {
+    type Value = i64;
+    type Output = CountAcc;
+
+    fn update(&mut self, value: i64) {
+        self.total += 1;
+        match &mut self.counts {
+            Counts::Dense { base, counts } => {
+                let index = usize::try_from(value - *base).expect("value below dense base");
+                counts[index] += 1;
+            }
+            Counts::Sparse(map) => *map.entry(value).or_insert(0) += 1,
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.total += other.total;
+        match (&mut self.counts, other.counts) {
+            (Counts::Dense { counts, .. }, Counts::Dense { counts: rhs, .. }) => {
+                for (slot, add) in counts.iter_mut().zip(rhs) {
+                    *slot += add;
+                }
+            }
+            (Counts::Sparse(map), Counts::Sparse(rhs)) => {
+                for (value, count) in rhs {
+                    *map.entry(value).or_insert(0) += count;
+                }
+            }
+            _ => unreachable!("one run never mixes dense and sparse counts"),
+        }
+    }
+
+    fn finalize(self) -> CountAcc {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +293,42 @@ mod tests {
         assert_eq!(lo.finalize(), -5.0);
         assert_eq!(hi.finalize(), 3.0);
         assert!(MinAcc::default().finalize().is_nan());
+    }
+
+    #[test]
+    fn count_acc_dense_median_is_lower_middle() {
+        let mut acc = CountAcc::dense(0, 256);
+        for v in [5, 5, 5, 7, 7] {
+            acc.update(v);
+        }
+        assert_eq!(acc.total(), 5);
+        assert_eq!(acc.median(), 5);
+        acc.update(9);
+        // even total: 5,5,5,7,7,9 -> lower middle is 5
+        assert_eq!(acc.median(), 5);
+    }
+
+    #[test]
+    fn count_acc_sparse_merges_and_lists_observed() {
+        let mut a = CountAcc::sparse();
+        a.update(1_000_000);
+        a.update(-3);
+        let mut b = CountAcc::sparse();
+        b.update(-3);
+        a.merge(b);
+        assert_eq!(a.observed(), vec![(-3, 2), (1_000_000, 1)]);
+        assert_eq!(a.count_of(-3), 2);
+        assert_eq!(a.count_of(0), 0);
+        assert_eq!(a.median(), -3);
+    }
+
+    #[test]
+    fn count_acc_dense_negative_base() {
+        let mut acc = CountAcc::dense(-128, 256);
+        for v in [-128, -128, 127] {
+            acc.update(v);
+        }
+        assert_eq!(acc.observed(), vec![(-128, 2), (127, 1)]);
+        assert_eq!(acc.median(), -128);
     }
 }
