@@ -60,8 +60,17 @@ impl D4Reader {
             source,
         })?;
 
-        let contigs: Vec<Contig> = inner
-            .header()
+        let header = inner.header();
+        if !header.is_integral() {
+            let denominator = header.get_denominator();
+            return Err(ReaderError::Other(anyhow::anyhow!(
+                "{}: fix-point d4 (denominator {}) is not supported; pbz imports integer d4 files only",
+                path.display(),
+                denominator,
+            )));
+        }
+
+        let contigs: Vec<Contig> = header
             .chrom_list()
             .iter()
             .map(|c| Contig {
