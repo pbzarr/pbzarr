@@ -148,34 +148,22 @@ impl Accumulator for MaxAcc {
     }
 }
 
-#[derive(Debug)]
-enum Counts {
-    Dense { base: i64, counts: Vec<u64> },
-    Sparse(BTreeMap<i64, u64>),
-}
-
-/// Exact value -> count map. Dense over the full dtype range for narrow
-/// dtypes, sparse for i32/u32 where coverage clusters at small values.
+/// Exact value -> count map: a dense window over the hot value range plus a
+/// sparse overflow map for everything outside it.
 #[derive(Debug)]
 pub(crate) struct CountAcc {
-    counts: Counts,
+    base: i64,
+    window: Vec<u64>,
+    overflow: BTreeMap<i64, u64>,
     total: u64,
 }
 
 impl CountAcc {
-    pub(crate) fn dense(base: i64, len: usize) -> Self {
+    pub(crate) fn windowed(base: i64, len: usize) -> Self {
         Self {
-            counts: Counts::Dense {
-                base,
-                counts: vec![0; len],
-            },
-            total: 0,
-        }
-    }
-
-    pub(crate) fn sparse() -> Self {
-        Self {
-            counts: Counts::Sparse(BTreeMap::new()),
+            base,
+            window: vec![0; len],
+            overflow: BTreeMap::new(),
             total: 0,
         }
     }
@@ -185,25 +173,30 @@ impl CountAcc {
     }
 
     pub(crate) fn count_of(&self, value: i64) -> u64 {
-        match &self.counts {
-            Counts::Dense { base, counts } => usize::try_from(value - base)
-                .ok()
-                .and_then(|i| counts.get(i).copied())
-                .unwrap_or(0),
-            Counts::Sparse(map) => map.get(&value).copied().unwrap_or(0),
+        let off = value - self.base;
+        if off >= 0 && (off as usize) < self.window.len() {
+            self.window[off as usize]
+        } else {
+            self.overflow.get(&value).copied().unwrap_or(0)
         }
     }
 
     pub(crate) fn observed(&self) -> Vec<(i64, u64)> {
-        match &self.counts {
-            Counts::Dense { base, counts } => counts
+        let window_end = self.base + self.window.len() as i64;
+        let mut out: Vec<(i64, u64)> = self
+            .overflow
+            .range(..self.base)
+            .map(|(&v, &c)| (v, c))
+            .collect();
+        out.extend(
+            self.window
                 .iter()
                 .enumerate()
                 .filter(|&(_, c)| *c > 0)
-                .map(|(i, &c)| (base + i as i64, c))
-                .collect(),
-            Counts::Sparse(map) => map.iter().map(|(&v, &c)| (v, c)).collect(),
-        }
+                .map(|(i, &c)| (self.base + i as i64, c)),
+        );
+        out.extend(self.overflow.range(window_end..).map(|(&v, &c)| (v, c)));
+        out
     }
 
     /// Lower of the two middle values for an even total.
@@ -225,31 +218,27 @@ impl Accumulator for CountAcc {
     type Output = CountAcc;
 
     fn update(&mut self, value: i64) {
-        self.total += 1;
-        match &mut self.counts {
-            Counts::Dense { base, counts } => {
-                let index = usize::try_from(value - *base).expect("value below dense base");
-                counts[index] += 1;
-            }
-            Counts::Sparse(map) => *map.entry(value).or_insert(0) += 1,
+        // Negative `off` wraps to a huge usize, so this one comparison
+        // covers both bounds of `0 <= off < window.len()`.
+        let off = (value - self.base) as usize;
+        if off < self.window.len() {
+            self.window[off] += 1;
+        } else {
+            *self.overflow.entry(value).or_insert(0) += 1;
         }
+        self.total += 1;
     }
 
     fn merge(&mut self, other: Self) {
-        self.total += other.total;
-        match (&mut self.counts, other.counts) {
-            (Counts::Dense { counts, .. }, Counts::Dense { counts: rhs, .. }) => {
-                for (slot, add) in counts.iter_mut().zip(rhs) {
-                    *slot += add;
-                }
-            }
-            (Counts::Sparse(map), Counts::Sparse(rhs)) => {
-                for (value, count) in rhs {
-                    *map.entry(value).or_insert(0) += count;
-                }
-            }
-            _ => unreachable!("one run never mixes dense and sparse counts"),
+        debug_assert_eq!(self.base, other.base);
+        debug_assert_eq!(self.window.len(), other.window.len());
+        for (slot, add) in self.window.iter_mut().zip(other.window) {
+            *slot += add;
         }
+        for (value, count) in other.overflow {
+            *self.overflow.entry(value).or_insert(0) += count;
+        }
+        self.total += other.total;
     }
 
     fn finalize(self) -> CountAcc {
@@ -508,13 +497,7 @@ fn dispatch(
                     batches,
                     n_regions,
                     selected,
-                    || {
-                        if kind == StatKind::Hist {
-                            CountAcc::dense(0, 256)
-                        } else {
-                            CountAcc::sparse()
-                        }
-                    },
+                    || CountAcc::windowed(0, 256),
                     |v| v.into(),
                 ),
                 Dtype::I8 => count_accs::<i8>(
@@ -522,13 +505,7 @@ fn dispatch(
                     batches,
                     n_regions,
                     selected,
-                    || {
-                        if kind == StatKind::Hist {
-                            CountAcc::dense(-128, 256)
-                        } else {
-                            CountAcc::sparse()
-                        }
-                    },
+                    || CountAcc::windowed(-128, 256),
                     |v| v.into(),
                 ),
                 Dtype::U16 => count_accs::<u16>(
@@ -538,9 +515,9 @@ fn dispatch(
                     selected,
                     || {
                         if kind == StatKind::Hist {
-                            CountAcc::dense(0, 65_536)
+                            CountAcc::windowed(0, 65_536)
                         } else {
-                            CountAcc::sparse()
+                            CountAcc::windowed(0, 256)
                         }
                     },
                     |v| v.into(),
@@ -552,35 +529,47 @@ fn dispatch(
                     selected,
                     || {
                         if kind == StatKind::Hist {
-                            CountAcc::dense(-32_768, 65_536)
+                            CountAcc::windowed(-32_768, 65_536)
                         } else {
-                            CountAcc::sparse()
+                            CountAcc::windowed(0, 256)
                         }
                     },
                     |v| v.into(),
                 ),
-                Dtype::U32 => {
-                    count_accs::<u32>(track, batches, n_regions, selected, CountAcc::sparse, |v| {
-                        v.into()
-                    })
-                }
-                Dtype::I32 => {
-                    count_accs::<i32>(track, batches, n_regions, selected, CountAcc::sparse, |v| {
-                        v.into()
-                    })
-                }
-                Dtype::Bool => count_accs::<bool>(
+                Dtype::U32 => count_accs::<u32>(
                     track,
                     batches,
                     n_regions,
                     selected,
                     || {
                         if kind == StatKind::Hist {
-                            CountAcc::dense(0, 2)
+                            CountAcc::windowed(0, 65_536)
                         } else {
-                            CountAcc::sparse()
+                            CountAcc::windowed(0, 256)
                         }
                     },
+                    |v| v.into(),
+                ),
+                Dtype::I32 => count_accs::<i32>(
+                    track,
+                    batches,
+                    n_regions,
+                    selected,
+                    || {
+                        if kind == StatKind::Hist {
+                            CountAcc::windowed(0, 65_536)
+                        } else {
+                            CountAcc::windowed(0, 256)
+                        }
+                    },
+                    |v| v.into(),
+                ),
+                Dtype::Bool => count_accs::<bool>(
+                    track,
+                    batches,
+                    n_regions,
+                    selected,
+                    || CountAcc::windowed(0, 2),
                     |v| v.into(),
                 ),
                 Dtype::F32 => Err(PbzError::InvalidDtype {
@@ -821,7 +810,7 @@ mod tests {
 
     #[test]
     fn count_acc_dense_median_is_lower_middle() {
-        let mut acc = CountAcc::dense(0, 256);
+        let mut acc = CountAcc::windowed(0, 256);
         for v in [5, 5, 5, 7, 7] {
             acc.update(v);
         }
@@ -834,10 +823,10 @@ mod tests {
 
     #[test]
     fn count_acc_sparse_merges_and_lists_observed() {
-        let mut a = CountAcc::sparse();
+        let mut a = CountAcc::windowed(0, 256);
         a.update(1_000_000);
         a.update(-3);
-        let mut b = CountAcc::sparse();
+        let mut b = CountAcc::windowed(0, 256);
         b.update(-3);
         a.merge(b);
         assert_eq!(a.observed(), vec![(-3, 2), (1_000_000, 1)]);
@@ -848,12 +837,47 @@ mod tests {
 
     #[test]
     fn count_acc_dense_negative_base() {
-        let mut acc = CountAcc::dense(-128, 256);
+        let mut acc = CountAcc::windowed(-128, 256);
         for v in [-128, -128, 127] {
             acc.update(v);
         }
         assert_eq!(acc.observed(), vec![(-128, 2), (127, 1)]);
         assert_eq!(acc.median(), -128);
+    }
+
+    #[test]
+    fn count_acc_overflow_path() {
+        let mut acc = CountAcc::windowed(0, 4);
+        for v in [2, 7, -3, 7, 2, 1_000_000] {
+            acc.update(v);
+        }
+        assert_eq!(
+            acc.observed(),
+            vec![(-3, 1), (2, 2), (7, 2), (1_000_000, 1)]
+        );
+        assert_eq!(acc.count_of(7), 2);
+        assert_eq!(acc.count_of(3), 0);
+        assert_eq!(acc.total(), 6);
+        // sorted [-3,2,2,7,7,1000000], lower middle at index 2
+        assert_eq!(acc.median(), 2);
+    }
+
+    #[test]
+    fn count_acc_merge_spans_window_and_overflow() {
+        let mut a = CountAcc::windowed(0, 4);
+        for v in [1, 2, 2] {
+            a.update(v);
+        }
+        let mut b = CountAcc::windowed(0, 4);
+        for v in [-5, 10, 10] {
+            b.update(v);
+        }
+        a.merge(b);
+        assert_eq!(a.observed(), vec![(-5, 1), (1, 1), (2, 2), (10, 2)]);
+        assert_eq!(a.count_of(1), 1);
+        assert_eq!(a.count_of(-5), 1);
+        assert_eq!(a.count_of(10), 2);
+        assert_eq!(a.total(), 6);
     }
 
     fn range(region_pos: usize, lo: u64, hi: u64) -> FlatRange {
