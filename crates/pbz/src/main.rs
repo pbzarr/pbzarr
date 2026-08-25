@@ -16,9 +16,9 @@ use pbzarr::import::{
 use pbzarr::io::{Dtype, ValueReader as _};
 use pbzarr::{ExplicitArraySpec, Genome, PbzStore, ScaleConfig};
 use pbzarr_readers::{
-    BamReader, BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode,
-    InferRows, OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam,
-    from_bed_matrix, infer_bed_dtypes, infer_bed_dtypes_for_sources, plan_bed_schema,
+    BamReader, BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, D4Reader, DepthFilter,
+    ImportMode, InferRows, OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam,
+    from_bed_matrix, from_d4, infer_bed_dtypes, infer_bed_dtypes_for_sources, plan_bed_schema,
     read_bed_layout,
 };
 
@@ -143,6 +143,8 @@ enum ImportCommand {
     Bed(BedArgs),
     /// Import per-base depth or composition counts from BAM/CRAM files.
     Bam(BamArgs),
+    /// Import per-base depth from d4 files.
+    D4(D4Args),
 }
 
 #[derive(Debug, Args)]
@@ -514,6 +516,32 @@ enum OverlapModeArg {
     None,
 }
 
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz import d4 -o cohort.pbz --track depth s1.d4 s2.d4:custom_label"
+)]
+struct D4Args {
+    #[command(flatten)]
+    global: GlobalOptions,
+    #[command(flatten)]
+    import: ImportOptions,
+    #[command(flatten)]
+    d4: D4Options,
+}
+
+#[derive(Debug, Args)]
+struct D4Options {
+    /// PBZ output store. It is created when absent.
+    #[arg(short('o'), long)]
+    output: PathBuf,
+    #[command(flatten)]
+    input: ImportInputOptions,
+    /// Output track name.
+    #[arg(long)]
+    track: String,
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::View(args) => view(args),
@@ -521,6 +549,7 @@ fn main() -> Result<()> {
         Command::Import(import) => match import.format {
             ImportCommand::Bed(args) => import_bed(args),
             ImportCommand::Bam(args) => import_bam(args),
+            ImportCommand::D4(args) => import_d4(args),
         },
         Command::Scale(args) => scale_cmd(args),
     }
@@ -1094,6 +1123,65 @@ fn import_bam(args: BamArgs) -> Result<()> {
 
     debug!(
         "bam import wrote {} bytes across {} contig(s)",
+        report.bytes_written, report.contigs_written
+    );
+    println!(
+        "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
+        output.display(),
+        report.tasks_completed,
+        report.tasks_skipped
+    );
+    Ok(())
+}
+
+fn import_d4(args: D4Args) -> Result<()> {
+    init_logging(&args.global);
+    let sources: Vec<pbzarr::import::Source> = args
+        .d4
+        .input
+        .resolve_input()?
+        .into_iter()
+        .map(|source| pbzarr::import::Source {
+            path: source.path,
+            column_label: source.label,
+        })
+        .collect();
+    let n_sources = sources.len();
+    debug!("resolved {n_sources} d4 source(s)");
+
+    let config = args.import.config(&args.d4.track)?;
+    let output = args.d4.output;
+
+    if args.import.dry_run {
+        let source = &sources[0];
+        let reader = D4Reader::open(&source.path)
+            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
+        let source_columns = (n_sources > 1 || config.column_dim.is_some()).then(|| {
+            (
+                config
+                    .column_dim
+                    .clone()
+                    .unwrap_or_else(|| "sample".to_owned()),
+                sources
+                    .iter()
+                    .map(pbzarr::import::Source::label)
+                    .collect::<Vec<_>>(),
+            )
+        });
+        let tracks = vec![PlannedTrack {
+            name: args.d4.track.clone(),
+            dtype: Dtype::I32,
+            columns: source_columns,
+        }];
+        print_dry_run(&output, reader.contigs(), &tracks, &config, n_sources);
+        return Ok(());
+    }
+    let mut store = open_or_create(&output)?;
+
+    let report = from_d4(&mut store, &args.d4.track, &sources, config).context("import d4")?;
+
+    debug!(
+        "d4 import wrote {} bytes across {} contig(s)",
         report.bytes_written, report.contigs_written
     );
     println!(
