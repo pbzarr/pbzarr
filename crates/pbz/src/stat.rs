@@ -176,6 +176,7 @@ fn write_output<W: Write>(
                 }
                 writeln!(out)?;
             }
+            debug_assert_eq!(named.len(), rows.len());
             for (region, row) in named.iter().zip(rows) {
                 write!(
                     out,

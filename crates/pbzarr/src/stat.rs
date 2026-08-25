@@ -404,9 +404,8 @@ pub fn run(
         let mut flat: Vec<(u64, u64)> = ranges.iter().map(|r| (r.lo, r.hi)).collect();
         ranges = coalesce(&mut flat)
             .into_iter()
-            .enumerate()
-            .map(|(i, (lo, hi))| FlatRange {
-                region_pos: i,
+            .map(|(lo, hi)| FlatRange {
+                region_pos: 0,
                 lo,
                 hi,
             })
@@ -414,7 +413,7 @@ pub fn run(
     }
     ranges.sort_by_key(|r| (r.lo, r.hi));
     let n_regions = if kind == StatKind::Hist {
-        ranges.len()
+        usize::from(!ranges.is_empty())
     } else {
         regions.len()
     };
@@ -509,7 +508,13 @@ fn dispatch(
                     batches,
                     n_regions,
                     selected,
-                    || CountAcc::dense(0, 256),
+                    || {
+                        if kind == StatKind::Hist {
+                            CountAcc::dense(0, 256)
+                        } else {
+                            CountAcc::sparse()
+                        }
+                    },
                     |v| v.into(),
                 ),
                 Dtype::I8 => count_accs::<i8>(
@@ -517,7 +522,13 @@ fn dispatch(
                     batches,
                     n_regions,
                     selected,
-                    || CountAcc::dense(-128, 256),
+                    || {
+                        if kind == StatKind::Hist {
+                            CountAcc::dense(-128, 256)
+                        } else {
+                            CountAcc::sparse()
+                        }
+                    },
                     |v| v.into(),
                 ),
                 Dtype::U16 => count_accs::<u16>(
@@ -525,7 +536,13 @@ fn dispatch(
                     batches,
                     n_regions,
                     selected,
-                    || CountAcc::dense(0, 65_536),
+                    || {
+                        if kind == StatKind::Hist {
+                            CountAcc::dense(0, 65_536)
+                        } else {
+                            CountAcc::sparse()
+                        }
+                    },
                     |v| v.into(),
                 ),
                 Dtype::I16 => count_accs::<i16>(
@@ -533,7 +550,13 @@ fn dispatch(
                     batches,
                     n_regions,
                     selected,
-                    || CountAcc::dense(-32_768, 65_536),
+                    || {
+                        if kind == StatKind::Hist {
+                            CountAcc::dense(-32_768, 65_536)
+                        } else {
+                            CountAcc::sparse()
+                        }
+                    },
                     |v| v.into(),
                 ),
                 Dtype::U32 => {
@@ -551,7 +574,13 @@ fn dispatch(
                     batches,
                     n_regions,
                     selected,
-                    || CountAcc::dense(0, 2),
+                    || {
+                        if kind == StatKind::Hist {
+                            CountAcc::dense(0, 2)
+                        } else {
+                            CountAcc::sparse()
+                        }
+                    },
                     |v| v.into(),
                 ),
                 Dtype::F32 => Err(PbzError::InvalidDtype {
