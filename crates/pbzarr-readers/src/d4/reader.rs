@@ -1,20 +1,25 @@
 //! D4 single-track reader implementing `ValueReader`.
 //!
 //! Uses the mmap-backed `d4::D4TrackReader` (default generics
-//! `<BitArrayReader, SparseArrayReader<RangeRecord>>`) and reads each region
-//! via `.split(Some(chunk_size))` + `ptab.to_codec().decode_block(...)`. The
-//! reference for this pattern is `pyd4::load_values_to_buffer` in the upstream
-//! d4 repo.
+//! `<BitArrayReader, SparseArrayReader<RangeRecord>>`). `split(None)` is
+//! called once per handle to get one `(ptab, stab)` partition per contig;
+//! each read then decodes its subrange via
+//! `ptab.to_codec().decode_block(...)`. A per-read `split(Some(span))`
+//! partitions the whole genome each call, which is quadratic on
+//! fragmented assemblies with many small contigs.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use d4::D4TrackReader;
-use d4::ptab::{DecodeResult, Decoder};
-use d4::stab::SecondaryTablePartReader;
+use d4::ptab::{BitArrayPartReader, DecodeResult, Decoder};
+use d4::stab::{RangeRecord, SecondaryTablePartReader, SparseArrayPartReader};
 
 use pbzarr::genome::{Contig, Genome};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader};
+
+type ContigPart = (BitArrayPartReader, SparseArrayPartReader<RangeRecord>);
 
 /// Read a d4 file's contig list from its header without opening the data path.
 ///
@@ -43,11 +48,30 @@ struct Shared {
     schema: OutputSchema,
 }
 
-/// D4 single-sample reader. Owns one mmap-backed `D4TrackReader`; multi-thread
-/// callers should use `fork()` to get a per-thread handle on the same file.
+/// D4 single-sample reader. Owns one mmap-backed `D4TrackReader` plus its
+/// per-contig partitions; multi-thread callers should use `fork()` to get a
+/// per-thread handle on the same file.
 pub struct D4Reader {
     shared: Arc<Shared>,
-    inner: D4TrackReader,
+    // Keeps the mmap root alive for the partitions borrowed from it.
+    _inner: D4TrackReader,
+    parts: HashMap<String, ContigPart>,
+}
+
+fn contig_partitions(
+    inner: &mut D4TrackReader,
+    path: &Path,
+) -> Result<HashMap<String, ContigPart>> {
+    let partitions = inner.split(None).map_err(|source| ReaderError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut parts = HashMap::with_capacity(partitions.len());
+    for (ptab, stab) in partitions {
+        let name = ptab.region().0.to_string();
+        parts.insert(name, (ptab, stab));
+    }
+    Ok(parts)
 }
 
 impl D4Reader {
@@ -55,10 +79,11 @@ impl D4Reader {
     /// the canonical `Genome`.
     pub fn open<P: AsRef<Path>>(src: P) -> Result<Self> {
         let path = src.as_ref().to_path_buf();
-        let inner = D4TrackReader::open_first_track(&path).map_err(|source| ReaderError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let mut inner =
+            D4TrackReader::open_first_track(&path).map_err(|source| ReaderError::Io {
+                path: path.clone(),
+                source,
+            })?;
 
         let header = inner.header();
         if !header.is_integral() {
@@ -85,26 +110,31 @@ impl D4Reader {
             ))
         })?;
 
+        let parts = contig_partitions(&mut inner, &path)?;
+
         Ok(Self {
             shared: Arc::new(Shared {
                 path,
                 genome,
                 schema: OutputSchema::single("depth", Dtype::I32),
             }),
-            inner,
+            _inner: inner,
+            parts,
         })
     }
 
     fn fork_handle(&self) -> Result<Self> {
-        let reader = D4TrackReader::open_first_track(&self.shared.path).map_err(|source| {
+        let mut inner = D4TrackReader::open_first_track(&self.shared.path).map_err(|source| {
             ReaderError::Io {
                 path: self.shared.path.clone(),
                 source,
             }
         })?;
+        let parts = contig_partitions(&mut inner, &self.shared.path)?;
         Ok(Self {
             shared: Arc::clone(&self.shared),
-            inner: reader,
+            _inner: inner,
+            parts,
         })
     }
 }
@@ -112,7 +142,7 @@ impl D4Reader {
 /// `emit` receives each covered base as an offset from `start`.
 fn decode_region(
     shared: &Shared,
-    inner: &mut D4TrackReader,
+    parts: &mut HashMap<String, ContigPart>,
     contig_name: &str,
     start: u64,
     end: u64,
@@ -122,14 +152,13 @@ fn decode_region(
         return Ok(());
     }
 
-    // Resolve the name in the d4 file's own genome; the caller's
-    // ContigId (if it had one) belongs to a different namespace.
-    if shared.genome.id(contig_name).is_none() {
+    let Some((ptab, stab)) = parts.get_mut(contig_name) else {
         return Err(ReaderError::ContigNotFound {
             path: shared.path.clone(),
             contig: contig_name.to_owned(),
         });
-    }
+    };
+
     // d4's region API is natively 0-based half-open; no conversion needed,
     // only the narrowing cast to its u32 coordinate type.
     let start_u32 = u32::try_from(start).map_err(|_| {
@@ -146,41 +175,22 @@ fn decode_region(
             shared.path.display(),
         ))
     })?;
-    let span = (end_u32 - start_u32) as usize;
 
-    // split() requires &mut self; the partitioning is cheap relative to
-    // the actual decode of a 1 Mbp range. Sizing the limit at the request
-    // span gives at most one partition per contig overlapping our range.
-    let partitions = inner
-        .split(Some(span.max(1)))
-        .map_err(|source| ReaderError::Io {
-            path: shared.path.clone(),
-            source,
-        })?;
-
-    for (mut ptab, mut stab) in partitions {
-        let (part_chr, part_begin, part_end) = {
-            let (c, b, e) = ptab.region();
-            (c.to_string(), b, e)
-        };
-        if part_chr != contig_name {
-            continue;
-        }
-        let from = start_u32.max(part_begin);
-        let to = end_u32.min(part_end);
-        if from >= to {
-            continue;
-        }
-
-        let mut codec = ptab.to_codec();
-        codec.decode_block(from as usize, (to - from) as usize, |pos, value| {
-            let resolved = match value {
-                DecodeResult::Definitely(v) => v,
-                DecodeResult::Maybe(v) => stab.decode(pos as u32).unwrap_or(v),
-            };
-            emit(pos - start_u32 as usize, resolved);
-        });
+    let (_, part_begin, part_end) = ptab.region();
+    let from = start_u32.max(part_begin);
+    let to = end_u32.min(part_end);
+    if from >= to {
+        return Ok(());
     }
+
+    let mut codec = ptab.to_codec();
+    codec.decode_block(from as usize, (to - from) as usize, |pos, value| {
+        let resolved = match value {
+            DecodeResult::Definitely(v) => v,
+            DecodeResult::Maybe(v) => stab.decode(pos as u32).unwrap_or(v),
+        };
+        emit(pos - start_u32 as usize, resolved);
+    });
 
     Ok(())
 }
@@ -213,7 +223,7 @@ impl ValueReader for D4Reader {
         let dst = output.as_i32_mut()?;
         decode_region(
             &self.shared,
-            &mut self.inner,
+            &mut self.parts,
             contig,
             start,
             end,
