@@ -747,7 +747,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2271,7 +2271,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2497,7 +2497,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2851,7 +2851,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3086,8 +3086,7 @@ dependencies = [
 [[package]]
 name = "zarrs"
 version = "0.23.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8132307b8fc041fd21f68c7987103fb6e038b11f9838c16ec43b798f5480ccf5"
+source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
 dependencies = [
  "async-lock",
  "base64",
@@ -3136,8 +3135,7 @@ dependencies = [
 [[package]]
 name = "zarrs_chunk_grid"
 version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cf67386fd96a0336cd3e5ab5ca6cb14e0e05aee80f1acae8c4d3cf562a8bb65"
+source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
 dependencies = [
  "derive_more",
  "inventory",
@@ -3152,8 +3150,7 @@ dependencies = [
 [[package]]
 name = "zarrs_chunk_key_encoding"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9040e7feaa92d1904d492acd0cd91b97214f1791c5b5738e6c05b2ca4145a382"
+source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
 dependencies = [
  "derive_more",
  "inventory",
@@ -3165,8 +3162,7 @@ dependencies = [
 [[package]]
 name = "zarrs_codec"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "383a129a6a0cbb2c80cdba23809e5cab85159756464b7d0f112468a495c128da"
+source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -3187,8 +3183,7 @@ dependencies = [
 [[package]]
 name = "zarrs_data_type"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bc7c594c9363278fcd9db4c205514f009944206eb093ea7ad40b85f50009f31"
+source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
 dependencies = [
  "derive_more",
  "half",
@@ -3205,8 +3200,7 @@ dependencies = [
 [[package]]
 name = "zarrs_filesystem"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "270efeb0181651aee5460b3232f2fc83e91bd646cefe75001d1c8f9a4f3abf81"
+source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3222,9 +3216,8 @@ dependencies = [
 
 [[package]]
 name = "zarrs_metadata"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5048bb16f093f9fa78ade440144e7709e0802bfc73bfb70c52f85d38bff3b03a"
+version = "0.7.5"
+source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
 dependencies = [
  "derive_more",
  "half",
@@ -3237,8 +3230,7 @@ dependencies = [
 [[package]]
 name = "zarrs_metadata_ext"
 version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2048e07848ca99c7450518e0584929300b1b6a3cf442f18b26ffd3520814bd5b"
+source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
 dependencies = [
  "derive_more",
  "monostate",
@@ -3253,8 +3245,7 @@ dependencies = [
 [[package]]
 name = "zarrs_plugin"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cbe0ed432aee86856f70ca33be36eaf4a0dae21ab730750d9280a7ca1e95046"
+source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
 dependencies = [
  "paste",
  "regex",
@@ -3265,8 +3256,7 @@ dependencies = [
 [[package]]
 name = "zarrs_storage"
 version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d098796d2ed4cf94896569615101e0432e870a7665396da5cc32300fb68f7c1"
+source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
 dependencies = [
  "auto_impl",
  "bytes",

@@ -25,3 +25,9 @@ inherits = "release"
 debug = true
 strip = false
 split-debuginfo = "packed"
+
+# Temporary zarrs pin: partial-decode cache below an array-to-array codec was
+# built with the wrong-stage shape (transpose + pcodec reads failed). Drop when
+# the fix ships upstream.
+[patch.crates-io]
+zarrs = { git = "https://github.com/cademirch/zarrs", rev = "cac400ebc8ba2db193e2b25df078e2d858d88229" }

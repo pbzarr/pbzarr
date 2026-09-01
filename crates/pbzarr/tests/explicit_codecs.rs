@@ -91,6 +91,17 @@ fn explicit_codecs_transpose_pcodec_roundtrip() {
     track.write_region(&region, data.clone()).unwrap();
     assert_eq!(track.read_region::<i32>(&region).unwrap(), data);
 
+    // A chunk-unaligned read goes through the partial-decode chain, where the
+    // pcodec full-decode cache must use the transposed representation.
+    let partial = track
+        .genome()
+        .resolve(&"chr1:1-6".parse().unwrap())
+        .unwrap();
+    assert_eq!(
+        track.read_region::<i32>(&partial).unwrap(),
+        data.slice(ndarray::s![1..6, ..]).to_owned().into_dyn()
+    );
+
     let meta = values_meta(&path, "depth");
     assert_eq!(codec_names(&meta), ["transpose", "numcodecs.pcodec"]);
 }
