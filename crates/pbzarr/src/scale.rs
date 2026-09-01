@@ -36,6 +36,10 @@ const MULTISCALES_SPEC_URL: &str =
 /// Full column width per chunk; no sharding.
 const LEVEL_CHUNK_LEN: u64 = 262_144;
 
+/// Byte cap for one level chunk (`chunk_len * n_columns * 4`). Bounds the
+/// chunk length on wide cohort tracks; blosc rejects buffers near 2 GiB.
+const LEVEL_CHUNK_TARGET_BYTES: u64 = 64 << 20;
+
 /// Byte budget for one slab of base data (`slab_len * n_columns * 4`).
 const SLAB_TARGET_BYTES: u64 = 64 << 20;
 
@@ -362,7 +366,10 @@ fn create_level(store: &PbzStore, t: &Track, factor: u64, source_fill: f64) -> R
     // Level fill = the mean of an all-fill bin: f32 of the source fill.
     let level_fill = FillValue::from(source_fill as f32);
 
-    let chunk_len = LEVEL_CHUNK_LEN.min(level_len.max(1));
+    let chunk_len = LEVEL_CHUNK_LEN
+        .min(LEVEL_CHUNK_TARGET_BYTES / (4 * n_cols.max(1)))
+        .max(1)
+        .min(level_len.max(1));
     let (shape, chunks, dim_names): (Vec<u64>, Vec<u64>, Vec<&str>) = if t.rank() == 2 {
         let col_dim = t.column_dim().unwrap_or("column");
         (
