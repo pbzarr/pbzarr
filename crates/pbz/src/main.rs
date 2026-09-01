@@ -591,7 +591,7 @@ fn stat(args: StatArgs) -> Result<()> {
 }
 
 fn scale_cmd(args: ScaleArgs) -> Result<()> {
-    let _ = args.global.verbose;
+    init_logging(&args.global);
     let factors = args.scales.as_deref().map(parse_scales).transpose()?;
 
     let store =

@@ -10,8 +10,11 @@
 //! are cleaned up by the next `scale` run.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use log::debug;
 
 use ndarray::{Array1, Array2, ArrayD};
 use serde_json::{Value, json};
@@ -54,6 +57,11 @@ const SLAB_MIN_INNER_CHUNKS: u64 = 4;
 /// Cap on one slab's full-width root accumulators (f64 sums + i64 counts),
 /// bounding the memory the minimum-slab rule may claim per worker.
 const ACCUM_TARGET_BYTES: u64 = 256 << 20;
+
+/// Level-write threads. Coalesced chunks are disjoint (each written exactly
+/// once at full coverage), so encodes and stores parallelize safely; a few
+/// threads keep up with many compute workers.
+const WRITE_THREADS: usize = 4;
 
 /// Tier A cap on the slab alignment (the lcm of the factors swept from base):
 /// factor sets whose alignment exceeds this fall back to the per-factor
@@ -586,6 +594,47 @@ struct PassCtx<'a, T> {
     min_slab: u64,
     /// Ticked once per slab with the base bytes it covered.
     progress: Option<&'a dyn ProgressSink>,
+    timings: PassTimings,
+}
+
+/// Wall-time and volume counters for one Tier A pass, summed across threads
+/// and logged at debug level. Thread-seconds, not elapsed time.
+#[derive(Default)]
+struct PassTimings {
+    /// Worker time inside base reads, and the bytes those reads decoded
+    /// (including alignment padding).
+    read_ns: AtomicU64,
+    read_bytes: AtomicU64,
+    /// Worker time accumulating tiles into root bins.
+    accum_ns: AtomicU64,
+    /// Worker time blocked sending blocks to the coalescer (backpressure).
+    stall_ns: AtomicU64,
+    /// Write-thread time encoding and storing level chunks, and the f32
+    /// bytes stored.
+    write_ns: AtomicU64,
+    write_bytes: AtomicU64,
+}
+
+impl PassTimings {
+    fn add(counter: &AtomicU64, since: Instant) {
+        counter.fetch_add(since.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn log(&self, workers: usize, write_threads: usize) {
+        let s = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e9;
+        let gib = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / (1u64 << 30) as f64;
+        debug!(
+            "scale pass thread-seconds: read {:.1}s ({:.2} GiB incl. pad), accumulate {:.1}s, \
+             emit-stall {:.1}s over {workers} workers; write {:.1}s ({:.2} GiB) over \
+             {write_threads} writers",
+            s(&self.read_ns),
+            gib(&self.read_bytes),
+            s(&self.accum_ns),
+            s(&self.stall_ns),
+            s(&self.write_ns),
+            gib(&self.write_bytes),
+        );
+    }
 }
 
 impl<'a, T: Numeric> PassCtx<'a, T> {
@@ -641,6 +690,7 @@ impl<'a, T: Numeric> PassCtx<'a, T> {
             inner_col: inner_col.max(1),
             min_slab,
             progress: None,
+            timings: PassTimings::default(),
         })
     }
 }
@@ -709,24 +759,29 @@ fn build_units<T: Numeric>(ctx: &PassCtx<'_, T>) -> Vec<Unit> {
     units
 }
 
-/// Run the Tier A pass with `workers` compute threads and the calling
-/// thread as the single writer.
+/// Run the Tier A pass with `workers` compute threads, the calling thread
+/// as the block coalescer, and [`WRITE_THREADS`] level-write threads.
 ///
 /// Workers claim units off a shared index and send completed-bin blocks
-/// over a bounded channel; only the writer touches the level arrays, so no
-/// concurrent read-modify-write exists on shared level chunks whatever the
-/// chunk geometry. The first worker or writer error stops the run (workers
-/// check the flag between units; the writer keeps draining so no worker
-/// blocks on a full channel) and is returned. `workers = 1` runs the exact
-/// same machinery and produces identical values.
+/// over a bounded channel to the coalescer, which assembles whole level
+/// chunks; each completed chunk is handed to the write pool and encoded and
+/// stored exactly once, so writes never touch the same chunk concurrently.
+/// The first worker or writer error stops the run (workers check the flag
+/// between units; the coalescer keeps draining so no worker blocks on a
+/// full channel) and is returned. `workers = 1` runs the exact same
+/// machinery and produces identical values.
 fn run_units<T: Numeric>(ctx: &PassCtx<'_, T>, workers: usize) -> Result<()> {
     let units = build_units(ctx);
     let units: &[Unit] = &units;
     let workers = workers.clamp(1, units.len().max(1));
+    let write_threads = WRITE_THREADS.min(workers);
     // Backpressure: a few blocks in flight per worker keeps peak memory at
     // ~ workers x (slab + accumulators) + cap x one block.
     let cap = workers * 2;
     let (tx, rx) = std::sync::mpsc::sync_channel::<LevelBlock>(cap);
+    // Completed chunks queue shallowly to the write pool; the coalescer
+    // blocks when every writer is busy, which backpressures the workers.
+    let (wtx, wrx) = crossbeam_channel::bounded::<(usize, u64, Vec<f32>)>(write_threads * 2);
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let first_err: Mutex<Option<PbzError>> = Mutex::new(None);
@@ -756,8 +811,12 @@ fn run_units<T: Numeric>(ctx: &PassCtx<'_, T>, workers: usize) -> Result<()> {
                         break;
                     };
                     let mut emit = |level: usize, bin0: u64, means: Vec<f32>| {
-                        tx.send(LevelBlock { level, bin0, means })
-                            .map_err(|_| PbzError::Store("scale: writer thread hung up".into()))
+                        let start = Instant::now();
+                        let sent = tx
+                            .send(LevelBlock { level, bin0, means })
+                            .map_err(|_| PbzError::Store("scale: writer threads hung up".into()));
+                        PassTimings::add(&ctx.timings.stall_ns, start);
+                        sent
                     };
                     if let Err(e) = compute_unit(ctx, unit, &mut emit) {
                         record(e);
@@ -766,9 +825,30 @@ fn run_units<T: Numeric>(ctx: &PassCtx<'_, T>, workers: usize) -> Result<()> {
                 }
             });
         }
-        drop(tx); // the writer's recv loop ends when the last worker exits
+        drop(tx); // the coalescer's recv loop ends when the last worker exits
 
-        // Single writer: every level-array write happens on this thread.
+        for _ in 0..write_threads {
+            let wrx = wrx.clone();
+            let (failed, record) = (&failed, &record);
+            scope.spawn(move || {
+                while let Ok((level, chunk_start, buf)) = wrx.recv() {
+                    if failed.load(Ordering::Acquire) {
+                        continue; // drain so the coalescer never blocks
+                    }
+                    let start = Instant::now();
+                    let bytes = buf.len() as u64 * 4;
+                    let arr = &ctx.levels[level].array;
+                    if let Err(e) = write_f32_bins(arr, ctx.rank2, chunk_start, ctx.n_cols, buf) {
+                        record(e);
+                    }
+                    PassTimings::add(&ctx.timings.write_ns, start);
+                    ctx.timings.write_bytes.fetch_add(bytes, Ordering::Relaxed);
+                }
+            });
+        }
+        drop(wrx);
+
+        // Coalescer: assembles chunks; the only thread that touches `bufs`.
         while let Ok(block) = rx.recv() {
             if failed.load(Ordering::Acquire) {
                 continue; // drain so workers never block on a full channel
@@ -796,17 +876,17 @@ fn run_units<T: Numeric>(ctx: &PassCtx<'_, T>, workers: usize) -> Result<()> {
                 };
                 if full {
                     let (buf, _) = bufs.remove(&key).expect("chunk buffer present");
-                    if let Err(e) =
-                        write_f32_bins(&lvl.array, ctx.rank2, chunk_start, ctx.n_cols, buf)
-                    {
-                        record(e);
+                    if wtx.send((block.level, chunk_start, buf)).is_err() {
+                        record(PbzError::Store("scale: writer threads hung up".into()));
                     }
                 }
                 bin += take as u64;
                 src += take * width;
             }
         }
+        drop(wtx); // write threads exit once the queue drains
     });
+    ctx.timings.log(workers, write_threads);
 
     match first_err.into_inner().expect("scale: error slot poisoned") {
         Some(e) => Err(e),
@@ -887,6 +967,7 @@ fn compute_unit<T: Numeric>(
             // Rank-2 tiles read a superset aligned to the inner chunk grid in
             // flat coordinates, so every covered inner chunk decodes exactly
             // once per read instead of once per straddling slab.
+            let read_start = Instant::now();
             let (data, off): (ArrayD<T>, usize) = if ctx.rank2 {
                 let lo0 = flat_base + slab_start;
                 let lo = lo0 / ctx.inner_pos * ctx.inner_pos;
@@ -902,6 +983,11 @@ fn compute_unit<T: Numeric>(
                 };
                 (ctx.t.read_region(&region)?, 0)
             };
+            PassTimings::add(&ctx.timings.read_ns, read_start);
+            ctx.timings
+                .read_bytes
+                .fetch_add((data.len() * size_of::<T>()) as u64, Ordering::Relaxed);
+            let accum_start = Instant::now();
             let read_rows = data.len() / width.max(1);
             let data = data
                 .into_shape_with_order((read_rows, width))
@@ -924,6 +1010,7 @@ fn compute_unit<T: Numeric>(
                     }
                 }
             }
+            PassTimings::add(&ctx.timings.accum_ns, accum_start);
             c0 = c1;
         }
 
