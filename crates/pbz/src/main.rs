@@ -135,6 +135,13 @@ struct ScaleArgs {
     /// Number of scale workers.
     #[arg(short('j'), long, value_name = "N", default_value_t = 4)]
     workers: usize,
+    /// Show scale progress on stderr. This is the default; the flag is
+    /// accepted for symmetry with --no-progress.
+    #[arg(long)]
+    progress: bool,
+    /// Hide the scale progress display.
+    #[arg(long, conflicts_with = "progress")]
+    no_progress: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -592,6 +599,7 @@ fn scale_cmd(args: ScaleArgs) -> Result<()> {
     let config = ScaleConfig {
         factors,
         workers: args.workers,
+        progress: (!args.no_progress).then(|| make_sink(&format!("scale {}", args.track))),
         ..ScaleConfig::default()
     };
 

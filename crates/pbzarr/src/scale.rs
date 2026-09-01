@@ -20,6 +20,7 @@ use zarrs::storage::{ReadableWritableListableStorageTraits, StorePrefix};
 
 use crate::error::PbzError;
 use crate::genome::{ContigId, Region};
+use crate::import::ProgressSink;
 use crate::io::{Dtype, Numeric};
 use crate::store::default_data_codecs;
 use crate::track::Track;
@@ -97,7 +98,7 @@ impl Stat {
 }
 
 /// Configuration for [`scale`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ScaleConfig {
     /// Downsampling factors: positive, unique, ascending, `>= 2`. `None`
     /// selects the default ladder (32, 256, 2048, ... by the 2000-bin rule).
@@ -107,6 +108,20 @@ pub struct ScaleConfig {
     /// Worker threads computing level bins (a single writer thread performs
     /// every level-array write). Clamped to at least 1.
     pub workers: usize,
+    /// Progress sink over base bytes processed. `scale` sizes it: one base
+    /// traversal for the single-pass path, one per factor for the fallback.
+    pub progress: Option<Arc<dyn ProgressSink>>,
+}
+
+impl std::fmt::Debug for ScaleConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScaleConfig")
+            .field("factors", &self.factors)
+            .field("stats", &self.stats)
+            .field("workers", &self.workers)
+            .field("progress", &self.progress.is_some())
+            .finish()
+    }
 }
 
 impl Default for ScaleConfig {
@@ -115,6 +130,7 @@ impl Default for ScaleConfig {
             factors: None,
             stats: vec![Stat::Mean],
             workers: 4,
+            progress: None,
         }
     }
 }
@@ -252,18 +268,38 @@ pub fn scale(store: &PbzStore, track: &str, config: &ScaleConfig) -> Result<Scal
 
     let n_cols = t.columns_count()? as u64;
     let parents = factor_parents(&factors);
+    let progress = config.progress.as_deref();
+    let total_len: u64 = t.genome().contigs().iter().map(|c| c.length).sum();
+    let pass_bytes = total_len * n_cols.max(1) * 4;
     match tier_a_align(&factors, &parents, n_cols) {
         // Tier A: one traversal of the base data feeds every root factor;
         // child factors cascade from their parent's bin accumulators.
         Some(align) => {
-            compute_levels_tier_a(t, &level_arrays, &parents, align, nan_aware, config.workers)?
+            if let Some(p) = progress {
+                p.set_total(pass_bytes);
+            }
+            compute_levels_tier_a(
+                t,
+                &level_arrays,
+                &parents,
+                align,
+                nan_aware,
+                config.workers,
+                progress,
+            )?;
         }
         // Tier B: pathological factor set; per-factor multi-pass fallback.
         None => {
+            if let Some(p) = progress {
+                p.set_total(pass_bytes * level_arrays.len() as u64);
+            }
             for lvl in &level_arrays {
-                compute_level_tier_b(t, lvl, nan_aware)?;
+                compute_level_tier_b(t, lvl, nan_aware, progress)?;
             }
         }
+    }
+    if let Some(p) = progress {
+        p.done();
     }
 
     let mut levels = Vec::with_capacity(factors.len());
@@ -464,18 +500,21 @@ fn compute_levels_tier_a(
     align: u64,
     nan_aware: bool,
     workers: usize,
+    progress: Option<&dyn ProgressSink>,
 ) -> Result<()> {
     match t.dtype() {
         Dtype::I32 => {
-            let ctx = PassCtx::<i32>::new(t, levels, parents, align, false, |v| v as f64)?;
+            let mut ctx = PassCtx::<i32>::new(t, levels, parents, align, false, |v| v as f64)?;
+            ctx.progress = progress;
             run_units(&ctx, workers)
         }
         Dtype::F32 => {
-            let ctx = PassCtx::<f32>::new(t, levels, parents, align, nan_aware, |v| v as f64)?;
+            let mut ctx = PassCtx::<f32>::new(t, levels, parents, align, nan_aware, |v| v as f64)?;
+            ctx.progress = progress;
             run_units(&ctx, workers)
         }
         Dtype::Bool => {
-            let ctx =
+            let mut ctx =
                 PassCtx::<bool>::new(
                     t,
                     levels,
@@ -486,6 +525,7 @@ fn compute_levels_tier_a(
                         if v { 1.0 } else { 0.0 }
                     },
                 )?;
+            ctx.progress = progress;
             run_units(&ctx, workers)
         }
         other => Err(PbzError::InvalidDtype {
@@ -495,19 +535,27 @@ fn compute_levels_tier_a(
 }
 
 /// Tier B dispatch on the source dtype (per-factor multi-pass fallback).
-fn compute_level_tier_b(t: &Track, lvl: &Level, nan_aware: bool) -> Result<()> {
+fn compute_level_tier_b(
+    t: &Track,
+    lvl: &Level,
+    nan_aware: bool,
+    progress: Option<&dyn ProgressSink>,
+) -> Result<()> {
     match t.dtype() {
-        Dtype::I32 => compute_level::<i32>(t, &lvl.array, lvl.factor, false, |v| v as f64),
-        Dtype::F32 => compute_level::<f32>(t, &lvl.array, lvl.factor, nan_aware, |v| v as f64),
-        Dtype::Bool => {
-            compute_level::<bool>(
-                t,
-                &lvl.array,
-                lvl.factor,
-                false,
-                |v| if v { 1.0 } else { 0.0 },
-            )
+        Dtype::I32 => {
+            compute_level::<i32>(t, &lvl.array, lvl.factor, false, |v| v as f64, progress)
         }
+        Dtype::F32 => {
+            compute_level::<f32>(t, &lvl.array, lvl.factor, nan_aware, |v| v as f64, progress)
+        }
+        Dtype::Bool => compute_level::<bool>(
+            t,
+            &lvl.array,
+            lvl.factor,
+            false,
+            |v| if v { 1.0 } else { 0.0 },
+            progress,
+        ),
         other => Err(PbzError::InvalidDtype {
             dtype: format!("scale: unsupported source dtype {other}"),
         }),
@@ -536,6 +584,8 @@ struct PassCtx<'a, T> {
     /// least [`SLAB_MIN_INNER_CHUNKS`] inner chunks, capped so the root
     /// accumulators stay under [`ACCUM_TARGET_BYTES`].
     min_slab: u64,
+    /// Ticked once per slab with the base bytes it covered.
+    progress: Option<&'a dyn ProgressSink>,
 }
 
 impl<'a, T: Numeric> PassCtx<'a, T> {
@@ -590,6 +640,7 @@ impl<'a, T: Numeric> PassCtx<'a, T> {
             inner_pos: inner_pos.max(1),
             inner_col: inner_col.max(1),
             min_slab,
+            progress: None,
         })
     }
 }
@@ -930,6 +981,9 @@ fn compute_unit<T: Numeric>(
             )?;
             done.push((start_bin, sums, counts));
         }
+        if let Some(p) = ctx.progress {
+            p.tick(rows as u64 * n_cols.max(1) as u64 * 4);
+        }
         slab_start = slab_end;
     }
     Ok(())
@@ -1020,6 +1074,7 @@ fn compute_level<T: Numeric>(
     factor: u64,
     nan_aware: bool,
     to_f64: impl Fn(T) -> f64,
+    progress: Option<&dyn ProgressSink>,
 ) -> Result<()> {
     let rank2 = t.rank() == 2;
     let n_cols = t.columns_count()?;
@@ -1110,6 +1165,9 @@ fn compute_level<T: Numeric>(
                 level
                     .store_array_subset(&subset, out)
                     .map_err(|e| PbzError::Store(format!("scale: write level: {e}")))?;
+                if let Some(p) = progress {
+                    p.tick(rows as u64 * width as u64 * 4);
+                }
                 c0 = c1;
             }
 
