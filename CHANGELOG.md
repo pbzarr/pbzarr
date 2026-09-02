@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.6.0](https://github.com/pbzarr/pbzarr/compare/v0.5.1...v0.6.0) (2026-09-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* rebuild the import pipeline on a routing engine with opt-in scales
+
+### Features
+
+* add pcodec ([a6f5977](https://github.com/pbzarr/pbzarr/commit/a6f5977b4fffdd16062d52aa89da05ba9f0ce340))
+* add precision option to pbz view ([34f2279](https://github.com/pbzarr/pbzarr/commit/34f2279a29db3f7923c83e9d83c4b6b7bb3464e4))
+* add summit reducer ([8fe9962](https://github.com/pbzarr/pbzarr/commit/8fe9962495e7aac5b97b7ef026a2570da4ce333a))
+* add threads option to pbz view ([9f58bd1](https://github.com/pbzarr/pbzarr/commit/9f58bd1624a2075ba96cc6d53c95fdf73521b182))
+* batch stack of single-sample stores into a cohort store ([#17](https://github.com/pbzarr/pbzarr/issues/17)) ([02010de](https://github.com/pbzarr/pbzarr/commit/02010de5ed5e031481acc7753bac7024fe985653))
+* cli ([#21](https://github.com/pbzarr/pbzarr/issues/21)) ([4dcf5c8](https://github.com/pbzarr/pbzarr/commit/4dcf5c8672a573c0d9e6b215e1d5a12d4b48fa37))
+* decode spans decoupled from chunk size ([694ad84](https://github.com/pbzarr/pbzarr/commit/694ad84a71e2131dfe25b2e88c1af75ce5229e72))
+* engine timing summary and configurable in-flight span gate ([232ad7c](https://github.com/pbzarr/pbzarr/commit/232ad7c5ffbd2e95f8b8f1191231ce090bc1420c))
+* implement pbz view ([dc1b358](https://github.com/pbzarr/pbzarr/commit/dc1b3588d2160fefe167e4ff6e09375cca23d231))
+* import codec overrides via --codecs ([993239a](https://github.com/pbzarr/pbzarr/commit/993239a673c835ccc4b43e4152c8cd9ef0a06ea7))
+* **pbz:** add scale subcommand for multiscale pyramid generation ([52ba1e9](https://github.com/pbzarr/pbzarr/commit/52ba1e938693a6a06d2995a0fae09253dfff4f71))
+* **pbzarr:** multiscale scale engine with mean levels, publication, and base-write seal ([21db425](https://github.com/pbzarr/pbzarr/commit/21db4257a1fc8734e0fb3fe54a714ff688d70d60))
+* **pbzarr:** write zarr-python-flavored consolidated metadata at the store root ([cf3e38f](https://github.com/pbzarr/pbzarr/commit/cf3e38f096c22cdb38d386749dbca84db0ee3e94))
+* rebuild the import pipeline on a routing engine with opt-in scales ([7728873](https://github.com/pbzarr/pbzarr/commit/7728873d4e2eac2a5d391e32ae3599fb3bd1e422))
+
+
+### Bug Fixes
+
+* accept numpy StringDType contigs in region queries ([ae000b8](https://github.com/pbzarr/pbzarr/commit/ae000b8a39446625a2730d2f9c4560a7b6878734))
+* batch shard appends per span ([51c0838](https://github.com/pbzarr/pbzarr/commit/51c0838afd8c162a6f4024027b974f004df8ac88))
+* decode without holding buffer-slot locks ([a92d63b](https://github.com/pbzarr/pbzarr/commit/a92d63b6d88c64aed713cf61ea5e651e98833ff6))
+* logging and progress ([717b3d5](https://github.com/pbzarr/pbzarr/commit/717b3d56ab31f28c5549dfb113f5c4a85804d5f2))
+* open collections containing published scales pyramids ([0e13618](https://github.com/pbzarr/pbzarr/commit/0e136188e97d637d94c16e1e1f6026154a42f0ad))
+* **pbzarr:** bound scale slab memory with column-axis blocks on wide cohorts ([b6773a1](https://github.com/pbzarr/pbzarr/commit/b6773a1c082f5e653f028f851149caa63db3d928))
+* **pbzarr:** refresh consolidated metadata on track completion ([b7bea3c](https://github.com/pbzarr/pbzarr/commit/b7bea3cdb034cf45754bf08f7a4170c58f9de68d))
+* pool reader handles under an fd budget ([0ada5ba](https://github.com/pbzarr/pbzarr/commit/0ada5bac56198a0184a19c8d43d7452e0433b660))
+* **scale:** refresh consolidated metadata when refusing an already-published rescale ([f52a16e](https://github.com/pbzarr/pbzarr/commit/f52a16ee0d499cb1622e58df5e1eaea208b03916))
+
+
+### Performance Improvements
+
+* decode BGZF blocks with libdeflate in the noodles readers ([b0f5ffa](https://github.com/pbzarr/pbzarr/commit/b0f5ffa7e4fe79d0dcf714caaa76cc017d2b0b87))
+* multithread bgzf compression in pbz view ([9f67d9a](https://github.com/pbzarr/pbzarr/commit/9f67d9a73edc77bd9adb1cbd50924ed4383e171b))
+* **scale:** cascade child factors from parent accumulators ([4145fe1](https://github.com/pbzarr/pbzarr/commit/4145fe13d446ef504dac2ac917969ab124015a68))
+* **scale:** parallel work units with a single writer thread ([8672642](https://github.com/pbzarr/pbzarr/commit/8672642eb4a558435b839f4273acd5dc0487599c))
+* **scale:** single-pass multi-factor accumulation with Tier A/B decision ([f07f53d](https://github.com/pbzarr/pbzarr/commit/f07f53d274594bdd8a47451281f510f4cf52462b))
+* size the rayon encode pool to the import worker count ([9766865](https://github.com/pbzarr/pbzarr/commit/976686577efdd6482c067bddb953eeb3006c2bb4))
+* skip SEQ and QUAL decode in depth mode without a base-quality gate ([39b8603](https://github.com/pbzarr/pbzarr/commit/39b860303c9eb92adb47c43b14beff574867cdfb))
+
 ## [0.5.1](https://github.com/pbzarr/pbzarr/compare/v0.5.0...v0.5.1) (2026-07-22)
 
 
