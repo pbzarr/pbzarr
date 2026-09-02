@@ -10,21 +10,21 @@
 //! chunk per active piece. The worker that finishes a buffer's last piece
 //! writes it.
 //!
-//! Sharded tracks write through `store_array_subset_opt` with
-//! `experimental_partial_encoding` on: for a subchunk-aligned subset the
-//! partial encoder reads only the shard index, encodes the subchunks in
-//! parallel, and APPENDS them instead of rewriting the shard. Each subchunk
-//! must be written exactly once, and appends to one shard need a per-shard
-//! mutex because every call rewrites that index. So a sharded chunk's buffers
-//! flush together when its last buffer closes: one rectangular store call per
-//! touched column shard.
+//! A sharded target whose destination columns cover whole shards buffers per
+//! shard: closed buffers park in their shard's group, and the group's last
+//! close encodes the whole shard and stores it with one call, so each shard
+//! file is written exactly once and needs no lock. A sharded target whose
+//! columns do not cover whole shards falls back to per-chunk rectangles
+//! through the partial encoder, which appends subchunks under a per-shard
+//! mutex because every append rewrites the shard.
 //!
 //! When no reader `may_have_data` over any of a buffer's pieces, the buffer is
-//! never allocated. An unsharded buffer with no data elides its write; a
-//! sharded chunk elides per column shard. An absent chunk already reads back
-//! as the fill value.
+//! never allocated. An unsharded buffer with no data elides its write; a whole
+//! shard with no data elides its file; the fallback path elides per column
+//! shard. An absent chunk already reads back as the fill value.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -59,7 +59,8 @@ pub struct PipelineOptions {
     pub in_flight_spans: usize,
     /// Inner position chunks each reader decodes per piece. `0` = auto, see
     /// `auto_decode_chunks`; an explicit value is clamped to
-    /// `[1, chunk count]`. Larger values cut per-piece fixed cost (one index
+    /// `[1, chunk count]`, and either is snapped to the shard grid of
+    /// sharded targets. Larger values cut per-piece fixed cost (one index
     /// seek per piece); buffers still close per chunk.
     pub decode_chunks: usize,
     /// Reader handles (forks) allowed across all readers at once. `0` = auto:
@@ -102,6 +103,37 @@ pub fn auto_decode_chunks(total: u64, chunk_len: u64, n_readers: usize, workers:
     let cap = (DECODE_SPAN_CAP / chunk_len).max(1);
     let balance = total * n_readers.max(1) as u64 / (8 * workers.max(1) as u64 * chunk_len);
     usize::try_from(balance.clamp(1, cap).min(n_chunks)).unwrap_or(usize::MAX)
+}
+
+/// Snap spans to the shard grid of shard-aligned targets: a whole number of
+/// shard rows per span, or a whole number of spans per shard row. A shard
+/// group then finishes within the spans that opened it, so parked shard
+/// buffers stay under the span gate's bound.
+fn snap_decode_chunks(decode_chunks: usize, geoms: &[TargetGeom<'_>]) -> usize {
+    let mut all_gcd: u64 = 0;
+    let mut all_lcm: u64 = 1;
+    for geom in geoms.iter().filter(|g| g.shard_aligned) {
+        let cps = geom.chunks_per_shard.max(1);
+        all_gcd = gcd(all_gcd, cps);
+        all_lcm = (all_lcm / gcd(all_lcm, cps)).saturating_mul(cps);
+    }
+    if all_gcd == 0 {
+        return decode_chunks;
+    }
+    let dc = decode_chunks as u64;
+    let snapped = if dc >= all_lcm {
+        dc - dc % all_lcm
+    } else {
+        (1..=dc)
+            .rev()
+            .find(|d| all_gcd.is_multiple_of(*d))
+            .unwrap_or(1)
+    };
+    snapped.max(1) as usize
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if a == 0 { b } else { gcd(b % a, a) }
 }
 
 /// The auto rule for `PipelineOptions::handle_budget` = 0. Two fds per handle
@@ -293,6 +325,27 @@ macro_rules! tile_buffer {
                 }
             }
 
+            /// Stores one whole write unit (shard) in one call. The store
+            /// elides an all-fill chunk and fill-only subchunks.
+            fn store_chunk(
+                self,
+                array: &Array<dyn ReadableWritableListableStorageTraits>,
+                track_name: &str,
+                rank: usize,
+                indices: &[u64],
+            ) -> Result<()> {
+                match self {
+                    $( TileBuffer::$variant(a) => {
+                        let result = if rank == 1 {
+                            array.store_chunk(&indices[..1], a.remove_axis(Axis(1)).into_dyn())
+                        } else {
+                            array.store_chunk(indices, a.into_dyn())
+                        };
+                        result.map_err(|e| PbzError::Store(format!("write {track_name}: {e}")))
+                    } )*
+                }
+            }
+
             /// Appends one subchunk. The caller must enable partial encoding in
             /// `opts` and hold that shard's mutex.
             fn store_subset(
@@ -348,6 +401,12 @@ struct TargetGeom<'t> {
     /// Outer write-unit (shard) shape, for the per-shard mutex key.
     shard_pos: u64,
     shard_col: u64,
+    /// Sharded, and the destination columns cover whole shards, so every
+    /// buffer of a shard arrives through this import and the shard can be
+    /// encoded and stored in one call.
+    shard_aligned: bool,
+    /// Inner position chunks per shard; meaningful only when `shard_aligned`.
+    chunks_per_shard: u64,
     fill: FillValue,
     /// Destination column range from the routing target.
     columns: Range<u64>,
@@ -364,6 +423,10 @@ impl TargetGeom<'_> {
             let lo = cc * self.col_chunk;
             lo..(lo + self.col_chunk).min(self.width)
         }
+    }
+
+    fn col_shard(&self, cc: u64) -> u64 {
+        cc / (self.shard_col / self.col_chunk.max(1)).max(1)
     }
 }
 
@@ -466,6 +529,9 @@ type SlotKey = (usize, usize, u64); // (target, chunk, column chunk)
 /// `(target, position shard, column shard)` -> its append-serializing mutex.
 type ShardLockMap = HashMap<(usize, u64, u64), Arc<Mutex<()>>>;
 
+/// `(target, position shard, column shard)` -> its in-progress shard group.
+type ShardGroupMap = HashMap<(usize, u64, u64), Arc<Mutex<ShardGroup>>>;
+
 struct SlotInner {
     /// Allocated lazily on the first covered piece; an elided buffer never
     /// allocates.
@@ -483,6 +549,17 @@ struct SlotHandle {
 struct ChunkGroup {
     /// `(column chunk, buffer)`; an uncovered buffer stays `None`.
     parts: Vec<(u64, Option<TileBuffer>)>,
+    remaining: usize,
+}
+
+/// One shard of a shard-aligned target, assembled in place as its buffers
+/// close and stored once when the last one arrives.
+struct ShardGroup {
+    /// Allocated lazily on the first covered part; an all-fill shard never
+    /// allocates and elides its file.
+    data: Option<TileBuffer>,
+    /// `(chunk index, column chunk, covered)`, recorded at flush.
+    parts: Vec<(usize, u64, bool)>,
     remaining: usize,
 }
 
@@ -660,11 +737,19 @@ struct RunCtx<'a> {
     tap: Option<&'a Sender<TapMessage>>,
     partial_opts: CodecOptions,
     shard_locks: Mutex<ShardLockMap>,
-    /// Sharded `(target, chunk)` groups awaiting their last buffer.
+    /// Sharded `(target, chunk)` groups awaiting their last buffer (the
+    /// fallback path for targets that are not shard-aligned).
     chunk_groups: Mutex<HashMap<(usize, usize), ChunkGroup>>,
+    /// Shard groups awaiting their last buffer, for shard-aligned targets.
+    /// Each group carries its own lock so closers merge concurrently across
+    /// shards.
+    shard_groups: Mutex<ShardGroupMap>,
     /// Distinct column chunks per target: a sharded chunk group closes after
     /// this many buffers.
     group_sizes: Vec<usize>,
+    /// Per target: touched column chunks per column shard, for shard-aligned
+    /// targets. Sizes the shard groups.
+    col_shard_ccs: Vec<HashMap<u64, usize>>,
     /// Flat position count, so a piece can clamp its last chunk.
     total: u64,
 }
@@ -778,6 +863,9 @@ impl RunCtx<'_> {
         cc: u64,
         data: Option<TileBuffer>,
     ) -> Result<()> {
+        if self.geoms[t_idx].shard_aligned {
+            return self.close_shard_part(t_idx, chunk_idx, cc, data);
+        }
         let done = {
             let mut groups = self.chunk_groups.lock().expect("chunk group map poisoned");
             let group = groups
@@ -880,6 +968,115 @@ impl RunCtx<'_> {
                 self.record_written(geom, chunk.clone(), geom.buffer_columns(cc));
             }
             lo = hi;
+        }
+        Ok(())
+    }
+
+    /// Merge one closed buffer into its shard's group; the last part stores
+    /// the shard. The buffer frees here instead of parking until the flush.
+    fn close_shard_part(
+        &self,
+        t_idx: usize,
+        chunk_idx: usize,
+        cc: u64,
+        data: Option<TileBuffer>,
+    ) -> Result<()> {
+        let geom = &self.geoms[t_idx];
+        let chunk_len = geom.array_chunk_len.max(1);
+        let cps = geom.chunks_per_shard.max(1);
+        let row = chunk_idx as u64 / cps;
+        let cs = geom.col_shard(cc);
+        let key = (t_idx, row, cs);
+        let handle = {
+            let mut groups = self.shard_groups.lock().expect("shard group map poisoned");
+            match groups.entry(key) {
+                Entry::Occupied(e) => Arc::clone(e.get()),
+                Entry::Vacant(e) => {
+                    let n_chunks = self.total.div_ceil(chunk_len);
+                    let row_chunks = (n_chunks.min((row + 1) * cps) - row * cps) as usize;
+                    let ccs = *self.col_shard_ccs[t_idx].get(&cs).ok_or_else(|| {
+                        PbzError::Metadata(
+                            "engine invariant: closed buffer outside the touch plan".into(),
+                        )
+                    })?;
+                    let expected = row_chunks * ccs;
+                    Arc::clone(e.insert(Arc::new(Mutex::new(ShardGroup {
+                        data: None,
+                        parts: Vec::with_capacity(expected),
+                        remaining: expected,
+                    }))))
+                }
+            }
+        };
+        let done = {
+            let mut group = handle.lock().expect("shard group poisoned");
+            if let Some(buffer) = &data {
+                if group.data.is_none() {
+                    // Full write-unit shape: the tail row and tail column
+                    // shard pad with fill, which the codecs clip on read.
+                    group.data = Some(TileBuffer::filled(
+                        geom.dtype,
+                        geom.shard_pos as usize,
+                        geom.shard_col as usize,
+                        &geom.fill,
+                    )?);
+                }
+                let pos_lo = chunk_idx as u64 * chunk_len;
+                let pos_hi = (pos_lo + chunk_len).min(self.total);
+                let rows = (pos_hi - pos_lo) as usize;
+                let cols = geom.buffer_columns(cc);
+                let dst_row = (pos_lo - row * geom.shard_pos) as usize;
+                let dst_col = (cols.start - cs * geom.shard_col) as usize;
+                group
+                    .data
+                    .as_mut()
+                    .expect("shard buffer allocated above")
+                    .copy_rows_from(
+                        buffer,
+                        0..rows,
+                        dst_row..dst_row + rows,
+                        dst_col..dst_col + (cols.end - cols.start) as usize,
+                    )?;
+            }
+            group.parts.push((chunk_idx, cc, data.is_some()));
+            group.remaining -= 1;
+            (group.remaining == 0).then(|| (group.data.take(), std::mem::take(&mut group.parts)))
+        };
+        if let Some((shard, parts)) = done {
+            self.shard_groups
+                .lock()
+                .expect("shard group map poisoned")
+                .remove(&key);
+            self.flush_shard(t_idx, row, cs, shard, parts)?;
+        }
+        Ok(())
+    }
+
+    fn flush_shard(
+        &self,
+        t_idx: usize,
+        row: u64,
+        cs: u64,
+        shard: Option<TileBuffer>,
+        parts: Vec<(usize, u64, bool)>,
+    ) -> Result<()> {
+        let geom = &self.geoms[t_idx];
+        let chunk_len = geom.array_chunk_len.max(1);
+        let chunk_range = |chunk_idx: usize| {
+            let lo = chunk_idx as u64 * chunk_len;
+            lo..(lo + chunk_len).min(self.total)
+        };
+        if let Some(shard) = shard {
+            let write_start = Instant::now();
+            shard.store_chunk(&geom.array, geom.track.name(), geom.rank, &[row, cs])?;
+            self.state.timings.write.record(write_start.elapsed());
+        }
+        for &(chunk_idx, cc, covered) in &parts {
+            if covered {
+                self.record_written(geom, chunk_range(chunk_idx), geom.buffer_columns(cc));
+            } else {
+                self.record_skipped(geom, chunk_range(chunk_idx), geom.buffer_columns(cc));
+            }
         }
         Ok(())
     }
@@ -1227,6 +1424,13 @@ pub(crate) fn run_import<R: ValueReader>(
                 )));
             }
         }
+        let shard_pos = write_unit[0] as u64;
+        let shard_col = if rank == 2 { write_unit[1] as u64 } else { 1 };
+        let shard_aligned = sharded
+            && shard_pos.is_multiple_of(chunk_len)
+            && shard_col.is_multiple_of(col_chunk)
+            && target.columns.start.is_multiple_of(shard_col)
+            && (target.columns.end.is_multiple_of(shard_col) || target.columns.end == width);
         geoms.push(TargetGeom {
             track,
             fill: array.fill_value().clone(),
@@ -1235,8 +1439,14 @@ pub(crate) fn run_import<R: ValueReader>(
             width,
             col_chunk,
             sharded,
-            shard_pos: write_unit[0] as u64,
-            shard_col: if rank == 2 { write_unit[1] as u64 } else { 1 },
+            shard_pos,
+            shard_col,
+            shard_aligned,
+            chunks_per_shard: if shard_aligned {
+                shard_pos / chunk_len
+            } else {
+                1
+            },
             columns: target.columns.clone(),
             array,
             array_chunk_len: chunk_len,
@@ -1253,6 +1463,7 @@ pub(crate) fn run_import<R: ValueReader>(
         0 => auto_decode_chunks(total, chunk_len, n_readers, workers),
         n => n.clamp(1, n_chunks.max(1)),
     };
+    let decode_chunks = snap_decode_chunks(decode_chunks, &geoms);
     let span_len = chunk_len * decode_chunks as u64;
     let n_spans = usize::try_from(total.div_ceil(span_len))
         .map_err(|_| PbzError::Metadata("span count exceeds usize".into()))?;
@@ -1287,14 +1498,27 @@ pub(crate) fn run_import<R: ValueReader>(
 
     let touch_plan = build_touch_plan(routing, &geoms, n_readers, n_fields);
 
-    let group_sizes: Vec<usize> = {
+    let (group_sizes, col_shard_ccs): (Vec<usize>, Vec<HashMap<u64, usize>>) = {
         let mut ccs: Vec<std::collections::BTreeSet<u64>> = vec![Default::default(); geoms.len()];
         for entries in &touch_plan {
             for entry in entries {
                 ccs[entry.t_idx].insert(entry.cc);
             }
         }
-        ccs.into_iter().map(|set| set.len()).collect()
+        let per_shard = ccs
+            .iter()
+            .zip(&geoms)
+            .map(|(set, geom)| {
+                let mut counts: HashMap<u64, usize> = HashMap::new();
+                if geom.shard_aligned {
+                    for &cc in set {
+                        *counts.entry(geom.col_shard(cc)).or_insert(0) += 1;
+                    }
+                }
+                counts
+            })
+            .collect();
+        (ccs.into_iter().map(|set| set.len()).collect(), per_shard)
     };
 
     let in_flight = match options.in_flight_spans {
@@ -1366,13 +1590,16 @@ pub(crate) fn run_import<R: ValueReader>(
         partial_opts,
         shard_locks: Mutex::new(HashMap::new()),
         chunk_groups: Mutex::new(HashMap::new()),
+        shard_groups: Mutex::new(HashMap::new()),
         group_sizes,
+        col_shard_ccs,
         total,
     };
 
-    // `fork` takes `&self`, but `ValueReader` is not `Sync`, so the base
-    // readers are reached under a lock held only across the fork call.
-    let originals = Mutex::new(readers);
+    // `fork` takes `&self`, but `ValueReader` is not `Sync`, so each base
+    // reader sits behind its own lock, held only across the fork call.
+    // Distinct readers fork concurrently.
+    let originals: Vec<Mutex<R>> = readers.into_iter().map(Mutex::new).collect();
     let pools: Vec<HandlePool<R>> = (0..n_readers).map(|_| HandlePool::new(pool_size)).collect();
 
     let (piece_tx, piece_rx) = bounded::<Piece>((workers * 2).max(1));
@@ -1412,7 +1639,12 @@ pub(crate) fn run_import<R: ValueReader>(
                         }
                         let checkout_start = Instant::now();
                         let checked_out = pools[piece.reader].checkout(
-                            || originals.lock().expect("readers poisoned")[piece.reader].fork(),
+                            || {
+                                originals[piece.reader]
+                                    .lock()
+                                    .expect("base reader poisoned")
+                                    .fork()
+                            },
                             &ctx.state.err_flag,
                         );
                         stalled = checkout_start.elapsed();
@@ -1558,6 +1790,11 @@ pub(crate) fn run_import<R: ValueReader>(
             .chunk_groups
             .lock()
             .expect("chunk group map poisoned")
+            .len()
+        + ctx
+            .shard_groups
+            .lock()
+            .expect("shard group map poisoned")
             .len();
     if open > 0 {
         return Err(PbzError::Metadata(format!(
@@ -1826,6 +2063,57 @@ mod tests {
         assert_eq!(report.pieces, 1);
         assert_eq!(report.tasks_skipped, 2);
         assert_eq!(chunk_file_count(&dir.path().join("elide.pbz/v/values")), 2);
+    }
+
+    /// A shard-aligned target writes one file per covered shard and no file
+    /// for an uncovered one; the tail shard pads with fill and reads back
+    /// clipped.
+    #[test]
+    fn whole_shard_write_and_elision() {
+        let dir = TempDir::new().unwrap();
+        let len = 80u64;
+        let genome = one_contig(len);
+        let mut store = PbzStore::create(dir.path().join("shard.pbz")).unwrap();
+        store
+            .create_track(
+                "v",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32)
+                    .chunk_size(16)
+                    .shard_size(48)
+                    .fill_value(serde_json::json!(0)),
+            )
+            .unwrap();
+        // Shard row 0 holds chunks 0..3 (0..48); row 1 holds chunks 3..5
+        // (48..80). Coverage 0..40 leaves row 1 untouched.
+        let reader = SynthReader::new(genome.clone(), Dtype::I32, 0..40, 7);
+        let report = Import::from_readers(vec![reader])
+            .unwrap()
+            .into_track(store.track("v").unwrap())
+            .options(PipelineOptions {
+                workers: 2,
+                decode_chunks: 2,
+                ..PipelineOptions::default()
+            })
+            .run()
+            .unwrap();
+        assert_eq!(report.tasks_completed, 3);
+        assert_eq!(report.tasks_skipped, 2);
+        assert_eq!(chunk_file_count(&dir.path().join("shard.pbz/v/values")), 1);
+        let values = store
+            .track("v")
+            .unwrap()
+            .read_region::<i32>(&whole(&store, "v", len))
+            .unwrap()
+            .into_dimensionality::<Ix1>()
+            .unwrap();
+        assert_eq!(values.len(), len as usize);
+        for p in 0..40 {
+            assert_eq!(values[p], 7 + p as i32);
+        }
+        for p in 40..len as usize {
+            assert_eq!(values[p], 0);
+        }
     }
 
     /// A decode span crossing a contig boundary mid-chunk: the split chunk

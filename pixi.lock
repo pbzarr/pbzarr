@@ -12,7 +12,7 @@ environments:
     - https://pypi.org/simple
     packages:
       linux-64:
-      - conda: https://conda.anaconda.org/bioconda/linux-64/d4tools-0.3.11-ha986137_3.tar.bz2
+      - conda: https://conda.anaconda.org/bioconda/linux-64/d4tools-0.3.11.post0-hedeb820_0.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/htslib-1.24-ha79157c_0.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/samtools-1.24-h9dcdb79_1.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/starcode-1.4-h7b50bb2_7.tar.bz2
@@ -103,7 +103,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/0c/fe/ce252dce8e5dd7ae06fd2036b5a146c1200598346ee70cbeb0a44740aa6b/pysam-0.22.1-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/34/9c/028f5e8a0e09df78cf9b6063fc46cd8da2da7519f440700570e88020f7be/pybigtools-0.3.0-cp312-cp312-manylinux_2_28_x86_64.whl
       osx-64:
-      - conda: https://conda.anaconda.org/bioconda/osx-64/d4tools-0.3.11-h9dddadc_3.tar.bz2
+      - conda: https://conda.anaconda.org/bioconda/osx-64/d4tools-0.3.11.post0-h0a25c96_0.conda
       - conda: https://conda.anaconda.org/bioconda/osx-64/htslib-1.24-h73339c1_0.conda
       - conda: https://conda.anaconda.org/bioconda/osx-64/samtools-1.24-he9a8aba_1.conda
       - conda: https://conda.anaconda.org/bioconda/osx-64/starcode-1.4-h18d8cf3_7.tar.bz2
@@ -181,7 +181,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/43/2a/de24972a7fde545aec7d3e59230f51b004e407d327087f4a90b7912cb679/pysam-0.22.1-cp312-cp312-macosx_10_9_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/c1/97/8fc0c9a2d99f92039880e8a3fccdef2886fab74c29d892cbe50091f4e6a2/pybigtools-0.3.0-cp312-cp312-macosx_10_12_x86_64.whl
       osx-arm64:
-      - conda: https://conda.anaconda.org/bioconda/osx-arm64/d4tools-0.3.11-h0c75584_3.tar.bz2
+      - conda: https://conda.anaconda.org/bioconda/osx-arm64/d4tools-0.3.11.post0-hb707788_0.conda
       - conda: https://conda.anaconda.org/bioconda/osx-arm64/htslib-1.24-hd3c6ec9_0.conda
       - conda: https://conda.anaconda.org/bioconda/osx-arm64/samtools-1.24-h36b3a25_1.conda
       - conda: https://conda.anaconda.org/bioconda/osx-arm64/starcode-1.4-hbdacb55_7.tar.bz2
@@ -269,7 +269,7 @@ environments:
     - https://pypi.org/simple
     packages:
       linux-64:
-      - conda: https://conda.anaconda.org/bioconda/linux-64/d4tools-0.3.11-ha986137_3.tar.bz2
+      - conda: https://conda.anaconda.org/bioconda/linux-64/d4tools-0.3.11.post0-hedeb820_0.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/htslib-1.24-ha79157c_0.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/samtools-1.24-h9dcdb79_1.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/starcode-1.4-h7b50bb2_7.tar.bz2
@@ -390,7 +390,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/0c/fe/ce252dce8e5dd7ae06fd2036b5a146c1200598346ee70cbeb0a44740aa6b/pysam-0.22.1-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/34/9c/028f5e8a0e09df78cf9b6063fc46cd8da2da7519f440700570e88020f7be/pybigtools-0.3.0-cp312-cp312-manylinux_2_28_x86_64.whl
       osx-64:
-      - conda: https://conda.anaconda.org/bioconda/osx-64/d4tools-0.3.11-h9dddadc_3.tar.bz2
+      - conda: https://conda.anaconda.org/bioconda/osx-64/d4tools-0.3.11.post0-h0a25c96_0.conda
       - conda: https://conda.anaconda.org/bioconda/osx-64/htslib-1.24-h73339c1_0.conda
       - conda: https://conda.anaconda.org/bioconda/osx-64/samtools-1.24-he9a8aba_1.conda
       - conda: https://conda.anaconda.org/bioconda/osx-64/starcode-1.4-h18d8cf3_7.tar.bz2
@@ -499,7 +499,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/43/2a/de24972a7fde545aec7d3e59230f51b004e407d327087f4a90b7912cb679/pysam-0.22.1-cp312-cp312-macosx_10_9_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/c1/97/8fc0c9a2d99f92039880e8a3fccdef2886fab74c29d892cbe50091f4e6a2/pybigtools-0.3.0-cp312-cp312-macosx_10_12_x86_64.whl
       osx-arm64:
-      - conda: https://conda.anaconda.org/bioconda/osx-arm64/d4tools-0.3.11-h0c75584_3.tar.bz2
+      - conda: https://conda.anaconda.org/bioconda/osx-arm64/d4tools-0.3.11.post0-hb707788_0.conda
       - conda: https://conda.anaconda.org/bioconda/osx-arm64/htslib-1.24-hd3c6ec9_0.conda
       - conda: https://conda.anaconda.org/bioconda/osx-arm64/samtools-1.24-h36b3a25_1.conda
       - conda: https://conda.anaconda.org/bioconda/osx-arm64/starcode-1.4-hbdacb55_7.tar.bz2
@@ -611,20 +611,25 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/f6/2c/d226f2db96fda51f7ab70c5256691def40af4879b6b5ffadda2c676ac5e5/pysam-0.22.1-cp312-cp312-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/fa/ab/dd25977424221f310735a49993bebd8bd08539807c10bdea656a665e82d6/pybigtools-0.3.0-cp312-cp312-macosx_11_0_arm64.whl
 packages:
-- conda: https://conda.anaconda.org/bioconda/linux-64/d4tools-0.3.11-ha986137_3.tar.bz2
-  sha256: c95918d61f28876e908a3caa51c1c4bba1d6a0ab531ba8077d931e58d067358d
-  md5: 72e2a7b7da1c66f27dfcd018da5b41fa
+- conda: https://conda.anaconda.org/bioconda/linux-64/d4tools-0.3.11.post0-hedeb820_0.conda
+  sha256: 74557e562b47cd4065b8431e077ca35a5b8054c1c39a7fb9d3e18f6a751c40d8
+  md5: db2b019142a3fd2501e503bc1051fa69
   depends:
-  - libgcc >=13
-  - libstdcxx >=13
+  - __glibc >=2.17,<3.0.a0
+  - bzip2 >=1.0.8,<2.0a0
+  - htslib >=1.24,<1.25.0a0
+  - libgcc >=14
+  - liblzma >=5.8.3,<6.0a0
+  - libstdcxx >=14
+  - libzlib >=1.3.2,<2.0a0
   - starcode
   constrains:
   - __glibc >=2.17
   license: MIT
   license_family: MIT
   purls: []
-  size: 29056553
-  timestamp: 1752115316155
+  size: 22499272
+  timestamp: 1787054780193
 - conda: https://conda.anaconda.org/bioconda/linux-64/htslib-1.24-ha79157c_0.conda
   sha256: 97e0f0b8700f56b1ade3034f81070ede705fce3ef9a1b5f15e79e3eb9997ac17
   md5: 232775112c6fea38e9e7c25d2a58d7d2
@@ -663,19 +668,24 @@ packages:
   purls: []
   size: 69689
   timestamp: 1751012992035
-- conda: https://conda.anaconda.org/bioconda/osx-64/d4tools-0.3.11-h9dddadc_3.tar.bz2
-  sha256: b0ac5dc3da87c2bab57745fed0aac02e7714a1b2c56c5dd745afa0ad7b3c457f
-  md5: 6080335d3ac66ecd7a3e76dc699a1297
+- conda: https://conda.anaconda.org/bioconda/osx-64/d4tools-0.3.11.post0-h0a25c96_0.conda
+  sha256: 5e0ecba9710d9c487d42e3544c7821589351317800c92dd338db421812eaaf7b
+  md5: bb86fa15fe95af90f53e5a87fa7c780b
   depends:
+  - __osx >=10.13
+  - bzip2 >=1.0.8,<2.0a0
+  - htslib >=1.24,<1.25.0a0
   - libcxx >=16
+  - liblzma >=5.8.3,<6.0a0
+  - libzlib >=1.3.2,<2.0a0
   - starcode
   constrains:
   - __osx >=10.13
   license: MIT
   license_family: MIT
   purls: []
-  size: 4058935
-  timestamp: 1752116383368
+  size: 2934655
+  timestamp: 1787056356774
 - conda: https://conda.anaconda.org/bioconda/osx-64/htslib-1.24-h73339c1_0.conda
   sha256: d37627b3bbfb13e8e14b267f762befb8c90a0d6e48167f9927093528f98cb299
   md5: bbc388cdcdfa5b68eaf7e17dd1698dfc
@@ -709,19 +719,24 @@ packages:
   purls: []
   size: 63312
   timestamp: 1751013721207
-- conda: https://conda.anaconda.org/bioconda/osx-arm64/d4tools-0.3.11-h0c75584_3.tar.bz2
-  sha256: ad90d49caf1f228a8b9764db18535654f0d4cafe58dfb4423c8473deb3ab26f0
-  md5: dd2b60a59b13147463578c0cba69280f
+- conda: https://conda.anaconda.org/bioconda/osx-arm64/d4tools-0.3.11.post0-hb707788_0.conda
+  sha256: a499544d716fcbc8d743ec39db67d46310ed056d59f82bf21b5850b75caaf286
+  md5: 8d50f2d87610e4d85e6b2af45fb2ed5a
   depends:
+  - __osx >=11.0
+  - bzip2 >=1.0.8,<2.0a0
+  - htslib >=1.24,<1.25.0a0
   - libcxx >=16
+  - liblzma >=5.8.3,<6.0a0
+  - libzlib >=1.3.2,<2.0a0
   - starcode
   constrains:
   - __osx >=11.0
   license: MIT
   license_family: MIT
   purls: []
-  size: 3923433
-  timestamp: 1752115047517
+  size: 2779040
+  timestamp: 1787054292172
 - conda: https://conda.anaconda.org/bioconda/osx-arm64/htslib-1.24-hd3c6ec9_0.conda
   sha256: 2e7471b9e9b0eac76f92b6e14b8fe1338e730632e00676d37acee5cfe049c7c1
   md5: 84256abb17e92cef739564aedf4d5019

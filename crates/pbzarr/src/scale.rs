@@ -9,16 +9,21 @@
 //! base-only track: level arrays without the attr are invisible orphans and
 //! are cleaned up by the next `scale` run.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use log::debug;
 
 use ndarray::{Array1, Array2, ArrayD};
 use serde_json::{Value, json};
-use zarrs::array::{Array, ArraySubset, FillValue, data_type};
+use zarrs::array::{Array, ArrayShardedExt, ArraySubset, FillValue, data_type};
 use zarrs::storage::{ReadableWritableListableStorageTraits, StorePrefix};
 
 use crate::error::PbzError;
 use crate::genome::{ContigId, Region};
+use crate::import::ProgressSink;
 use crate::io::{Dtype, Numeric};
 use crate::store::default_data_codecs;
 use crate::track::Track;
@@ -36,8 +41,27 @@ const MULTISCALES_SPEC_URL: &str =
 /// Full column width per chunk; no sharding.
 const LEVEL_CHUNK_LEN: u64 = 262_144;
 
+/// Byte cap for one level chunk (`chunk_len * n_columns * 4`). Bounds the
+/// chunk length on wide cohort tracks; blosc rejects buffers near 2 GiB.
+const LEVEL_CHUNK_TARGET_BYTES: u64 = 64 << 20;
+
 /// Byte budget for one slab of base data (`slab_len * n_columns * 4`).
 const SLAB_TARGET_BYTES: u64 = 64 << 20;
+
+/// Minimum Tier A slab length on rank-2 tracks, in inner position chunks.
+/// Wide cohorts shrink the byte-budget slab below one chunk, and every read
+/// then re-decodes the chunks it straddles; a multi-chunk slab bounds that
+/// waste to the one boundary chunk shared by adjacent slabs.
+const SLAB_MIN_INNER_CHUNKS: u64 = 4;
+
+/// Cap on one slab's full-width root accumulators (f64 sums + i64 counts),
+/// bounding the memory the minimum-slab rule may claim per worker.
+const ACCUM_TARGET_BYTES: u64 = 256 << 20;
+
+/// Level-write threads. Coalesced chunks are disjoint (each written exactly
+/// once at full coverage), so encodes and stores parallelize safely; a few
+/// threads keep up with many compute workers.
+const WRITE_THREADS: usize = 4;
 
 /// Tier A cap on the slab alignment (the lcm of the factors swept from base):
 /// factor sets whose alignment exceeds this fall back to the per-factor
@@ -82,7 +106,7 @@ impl Stat {
 }
 
 /// Configuration for [`scale`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ScaleConfig {
     /// Downsampling factors: positive, unique, ascending, `>= 2`. `None`
     /// selects the default ladder (32, 256, 2048, ... by the 2000-bin rule).
@@ -92,6 +116,20 @@ pub struct ScaleConfig {
     /// Worker threads computing level bins (a single writer thread performs
     /// every level-array write). Clamped to at least 1.
     pub workers: usize,
+    /// Progress sink over base bytes processed. `scale` sizes it: one base
+    /// traversal for the single-pass path, one per factor for the fallback.
+    pub progress: Option<Arc<dyn ProgressSink>>,
+}
+
+impl std::fmt::Debug for ScaleConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScaleConfig")
+            .field("factors", &self.factors)
+            .field("stats", &self.stats)
+            .field("workers", &self.workers)
+            .field("progress", &self.progress.is_some())
+            .finish()
+    }
 }
 
 impl Default for ScaleConfig {
@@ -100,6 +138,7 @@ impl Default for ScaleConfig {
             factors: None,
             stats: vec![Stat::Mean],
             workers: 4,
+            progress: None,
         }
     }
 }
@@ -237,18 +276,38 @@ pub fn scale(store: &PbzStore, track: &str, config: &ScaleConfig) -> Result<Scal
 
     let n_cols = t.columns_count()? as u64;
     let parents = factor_parents(&factors);
+    let progress = config.progress.as_deref();
+    let total_len: u64 = t.genome().contigs().iter().map(|c| c.length).sum();
+    let pass_bytes = total_len * n_cols.max(1) * 4;
     match tier_a_align(&factors, &parents, n_cols) {
         // Tier A: one traversal of the base data feeds every root factor;
         // child factors cascade from their parent's bin accumulators.
         Some(align) => {
-            compute_levels_tier_a(t, &level_arrays, &parents, align, nan_aware, config.workers)?
+            if let Some(p) = progress {
+                p.set_total(pass_bytes);
+            }
+            compute_levels_tier_a(
+                t,
+                &level_arrays,
+                &parents,
+                align,
+                nan_aware,
+                config.workers,
+                progress,
+            )?;
         }
         // Tier B: pathological factor set; per-factor multi-pass fallback.
         None => {
+            if let Some(p) = progress {
+                p.set_total(pass_bytes * level_arrays.len() as u64);
+            }
             for lvl in &level_arrays {
-                compute_level_tier_b(t, lvl, nan_aware)?;
+                compute_level_tier_b(t, lvl, nan_aware, progress)?;
             }
         }
+    }
+    if let Some(p) = progress {
+        p.done();
     }
 
     let mut levels = Vec::with_capacity(factors.len());
@@ -338,6 +397,8 @@ struct Level {
     factor: u64,
     /// Level length: `Σ_c ceil(L_c / factor)` bins.
     bins: u64,
+    /// Position-chunk length of the level array, in bins.
+    chunk_len: u64,
     array: Array<dyn ReadableWritableListableStorageTraits>,
 }
 
@@ -362,7 +423,10 @@ fn create_level(store: &PbzStore, t: &Track, factor: u64, source_fill: f64) -> R
     // Level fill = the mean of an all-fill bin: f32 of the source fill.
     let level_fill = FillValue::from(source_fill as f32);
 
-    let chunk_len = LEVEL_CHUNK_LEN.min(level_len.max(1));
+    let chunk_len = LEVEL_CHUNK_LEN
+        .min(LEVEL_CHUNK_TARGET_BYTES / (4 * n_cols.max(1)))
+        .max(1)
+        .min(level_len.max(1));
     let (shape, chunks, dim_names): (Vec<u64>, Vec<u64>, Vec<&str>) = if t.rank() == 2 {
         let col_dim = t.column_dim().unwrap_or("column");
         (
@@ -391,6 +455,7 @@ fn create_level(store: &PbzStore, t: &Track, factor: u64, source_fill: f64) -> R
     Ok(Level {
         factor,
         bins: level_len,
+        chunk_len,
         array: level,
     })
 }
@@ -443,18 +508,21 @@ fn compute_levels_tier_a(
     align: u64,
     nan_aware: bool,
     workers: usize,
+    progress: Option<&dyn ProgressSink>,
 ) -> Result<()> {
     match t.dtype() {
         Dtype::I32 => {
-            let ctx = PassCtx::<i32>::new(t, levels, parents, align, false, |v| v as f64)?;
+            let mut ctx = PassCtx::<i32>::new(t, levels, parents, align, false, |v| v as f64)?;
+            ctx.progress = progress;
             run_units(&ctx, workers)
         }
         Dtype::F32 => {
-            let ctx = PassCtx::<f32>::new(t, levels, parents, align, nan_aware, |v| v as f64)?;
+            let mut ctx = PassCtx::<f32>::new(t, levels, parents, align, nan_aware, |v| v as f64)?;
+            ctx.progress = progress;
             run_units(&ctx, workers)
         }
         Dtype::Bool => {
-            let ctx =
+            let mut ctx =
                 PassCtx::<bool>::new(
                     t,
                     levels,
@@ -465,6 +533,7 @@ fn compute_levels_tier_a(
                         if v { 1.0 } else { 0.0 }
                     },
                 )?;
+            ctx.progress = progress;
             run_units(&ctx, workers)
         }
         other => Err(PbzError::InvalidDtype {
@@ -474,19 +543,27 @@ fn compute_levels_tier_a(
 }
 
 /// Tier B dispatch on the source dtype (per-factor multi-pass fallback).
-fn compute_level_tier_b(t: &Track, lvl: &Level, nan_aware: bool) -> Result<()> {
+fn compute_level_tier_b(
+    t: &Track,
+    lvl: &Level,
+    nan_aware: bool,
+    progress: Option<&dyn ProgressSink>,
+) -> Result<()> {
     match t.dtype() {
-        Dtype::I32 => compute_level::<i32>(t, &lvl.array, lvl.factor, false, |v| v as f64),
-        Dtype::F32 => compute_level::<f32>(t, &lvl.array, lvl.factor, nan_aware, |v| v as f64),
-        Dtype::Bool => {
-            compute_level::<bool>(
-                t,
-                &lvl.array,
-                lvl.factor,
-                false,
-                |v| if v { 1.0 } else { 0.0 },
-            )
+        Dtype::I32 => {
+            compute_level::<i32>(t, &lvl.array, lvl.factor, false, |v| v as f64, progress)
         }
+        Dtype::F32 => {
+            compute_level::<f32>(t, &lvl.array, lvl.factor, nan_aware, |v| v as f64, progress)
+        }
+        Dtype::Bool => compute_level::<bool>(
+            t,
+            &lvl.array,
+            lvl.factor,
+            false,
+            |v| if v { 1.0 } else { 0.0 },
+            progress,
+        ),
         other => Err(PbzError::InvalidDtype {
             dtype: format!("scale: unsupported source dtype {other}"),
         }),
@@ -507,6 +584,57 @@ struct PassCtx<'a, T> {
     to_f64: fn(T) -> f64,
     rank2: bool,
     n_cols: usize,
+    /// Inner chunk shape of the `values` array (the subchunk when sharded):
+    /// position length and column width.
+    inner_pos: u64,
+    inner_col: u64,
+    /// Floor on the slab length (0 for rank-1 tracks): rank-2 slabs cover at
+    /// least [`SLAB_MIN_INNER_CHUNKS`] inner chunks, capped so the root
+    /// accumulators stay under [`ACCUM_TARGET_BYTES`].
+    min_slab: u64,
+    /// Ticked once per slab with the base bytes it covered.
+    progress: Option<&'a dyn ProgressSink>,
+    timings: PassTimings,
+}
+
+/// Wall-time and volume counters for one Tier A pass, summed across threads
+/// and logged at debug level. Thread-seconds, not elapsed time.
+#[derive(Default)]
+struct PassTimings {
+    /// Worker time inside base reads, and the bytes those reads decoded
+    /// (including alignment padding).
+    read_ns: AtomicU64,
+    read_bytes: AtomicU64,
+    /// Worker time accumulating tiles into root bins.
+    accum_ns: AtomicU64,
+    /// Worker time blocked sending blocks to the coalescer (backpressure).
+    stall_ns: AtomicU64,
+    /// Write-thread time encoding and storing level chunks, and the f32
+    /// bytes stored.
+    write_ns: AtomicU64,
+    write_bytes: AtomicU64,
+}
+
+impl PassTimings {
+    fn add(counter: &AtomicU64, since: Instant) {
+        counter.fetch_add(since.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn log(&self, workers: usize, write_threads: usize) {
+        let s = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e9;
+        let gib = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / (1u64 << 30) as f64;
+        debug!(
+            "scale pass thread-seconds: read {:.1}s ({:.2} GiB incl. pad), accumulate {:.1}s, \
+             emit-stall {:.1}s over {workers} workers; write {:.1}s ({:.2} GiB) over \
+             {write_threads} writers",
+            s(&self.read_ns),
+            gib(&self.read_bytes),
+            s(&self.accum_ns),
+            s(&self.stall_ns),
+            s(&self.write_ns),
+            gib(&self.write_bytes),
+        );
+    }
 }
 
 impl<'a, T: Numeric> PassCtx<'a, T> {
@@ -518,6 +646,36 @@ impl<'a, T: Numeric> PassCtx<'a, T> {
         nan_aware: bool,
         to_f64: fn(T) -> f64,
     ) -> Result<Self> {
+        let rank2 = t.rank() == 2;
+        let n_cols = t.columns_count()?;
+        let values = t.values_array()?;
+        let (inner_pos, inner_col) = if values.is_sharded() {
+            let sub = values.effective_subchunk_shape().ok_or_else(|| {
+                PbzError::Metadata(format!(
+                    "track {:?}: sharded values array with indeterminate subchunk shape",
+                    t.name()
+                ))
+            })?;
+            let sub = sub.as_slice();
+            (sub[0].get(), if rank2 { sub[1].get() } else { 1 })
+        } else {
+            let unit = t.write_unit_shape()?;
+            (unit[0] as u64, if rank2 { unit[1] as u64 } else { 1 })
+        };
+        let min_slab = if rank2 {
+            let min_root = levels
+                .iter()
+                .zip(parents)
+                .filter(|(_, p)| p.is_none())
+                .map(|(l, _)| l.factor)
+                .min()
+                .unwrap_or(1);
+            let want = (SLAB_MIN_INNER_CHUNKS * inner_pos).div_ceil(align) * align;
+            let cap = ACCUM_TARGET_BYTES * min_root / (16 * n_cols.max(1) as u64);
+            want.min((cap / align).max(1) * align)
+        } else {
+            0
+        };
         Ok(Self {
             t,
             levels,
@@ -526,8 +684,13 @@ impl<'a, T: Numeric> PassCtx<'a, T> {
             slab_target_bytes: SLAB_TARGET_BYTES,
             nan_aware,
             to_f64,
-            rank2: t.rank() == 2,
-            n_cols: t.columns_count()?,
+            rank2,
+            n_cols,
+            inner_pos: inner_pos.max(1),
+            inner_col: inner_col.max(1),
+            min_slab,
+            progress: None,
+            timings: PassTimings::default(),
         })
     }
 }
@@ -544,6 +707,9 @@ struct Unit {
     /// same for every unit of the contig).
     level_bases: Vec<u64>,
 }
+
+/// One level's bins for one slab: (first bin, contig-local; sums; counts).
+type BinAccum = (u64, Vec<f64>, Vec<i64>);
 
 /// A block of completed bins for one level, sent worker -> writer.
 struct LevelBlock {
@@ -593,24 +759,29 @@ fn build_units<T: Numeric>(ctx: &PassCtx<'_, T>) -> Vec<Unit> {
     units
 }
 
-/// Run the Tier A pass with `workers` compute threads and the calling
-/// thread as the single writer.
+/// Run the Tier A pass with `workers` compute threads, the calling thread
+/// as the block coalescer, and [`WRITE_THREADS`] level-write threads.
 ///
 /// Workers claim units off a shared index and send completed-bin blocks
-/// over a bounded channel; only the writer touches the level arrays, so no
-/// concurrent read-modify-write exists on shared level chunks whatever the
-/// chunk geometry. The first worker or writer error stops the run (workers
-/// check the flag between units; the writer keeps draining so no worker
-/// blocks on a full channel) and is returned. `workers = 1` runs the exact
-/// same machinery and produces identical values.
+/// over a bounded channel to the coalescer, which assembles whole level
+/// chunks; each completed chunk is handed to the write pool and encoded and
+/// stored exactly once, so writes never touch the same chunk concurrently.
+/// The first worker or writer error stops the run (workers check the flag
+/// between units; the coalescer keeps draining so no worker blocks on a
+/// full channel) and is returned. `workers = 1` runs the exact same
+/// machinery and produces identical values.
 fn run_units<T: Numeric>(ctx: &PassCtx<'_, T>, workers: usize) -> Result<()> {
     let units = build_units(ctx);
     let units: &[Unit] = &units;
     let workers = workers.clamp(1, units.len().max(1));
+    let write_threads = WRITE_THREADS.min(workers);
     // Backpressure: a few blocks in flight per worker keeps peak memory at
     // ~ workers x (slab + accumulators) + cap x one block.
     let cap = workers * 2;
     let (tx, rx) = std::sync::mpsc::sync_channel::<LevelBlock>(cap);
+    // Completed chunks queue shallowly to the write pool; the coalescer
+    // blocks when every writer is busy, which backpressures the workers.
+    let (wtx, wrx) = crossbeam_channel::bounded::<(usize, u64, Vec<f32>)>(write_threads * 2);
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let first_err: Mutex<Option<PbzError>> = Mutex::new(None);
@@ -622,6 +793,11 @@ fn run_units<T: Numeric>(ctx: &PassCtx<'_, T>, workers: usize) -> Result<()> {
         }
     };
 
+    // Blocks coalesce into whole level chunks so each chunk is encoded and
+    // stored exactly once; a per-block partial write would read-modify-write
+    // a full-width chunk every time. Keyed by (level, chunk index); active
+    // chunks stay bounded because workers claim units in order.
+    let mut bufs: HashMap<(usize, u64), (Vec<f32>, u64)> = HashMap::new();
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let tx = tx.clone();
@@ -635,8 +811,12 @@ fn run_units<T: Numeric>(ctx: &PassCtx<'_, T>, workers: usize) -> Result<()> {
                         break;
                     };
                     let mut emit = |level: usize, bin0: u64, means: Vec<f32>| {
-                        tx.send(LevelBlock { level, bin0, means })
-                            .map_err(|_| PbzError::Store("scale: writer thread hung up".into()))
+                        let start = Instant::now();
+                        let sent = tx
+                            .send(LevelBlock { level, bin0, means })
+                            .map_err(|_| PbzError::Store("scale: writer threads hung up".into()));
+                        PassTimings::add(&ctx.timings.stall_ns, start);
+                        sent
                     };
                     if let Err(e) = compute_unit(ctx, unit, &mut emit) {
                         record(e);
@@ -645,22 +825,75 @@ fn run_units<T: Numeric>(ctx: &PassCtx<'_, T>, workers: usize) -> Result<()> {
                 }
             });
         }
-        drop(tx); // the writer's recv loop ends when the last worker exits
+        drop(tx); // the coalescer's recv loop ends when the last worker exits
 
-        // Single writer: every level-array write happens on this thread.
+        for _ in 0..write_threads {
+            let wrx = wrx.clone();
+            let (failed, record) = (&failed, &record);
+            scope.spawn(move || {
+                while let Ok((level, chunk_start, buf)) = wrx.recv() {
+                    if failed.load(Ordering::Acquire) {
+                        continue; // drain so the coalescer never blocks
+                    }
+                    let start = Instant::now();
+                    let bytes = buf.len() as u64 * 4;
+                    let arr = &ctx.levels[level].array;
+                    if let Err(e) = write_f32_bins(arr, ctx.rank2, chunk_start, ctx.n_cols, buf) {
+                        record(e);
+                    }
+                    PassTimings::add(&ctx.timings.write_ns, start);
+                    ctx.timings.write_bytes.fetch_add(bytes, Ordering::Relaxed);
+                }
+            });
+        }
+        drop(wrx);
+
+        // Coalescer: assembles chunks; the only thread that touches `bufs`.
         while let Ok(block) = rx.recv() {
             if failed.load(Ordering::Acquire) {
                 continue; // drain so workers never block on a full channel
             }
-            let arr = &ctx.levels[block.level].array;
-            if let Err(e) = write_f32_bins(arr, ctx.rank2, block.bin0, ctx.n_cols, block.means) {
-                record(e);
+            let lvl = &ctx.levels[block.level];
+            let width = ctx.n_cols.max(1);
+            let block_bins = (block.means.len() / width) as u64;
+            let mut bin = block.bin0;
+            let mut src = 0usize;
+            while bin < block.bin0 + block_bins {
+                let chunk_idx = bin / lvl.chunk_len;
+                let chunk_start = chunk_idx * lvl.chunk_len;
+                let chunk_bins = lvl.chunk_len.min(lvl.bins - chunk_start);
+                let take = ((chunk_start + chunk_bins).min(block.bin0 + block_bins) - bin) as usize;
+                let key = (block.level, chunk_idx);
+                let full = {
+                    let (buf, covered) = bufs
+                        .entry(key)
+                        .or_insert_with(|| (vec![0f32; chunk_bins as usize * width], 0));
+                    let dst = (bin - chunk_start) as usize * width;
+                    buf[dst..dst + take * width]
+                        .copy_from_slice(&block.means[src..src + take * width]);
+                    *covered += take as u64;
+                    *covered == chunk_bins
+                };
+                if full {
+                    let (buf, _) = bufs.remove(&key).expect("chunk buffer present");
+                    if wtx.send((block.level, chunk_start, buf)).is_err() {
+                        record(PbzError::Store("scale: writer threads hung up".into()));
+                    }
+                }
+                bin += take as u64;
+                src += take * width;
             }
         }
+        drop(wtx); // write threads exit once the queue drains
     });
+    ctx.timings.log(workers, write_threads);
 
     match first_err.into_inner().expect("scale: error slot poisoned") {
         Some(e) => Err(e),
+        None if !bufs.is_empty() => Err(PbzError::Store(format!(
+            "scale: {} level chunks left without full bin coverage",
+            bufs.len()
+        ))),
         None => Ok(()),
     }
 }
@@ -685,7 +918,22 @@ fn compute_unit<T: Numeric>(
     let (levels, parents, n_cols) = (ctx.levels, ctx.parents, ctx.n_cols);
     let per_pos_bytes = 4 * n_cols.max(1) as u64;
     // Tier A guarantees one aligned unit fits the budget.
-    let slab = ((ctx.slab_target_bytes / per_pos_bytes) / ctx.align).max(1) * ctx.align;
+    let slab = (((ctx.slab_target_bytes / per_pos_bytes) / ctx.align).max(1) * ctx.align)
+        .max(ctx.min_slab);
+
+    // Column-tile width: whole inner column chunks, sized so one padded tile
+    // stays under the slab byte budget.
+    let tile_cols = if ctx.rank2 {
+        let padded = slab + ctx.inner_pos;
+        let budget_cols = (ctx.slab_target_bytes / (4 * padded)).max(1) as usize;
+        let inner_col = ctx.inner_col as usize;
+        ((budget_cols / inner_col).max(1) * inner_col).min(n_cols.max(1))
+    } else {
+        n_cols.max(1)
+    };
+    let offsets = ctx.t.genome().offsets();
+    let flat_base = offsets[unit.cid.as_usize()] as u64;
+    let total_flat = *offsets.last().expect("offsets nonempty") as u64;
 
     // Per-child partial bin carried across slabs: the one child bin the
     // previous slabs left incomplete (sum and count per column).
@@ -696,41 +944,84 @@ fn compute_unit<T: Numeric>(
         let slab_end = (slab_start + slab).min(unit.end);
         let at_end = slab_end == unit.end;
         let rows = (slab_end - slab_start) as usize;
-        let region = Region {
-            contig: unit.cid,
-            start: slab_start,
-            end: slab_end,
-        };
-        let data: ArrayD<T> = ctx.t.read_region(&region)?;
-        let data = data
-            .into_shape_with_order((rows, n_cols))
-            .map_err(|e| PbzError::Store(format!("scale: reshape slab: {e}")))?;
+
+        // Root accumulators for this slab, full column width, filled tile by
+        // tile below. slab_start is a multiple of `align` and hence of every
+        // root factor, so every root bin completes within the slab.
+        let mut roots: Vec<Option<BinAccum>> = (0..levels.len()).map(|_| None).collect();
+        for (li, lvl) in levels.iter().enumerate() {
+            if parents[li].is_none() {
+                let n_bins = (slab_end - slab_start).div_ceil(lvl.factor) as usize;
+                roots[li] = Some((
+                    slab_start / lvl.factor,
+                    vec![0f64; n_bins * n_cols],
+                    vec![0i64; n_bins * n_cols],
+                ));
+            }
+        }
+
+        let mut c0 = 0usize;
+        while c0 < n_cols {
+            let c1 = (c0 + tile_cols).min(n_cols);
+            let width = c1 - c0;
+            // Rank-2 tiles read a superset aligned to the inner chunk grid in
+            // flat coordinates, so every covered inner chunk decodes exactly
+            // once per read instead of once per straddling slab.
+            let read_start = Instant::now();
+            let (data, off): (ArrayD<T>, usize) = if ctx.rank2 {
+                let lo0 = flat_base + slab_start;
+                let lo = lo0 / ctx.inner_pos * ctx.inner_pos;
+                let hi = ((flat_base + slab_end).div_ceil(ctx.inner_pos) * ctx.inner_pos)
+                    .min(total_flat);
+                let data = ctx.t.read_flat_columns(lo..hi, c0 as u64..c1 as u64)?;
+                (data, (lo0 - lo) as usize)
+            } else {
+                let region = Region {
+                    contig: unit.cid,
+                    start: slab_start,
+                    end: slab_end,
+                };
+                (ctx.t.read_region(&region)?, 0)
+            };
+            PassTimings::add(&ctx.timings.read_ns, read_start);
+            ctx.timings
+                .read_bytes
+                .fetch_add((data.len() * size_of::<T>()) as u64, Ordering::Relaxed);
+            let accum_start = Instant::now();
+            let read_rows = data.len() / width.max(1);
+            let data = data
+                .into_shape_with_order((read_rows, width))
+                .map_err(|e| PbzError::Store(format!("scale: reshape slab: {e}")))?;
+            let window = data.slice(ndarray::s![off..off + rows, ..]);
+            for (li, lvl_acc) in roots.iter_mut().enumerate() {
+                let Some((_, sums, counts)) = lvl_acc.as_mut() else {
+                    continue;
+                };
+                let factor = levels[li].factor as usize;
+                for (i, row) in window.outer_iter().enumerate() {
+                    let bin = i / factor;
+                    for (j, &v) in row.iter().enumerate() {
+                        let v = (ctx.to_f64)(v);
+                        if ctx.nan_aware && v.is_nan() {
+                            continue;
+                        }
+                        sums[bin * n_cols + c0 + j] += v;
+                        counts[bin * n_cols + c0 + j] += 1;
+                    }
+                }
+            }
+            PassTimings::add(&ctx.timings.accum_ns, accum_start);
+            c0 = c1;
+        }
 
         // Per factor, the bins COMPLETED this slab: (first bin index,
         // contig-local; sums; counts), consumed by child factors below.
-        let mut done: Vec<(u64, Vec<f64>, Vec<i64>)> = Vec::with_capacity(levels.len());
+        let mut done: Vec<BinAccum> = Vec::with_capacity(levels.len());
         for (li, lvl) in levels.iter().enumerate() {
             let factor = lvl.factor;
             let (start_bin, sums, counts) = match parents[li] {
-                // Root: sweep the slab. slab_start is a multiple of
-                // `align` and hence of `factor`, so every bin completes.
-                None => {
-                    let n_bins = (slab_end - slab_start).div_ceil(factor) as usize;
-                    let mut sums = vec![0f64; n_bins * n_cols];
-                    let mut counts = vec![0i64; n_bins * n_cols];
-                    for (i, row) in data.outer_iter().enumerate() {
-                        let bin = i / factor as usize;
-                        for (j, &v) in row.iter().enumerate() {
-                            let v = (ctx.to_f64)(v);
-                            if ctx.nan_aware && v.is_nan() {
-                                continue;
-                            }
-                            sums[bin * n_cols + j] += v;
-                            counts[bin * n_cols + j] += 1;
-                        }
-                    }
-                    (slab_start / factor, sums, counts)
-                }
+                // Root: accumulated tile by tile above.
+                None => roots[li].take().expect("root accumulator allocated above"),
                 // Child: aggregate the parent's completed bins. Child bin
                 // j is exactly the union of parent bins j*k..(j+1)*k
                 // (clipped at the sequence end).
@@ -776,6 +1067,9 @@ fn compute_unit<T: Numeric>(
                 bin_means(&sums, &counts),
             )?;
             done.push((start_bin, sums, counts));
+        }
+        if let Some(p) = ctx.progress {
+            p.tick(rows as u64 * n_cols.max(1) as u64 * 4);
         }
         slab_start = slab_end;
     }
@@ -867,6 +1161,7 @@ fn compute_level<T: Numeric>(
     factor: u64,
     nan_aware: bool,
     to_f64: impl Fn(T) -> f64,
+    progress: Option<&dyn ProgressSink>,
 ) -> Result<()> {
     let rank2 = t.rank() == 2;
     let n_cols = t.columns_count()?;
@@ -957,6 +1252,9 @@ fn compute_level<T: Numeric>(
                 level
                     .store_array_subset(&subset, out)
                     .map_err(|e| PbzError::Store(format!("scale: write level: {e}")))?;
+                if let Some(p) = progress {
+                    p.tick(rows as u64 * width as u64 * 4);
+                }
                 c0 = c1;
             }
 
@@ -1196,6 +1494,83 @@ mod tests {
                     expect.push((s / chunk.len() as f64) as f32);
                 }
             }
+            assert_eq!(got, expect, "factor {factor}");
+        }
+    }
+
+    /// The rank-2 tile path: single-column inner chunks (column_chunk_size 1)
+    /// force one tile per column, the min-slab rule stretches slabs past the
+    /// byte budget to cover whole inner chunks, and chr2's flat base (149) is
+    /// chunk-unaligned so its tile reads a superset crossing into chr1's tail
+    /// that the window slice must discard.
+    #[test]
+    fn cohort_column_tiles_match_naive() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut store = PbzStore::create(dir.path().join("s.pbz")).unwrap();
+        let genome = Genome::new(vec![
+            Contig {
+                name: "chr1".into(),
+                length: 149,
+            },
+            Contig {
+                name: "chr2".into(),
+                length: 13,
+            },
+        ])
+        .unwrap();
+        store
+            .create_track(
+                "depth",
+                genome,
+                TrackConfig::new(Dtype::I32)
+                    .columns(vec!["a".into(), "b".into(), "c".into()])
+                    .chunk_size(16)
+                    .column_chunk_size(1),
+            )
+            .unwrap();
+        let t = store.track("depth").unwrap();
+        let chr1 =
+            ndarray::Array2::from_shape_fn((149, 3), |(i, j)| ((i * 5 + j * 3) % 37) as i32 - 9);
+        let chr2 = ndarray::Array2::from_shape_fn((13, 3), |(i, j)| 60 - (i as i32) * 7 + j as i32);
+        for (name, vals) in [("chr1", &chr1), ("chr2", &chr2)] {
+            let region = t
+                .genome()
+                .resolve(&format!("{name}:0-{}", vals.nrows()).parse().unwrap())
+                .unwrap();
+            t.write_region(&region, vals.clone().into_dyn()).unwrap();
+        }
+
+        let factors = [4u64, 6, 72];
+        let source_fill = source_fill_as_f64(t).unwrap();
+        let levels: Vec<Level> = factors
+            .iter()
+            .map(|&f| create_level(&store, t, f, source_fill).unwrap())
+            .collect();
+        let parents = factor_parents(&factors);
+        let mut ctx = PassCtx::<i32>::new(t, &levels, &parents, 12, false, |v| v as f64).unwrap();
+        ctx.slab_target_bytes = 48;
+        run_units(&ctx, 2).unwrap();
+
+        for (fi, &factor) in factors.iter().enumerate() {
+            let lvl = &levels[fi];
+            let subset = ArraySubset::new_with_ranges(&[0..lvl.bins, 0..3]);
+            let got = lvl
+                .array
+                .retrieve_array_subset::<ArrayD<f32>>(&subset)
+                .unwrap();
+            let mut expect = Vec::new();
+            for vals in [&chr1, &chr2] {
+                let mut start = 0usize;
+                while start < vals.nrows() {
+                    let end = (start + factor as usize).min(vals.nrows());
+                    for j in 0..3 {
+                        let s: f64 = (start..end).map(|i| f64::from(vals[(i, j)])).sum();
+                        expect.push((s / (end - start) as f64) as f32);
+                    }
+                    start = end;
+                }
+            }
+            let got = got.into_raw_vec_and_offset().0;
             assert_eq!(got, expect, "factor {factor}");
         }
     }

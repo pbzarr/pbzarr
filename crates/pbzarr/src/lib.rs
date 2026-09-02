@@ -5,6 +5,7 @@ pub mod import;
 pub mod io;
 pub mod region_query;
 pub mod scale;
+pub mod stat;
 pub mod store;
 pub mod track;
 
@@ -13,6 +14,7 @@ pub use error::{PbzError, Result};
 pub use genome::{Contig, ContigId, Genome, Region};
 pub use region_query::{RegionQuery, parse_region_query};
 pub use scale::{LevelReport, ScaleConfig, ScaleReport, Stat, scale};
+pub use stat::{HistTable, StatKind, StatOptions, StatOutput, StatResult, StatValue};
 pub use store::{PbzStore, validate_column_dimension_name, validate_node_name};
 pub use track::{ConventionRef, PerbaseTrackAttrs, Track, TrackConfig};
 

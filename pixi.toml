@@ -23,7 +23,7 @@ doc = "cargo doc --workspace --no-deps --open"
 # --- dev feature: tooling for running the import e2e tests ---
 [feature.dev.dependencies]
 # osx-arm64 has 0.3.11; linux-64/osx-64 ship 0.3.10. Pin to the 0.3 line.
-d4tools = ">=0.3.10,<0.4"
+d4tools = ">=0.3.11.post0,<0.4"
 htslib = ">=1.24,<2"
 samtools = ">=1.24,<1.25"
 

@@ -7,7 +7,7 @@ use std::process::Command;
 
 use pbzarr::import::{Config, Source};
 use pbzarr::{PbzStore, Region};
-use pbzarr_readers::from_d4;
+use pbzarr_readers::{D4Reader, from_d4};
 use tempfile::TempDir;
 
 /// True if `d4tools` is on PATH. With `PBZ_REQUIRE_TOOLS` set (CI), a
@@ -79,6 +79,35 @@ fn write_synthetic_d4_offset(tmp: &Path, tag: &str, chrom: &str, len: u32, base:
         .status()
         .unwrap();
     assert!(status.success(), "d4tools create failed");
+    d4_path
+}
+
+/// Write a fixed-point d4 file (with --denominator) for testing rejection.
+fn write_fixed_point_d4(tmp: &Path, chrom: &str, len: u32, denominator: u32) -> PathBuf {
+    let sizes_path = tmp.join("fixedpoint.sizes");
+    std::fs::write(&sizes_path, format!("{chrom}\t{len}\n")).unwrap();
+
+    let bg_path = tmp.join("fixedpoint.bedgraph");
+    let mut bf = std::fs::File::create(&bg_path).unwrap();
+    for i in 0..(len / 10) {
+        let s = i * 10;
+        let e = (i + 1) * 10;
+        let v = (i % 50) + 1;
+        writeln!(bf, "{chrom}\t{s}\t{e}\t{v}").unwrap();
+    }
+    drop(bf);
+
+    let d4_path = tmp.join("fixedpoint.d4");
+    let status = Command::new("d4tools")
+        .args(["create", "--genome"])
+        .arg(&sizes_path)
+        .arg(&bg_path)
+        .arg("--denominator")
+        .arg(denominator.to_string())
+        .arg(&d4_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "d4tools create with --denominator failed");
     d4_path
 }
 
@@ -308,4 +337,26 @@ fn import_d4_multi_contig_writes_correct_contigs() {
 
     assert!(chr1.iter().all(|&v| v == 7), "chr1 should have value 7");
     assert!(chr2.iter().all(|&v| v == 100), "chr2 should have value 100");
+}
+
+#[test]
+fn fixed_point_d4_is_rejected() {
+    if !have_d4tools() {
+        eprintln!("skip: d4tools not on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let d4 = write_fixed_point_d4(dir.path(), "chr1", 1_000, 100);
+
+    let result = D4Reader::open(&d4);
+    match result {
+        Err(e) => {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("fix-point"),
+                "error message should contain 'fix-point', got: {err_msg}"
+            );
+        }
+        Ok(_) => panic!("expected error when opening fixed-point d4"),
+    }
 }

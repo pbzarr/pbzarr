@@ -41,16 +41,19 @@ pub fn multi() -> &'static MultiProgress {
 /// `ProgressSink::set_total`, so callers pass no byte total.
 pub fn make_sink(label: &str) -> Arc<dyn ProgressSink> {
     if std::io::stderr().is_terminal() {
-        let pb = ProgressBar::new(0);
-        let style = ProgressStyle::with_template(
-            "{msg} [{elapsed_precise}] {wide_bar} {bytes}/{total_bytes} {percent}% (eta {eta})",
-        )
-        .unwrap_or_else(|_| ProgressStyle::default_bar());
-        pb.set_style(style);
+        // Spinner style until set_total sizes the bar, so an unsized bar
+        // never flashes as a full "0 B/0 B 100%" one.
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::with_template("{msg} [{elapsed_precise}] {spinner}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
         pb.set_message(label.to_owned());
-        Arc::new(BarSink {
-            pb: multi().add(pb),
-        })
+        let pb = multi().add(pb);
+        // Repaint on a clock, not only on ticks: elapsed and eta stay live
+        // even when one work item takes a minute.
+        pb.enable_steady_tick(Duration::from_millis(500));
+        Arc::new(BarSink { pb })
     } else {
         Arc::new(PlainSink::new(label))
     }
@@ -62,6 +65,12 @@ struct BarSink {
 
 impl ProgressSink for BarSink {
     fn set_total(&self, bytes: u64) {
+        self.pb.set_style(
+            ProgressStyle::with_template(
+                "{msg} [{elapsed_precise}] {wide_bar} {bytes}/{total_bytes} {percent}% (eta {eta})",
+            )
+            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+        );
         self.pb.set_length(bytes);
     }
     fn tick(&self, bytes: u64) {

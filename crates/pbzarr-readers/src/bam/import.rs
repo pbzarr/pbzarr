@@ -56,14 +56,66 @@ pub fn from_bam(
             cram.path.display()
         );
     }
-    let readers: Vec<BamReader> = sources
-        .iter()
-        .map(|s| {
-            debug!("opening alignment source {}", s.path.display());
-            BamReader::open(&s.path, reference.as_deref(), mode, filter)
-                .map_err(|e| PbzError::Store(format!("open {}: {e}", s.path.display())))
+    // Concurrent CRAM opens would race htslib's on-demand, in-place build of
+    // a missing reference index, so it is built once up front. A failure here
+    // is not fatal: the first open reports it with the source attached.
+    if let Some(reference) = &reference
+        && let Err(e) = rust_htslib::faidx::Reader::from_path(reference)
+    {
+        debug!("reference index prebuild failed: {e}");
+    }
+    // Opening a source is index and header I/O; across thousands of sources
+    // on a network filesystem the serial loop dominates setup, so opens run
+    // on a bounded thread pool.
+    let n_threads = sources.len().clamp(1, 64);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::sync::atomic::AtomicBool::new(false);
+    let errors: std::sync::Mutex<Vec<(usize, PbzError)>> = Default::default();
+    let slots: Vec<std::sync::Mutex<Option<BamReader>>> =
+        (0..sources.len()).map(|_| Default::default()).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..n_threads {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= sources.len() || failed.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    let s = &sources[i];
+                    debug!("opening alignment source {}", s.path.display());
+                    match BamReader::open(&s.path, reference.as_deref(), mode, filter) {
+                        Ok(reader) => {
+                            *slots[i].lock().expect("open slot poisoned") = Some(reader);
+                        }
+                        Err(e) => {
+                            failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                            let err = PbzError::Store(format!("open {}: {e}", s.path.display()));
+                            errors.lock().expect("open errors poisoned").push((i, err));
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    // Claims are handed out in source order, so the lowest-index error is the
+    // first source a serial loop would have failed on.
+    if let Some((_, err)) = errors
+        .into_inner()
+        .expect("open errors poisoned")
+        .into_iter()
+        .min_by_key(|(i, _)| *i)
+    {
+        return Err(err);
+    }
+    let readers: Vec<BamReader> = slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .expect("open slot poisoned")
+                .expect("every source opened above")
         })
-        .collect::<Result<_>>()?;
+        .collect();
 
     let genome = shared_genome(&readers, sources)?;
     debug!(
