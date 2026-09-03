@@ -1,80 +1,11 @@
-use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
-use ndarray::{Array1, Array2};
 use noodles_bgzf as bgzf;
-use pbzarr::io::Dtype;
-use pbzarr::{Contig, Genome, PbzStore, TrackConfig};
 use tempfile::TempDir;
 
-fn genome() -> Genome {
-    Genome::new(vec![
-        Contig {
-            name: "chr1".into(),
-            length: 10,
-        },
-        Contig {
-            name: "chr2".into(),
-            length: 6,
-        },
-    ])
-    .unwrap()
-}
-
-fn build_store(dir: &Path) -> PathBuf {
-    let path = dir.join("view.pbz");
-    let mut store = PbzStore::create(&path).unwrap();
-    store
-        .create_track("depth", genome(), TrackConfig::new(Dtype::I32))
-        .unwrap();
-    store
-        .create_track(
-            "af",
-            genome(),
-            TrackConfig::new(Dtype::F32)
-                .columns(vec!["s1".into(), "s2".into()])
-                .column_dim("sample"),
-        )
-        .unwrap();
-    let reference = genome();
-    let depth = store.track("depth").unwrap();
-    let region = reference.resolve(&"chr1".parse().unwrap()).unwrap();
-    depth
-        .write_region(
-            &region,
-            Array1::from(vec![5i32, 5, 5, 7, 7, 0, 0, 0, 0, 0]).into_dyn(),
-        )
-        .unwrap();
-    let af = store.track("af").unwrap();
-    let region = reference.resolve(&"chr1:2-6".parse().unwrap()).unwrap();
-    af.write_region(
-        &region,
-        Array2::from_shape_vec((4, 2), vec![0.5f32, 1.0, 0.5, 1.0, 0.25, 1.0, 0.25, 1.0])
-            .unwrap()
-            .into_dyn(),
-    )
-    .unwrap();
-    path
-}
-
-fn run_pbz(args: impl IntoIterator<Item = OsString>) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pbz"))
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn stdout_of(output: &Output) -> String {
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout.clone()).unwrap()
-}
+mod common;
+use common::{build_store, run_pbz, stdout_of};
 
 #[test]
 fn integer_track_streams_collapsed_rows_in_genome_order() {

@@ -44,3 +44,15 @@ pub(crate) fn noodles_query_interval(start: u64, end: u64) -> Result<Option<Inte
 pub(crate) fn pos_to_zero_based(p: Position) -> u64 {
     (usize::from(p) - 1) as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_or_inverted_window_is_none_normal_window_is_some() {
+        assert!(noodles_query_interval(10, 10).unwrap().is_none());
+        assert!(noodles_query_interval(10, 5).unwrap().is_none());
+        assert!(noodles_query_interval(10, 30).unwrap().is_some());
+    }
+}

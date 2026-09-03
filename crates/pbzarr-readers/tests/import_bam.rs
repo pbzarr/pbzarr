@@ -1,8 +1,7 @@
 //! End-to-end: import the `bam_common` fixture (BAM and its CRAM twin) via
 //! `from_bam`, read back through the store, and check against the
 //! hand-computed depth vector in `bam_common::expected_default` (see
-//! `tests/bam_walk.rs` for its per-record derivation). Skipped if `samtools`
-//! isn't on `PATH`.
+//! `bam_common::fixture` for its per-record derivation).
 
 mod bam_common;
 
@@ -43,10 +42,8 @@ fn region(store: &PbzStore, track: &str, contig: &str, start: u64, end: u64) -> 
 
 #[test]
 fn depth_single_source_scalar_roundtrip() {
+    let fx = bam_common::fixture();
     let dir = TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
 
     let store_path = dir.path().join("depth.pbz");
     let mut store = PbzStore::create(&store_path).unwrap();
@@ -86,46 +83,20 @@ fn depth_single_source_scalar_roundtrip() {
     // chunks, so ref2's all-zero chunk should never be written.
     let values_dir = store_path.join("depth").join("values");
     assert_eq!(count_chunk_files(&values_dir), 1);
-}
 
-#[test]
-fn depth_single_source_with_column_dim_is_one_column_2d() {
-    // D-1: the 2D gate is `n_sources > 1 || column_dim.is_some()`, so an
-    // explicit `column_dim` on a single source still produces a 2D track
-    // (with one column), matching d4/bigwig/bed.
-    let dir = TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
-
-    let store_path = dir.path().join("depth.pbz");
-    let mut store = PbzStore::create(&store_path).unwrap();
-    from_bam(
-        &mut store,
-        "depth",
-        &[Source::new(&fx.bam)],
-        ImportMode::Depth,
-        DepthFilter::default(),
-        None,
-        Config {
-            column_dim: Some("sample".into()),
-            ..Config::default()
-        },
-    )
-    .unwrap();
-
-    let track = store.track("depth").unwrap();
-    assert_eq!(track.rank(), 2);
-    assert_eq!(track.columns_count().unwrap(), 1);
-    assert_eq!(track.column_dim(), Some("sample"));
+    // `description`/`source` land on the track's `perbase:` block (F8); read
+    // it straight off disk rather than pinning the exact string content.
+    let zarr_json = std::fs::read_to_string(store_path.join("depth").join("zarr.json")).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&zarr_json).unwrap();
+    let attrs = doc.get("attributes").unwrap();
+    assert!(attrs.get("perbase:description").is_some());
+    assert!(attrs.get("perbase:source").is_some());
 }
 
 #[test]
 fn depth_two_sources_cohort() {
+    let fx = bam_common::fixture();
     let dir = TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
 
     let store_path = dir.path().join("cohort.pbz");
     let mut store = PbzStore::create(&store_path).unwrap();
@@ -156,14 +127,36 @@ fn depth_two_sources_cohort() {
         assert_eq!(data[[pos, 0]], expected[pos]);
         assert_eq!(data[[pos, 1]], expected[pos]);
     }
+
+    // D-1: the 2D gate is `n_sources > 1 || column_dim.is_some()`, so an
+    // explicit `column_dim` on a single source still produces a 2D track
+    // (with one column), matching d4/bigwig/bed.
+    let single_path = dir.path().join("single.pbz");
+    let mut single_store = PbzStore::create(&single_path).unwrap();
+    from_bam(
+        &mut single_store,
+        "depth",
+        &[Source::new(&fx.bam)],
+        ImportMode::Depth,
+        DepthFilter::default(),
+        None,
+        Config {
+            column_dim: Some("sample".into()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let single = single_store.track("depth").unwrap();
+    assert_eq!(single.rank(), 2);
+    assert_eq!(single.columns_count().unwrap(), 1);
+    assert_eq!(single.column_dim(), Some("sample"));
 }
 
 #[test]
 fn cram_equals_bam() {
+    let fx = bam_common::fixture();
     let dir = TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
 
     let bam_path = dir.path().join("bam.pbz");
     let mut bam_store = PbzStore::create(&bam_path).unwrap();
@@ -206,10 +199,8 @@ fn cram_equals_bam() {
 
 #[test]
 fn composition_counts() {
+    let fx = bam_common::fixture();
     let dir = TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
 
     let store_path = dir.path().join("comp.pbz");
     let mut store = PbzStore::create(&store_path).unwrap();
@@ -285,10 +276,8 @@ fn composition_counts() {
 
 #[test]
 fn chunk_boundary_read() {
+    let fx = bam_common::fixture();
     let dir = TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
 
     let default_path = dir.path().join("default.pbz");
     let mut default_store = PbzStore::create(&default_path).unwrap();
@@ -343,10 +332,8 @@ fn chunk_boundary_read() {
 /// chunk grid cuts right after the read.
 #[test]
 fn insertion_anchor_is_chunk_size_independent() {
+    let bam = bam_common::ins_anchor_bam();
     let dir = TempDir::new().unwrap();
-    let Some(bam) = bam_common::ins_anchor_bam(dir.path()) else {
-        return;
-    };
 
     let import = |name: &str, chunk_size: usize| {
         let path = dir.path().join(name);
@@ -386,10 +373,8 @@ fn insertion_anchor_is_chunk_size_independent() {
 
 #[test]
 fn errors() {
+    let fx = bam_common::fixture();
     let dir = TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
 
     // Missing index: copy the BAM alone, no .bai alongside it.
     let unindexed = dir.path().join("unindexed.bam");
@@ -422,33 +407,4 @@ fn errors() {
         )
         .is_err()
     );
-}
-
-#[test]
-fn track_attrs_carry_description_and_source() {
-    let dir = TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
-
-    let store_path = dir.path().join("attrs.pbz");
-    let mut store = PbzStore::create(&store_path).unwrap();
-    from_bam(
-        &mut store,
-        "depth",
-        &[Source::new(&fx.bam)],
-        ImportMode::Depth,
-        DepthFilter::default(),
-        None,
-        Config::default(),
-    )
-    .unwrap();
-
-    // `description`/`source` land on the track's `perbase:` block (F8); read
-    // it straight off disk rather than pinning the exact string content.
-    let zarr_json = std::fs::read_to_string(store_path.join("depth").join("zarr.json")).unwrap();
-    let doc: serde_json::Value = serde_json::from_str(&zarr_json).unwrap();
-    let attrs = doc.get("attributes").unwrap();
-    assert!(attrs.get("perbase:description").is_some());
-    assert!(attrs.get("perbase:source").is_some());
 }

@@ -1277,6 +1277,10 @@ mod tests {
     /// a child bin), seed-then-park-again (middle slabs), seed-then-emit
     /// (bin-completing slab), a mid-contig complete emission (chr1 bin 0 at
     /// position 72), and the ragged sequence-end flush on both contigs.
+    /// A second leg re-fills the levels with garbage and reruns with 3
+    /// workers racing the 4 units (chr1 splits at multiples of lcm(4, 6,
+    /// 72) = 72 into [0, 72), [72, 144), [144, 149), plus chr2) through the
+    /// shared index and the bounded channel.
     #[test]
     fn cascade_carry_across_small_slabs_matches_naive() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1325,95 +1329,39 @@ mod tests {
         // 144), [144, 149) and every carry flushes inside its unit.
         let mut ctx = PassCtx::<i32>::new(t, &levels, &parents, 12, false, |v| v as f64).unwrap();
         ctx.slab_target_bytes = 48;
-        run_units(&ctx, 1).unwrap();
 
-        for (fi, &factor) in factors.iter().enumerate() {
-            let lvl = &levels[fi];
-            #[allow(clippy::single_range_in_vec_init)]
-            let subset = ArraySubset::new_with_ranges(&[0..lvl.bins]);
-            let got = lvl
-                .array
-                .retrieve_array_subset::<ArrayD<f32>>(&subset)
-                .unwrap()
-                .into_raw_vec_and_offset()
-                .0;
-            let mut expect = Vec::new();
-            for vals in [&chr1, &chr2] {
-                for chunk in vals.chunks(factor as usize) {
-                    let s: f64 = chunk.iter().map(|&v| f64::from(v)).sum();
-                    expect.push((s / chunk.len() as f64) as f32);
+        let check = |leg: &str| {
+            for (fi, &factor) in factors.iter().enumerate() {
+                let lvl = &levels[fi];
+                #[allow(clippy::single_range_in_vec_init)]
+                let subset = ArraySubset::new_with_ranges(&[0..lvl.bins]);
+                let got = lvl
+                    .array
+                    .retrieve_array_subset::<ArrayD<f32>>(&subset)
+                    .unwrap()
+                    .into_raw_vec_and_offset()
+                    .0;
+                let mut expect = Vec::new();
+                for vals in [&chr1, &chr2] {
+                    for chunk in vals.chunks(factor as usize) {
+                        let s: f64 = chunk.iter().map(|&v| f64::from(v)).sum();
+                        expect.push((s / chunk.len() as f64) as f32);
+                    }
                 }
+                assert_eq!(got, expect, "{leg}: factor {factor}");
             }
-            assert_eq!(got, expect, "factor {factor}");
-        }
-    }
+        };
 
-    /// The unit queue under contention: the same 48-byte budget makes
-    /// build_units split chr1 (149) into units [0, 72), [72, 144),
-    /// [144, 149) plus one for chr2 (13), so 3 workers race 4 units through
-    /// the shared index and the bounded channel, and units start mid-contig
-    /// (level_bases + start_bin offsets) as well as at ragged ends.
-    #[test]
-    fn worker_pool_over_multiple_units_matches_naive() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut store = PbzStore::create(dir.path().join("s.pbz")).unwrap();
-        let genome = Genome::new(vec![
-            Contig {
-                name: "chr1".into(),
-                length: 149,
-            },
-            Contig {
-                name: "chr2".into(),
-                length: 13,
-            },
-        ])
-        .unwrap();
-        store
-            .create_track("depth", genome, TrackConfig::new(Dtype::I32))
-            .unwrap();
-        let t = store.track("depth").unwrap();
-        let chr1: Vec<i32> = (0..149).map(|i| (i * 11) % 31 - 7).collect();
-        let chr2: Vec<i32> = (0..13).map(|i| 50 - 3 * i).collect();
-        for (name, vals) in [("chr1", &chr1), ("chr2", &chr2)] {
-            let region = t
-                .genome()
-                .resolve(&format!("{name}:0-{}", vals.len()).parse().unwrap())
-                .unwrap();
-            t.write_region(&region, ndarray::Array1::from(vals.clone()).into_dyn())
-                .unwrap();
-        }
+        run_units(&ctx, 1).unwrap();
+        check("workers 1");
 
-        let factors = [4u64, 6, 72];
-        let source_fill = source_fill_as_f64(t).unwrap();
-        let levels: Vec<Level> = factors
-            .iter()
-            .map(|&f| create_level(&store, t, f, source_fill).unwrap())
-            .collect();
-        let parents = factor_parents(&factors);
-        let mut ctx = PassCtx::<i32>::new(t, &levels, &parents, 12, false, |v| v as f64).unwrap();
-        ctx.slab_target_bytes = 48;
+        // Garbage-fill every level so the worker leg must rewrite each bin.
+        for lvl in &levels {
+            write_f32_bins(&lvl.array, false, 0, 1, vec![-1e30f32; lvl.bins as usize]).unwrap();
+        }
         assert_eq!(build_units(&ctx).len(), 4);
         run_units(&ctx, 3).unwrap();
-
-        for (fi, &factor) in factors.iter().enumerate() {
-            let lvl = &levels[fi];
-            #[allow(clippy::single_range_in_vec_init)]
-            let subset = ArraySubset::new_with_ranges(&[0..lvl.bins]);
-            let got = lvl
-                .array
-                .retrieve_array_subset::<ArrayD<f32>>(&subset)
-                .unwrap()
-                .into_raw_vec_and_offset()
-                .0;
-            let mut expect = Vec::new();
-            for vals in [&chr1, &chr2] {
-                for chunk in vals.chunks(factor as usize) {
-                    let s: f64 = chunk.iter().map(|&v| f64::from(v)).sum();
-                    expect.push((s / chunk.len() as f64) as f32);
-                }
-            }
-            assert_eq!(got, expect, "factor {factor}");
-        }
+        check("workers 3");
     }
 
     /// The whole-contig unit fallback: {2, 36, 2^27} is Tier A (root lcm =

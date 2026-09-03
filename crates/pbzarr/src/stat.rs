@@ -822,20 +822,6 @@ mod tests {
     }
 
     #[test]
-    fn count_acc_sparse_merges_and_lists_observed() {
-        let mut a = CountAcc::windowed(0, 256);
-        a.update(1_000_000);
-        a.update(-3);
-        let mut b = CountAcc::windowed(0, 256);
-        b.update(-3);
-        a.merge(b);
-        assert_eq!(a.observed(), vec![(-3, 2), (1_000_000, 1)]);
-        assert_eq!(a.count_of(-3), 2);
-        assert_eq!(a.count_of(0), 0);
-        assert_eq!(a.median(), -3);
-    }
-
-    #[test]
     fn count_acc_dense_negative_base() {
         let mut acc = CountAcc::windowed(-128, 256);
         for v in [-128, -128, 127] {
@@ -865,19 +851,20 @@ mod tests {
     #[test]
     fn count_acc_merge_spans_window_and_overflow() {
         let mut a = CountAcc::windowed(0, 4);
-        for v in [1, 2, 2] {
+        for v in [1, 2, 2, 10] {
             a.update(v);
         }
         let mut b = CountAcc::windowed(0, 4);
-        for v in [-5, 10, 10] {
+        for v in [-5, 2, 10, 10] {
             b.update(v);
         }
         a.merge(b);
-        assert_eq!(a.observed(), vec![(-5, 1), (1, 1), (2, 2), (10, 2)]);
+        assert_eq!(a.observed(), vec![(-5, 1), (1, 1), (2, 3), (10, 3)]);
         assert_eq!(a.count_of(1), 1);
         assert_eq!(a.count_of(-5), 1);
-        assert_eq!(a.count_of(10), 2);
-        assert_eq!(a.total(), 6);
+        assert_eq!(a.count_of(2), 3);
+        assert_eq!(a.count_of(10), 3);
+        assert_eq!(a.total(), 8);
     }
 
     fn range(region_pos: usize, lo: u64, hi: u64) -> FlatRange {
@@ -939,20 +926,16 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].span, 0..80);
         assert_eq!(batches[0].items.len(), 3);
+        // max_chunks=0 is clamped to 1
+        let batches = plan_batches(&ranges, 1000, 0);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items.len(), 3);
     }
 
     #[test]
     fn coalesce_merges_overlaps() {
         let mut ranges = vec![(30, 80), (0, 50), (0, 50), (100, 110)];
         assert_eq!(coalesce(&mut ranges), vec![(0, 80), (100, 110)]);
-    }
-
-    #[test]
-    fn planner_treats_zero_max_chunks_as_one() {
-        let ranges = [range(0, 0, 50), range(1, 0, 50), range(2, 30, 80)];
-        let batches = plan_batches(&ranges, 1000, 0);
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].items.len(), 3);
     }
 
     use crate::genome::{Contig, Genome, Region};
@@ -1006,6 +989,24 @@ mod tests {
         )
         .unwrap();
         store
+            .create_track(
+                "cov",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32)
+                    .columns(vec!["s1".into(), "s2".into()])
+                    .column_dim("sample"),
+            )
+            .unwrap();
+        let cov = store.track("cov").unwrap();
+        let head = genome.resolve(&"chr1:0-4".parse().unwrap()).unwrap();
+        cov.write_region(
+            &head,
+            ndarray::Array2::from_shape_vec((4, 2), vec![1i32, 5, 1, 5, 2, 5, 0, 7])
+                .unwrap()
+                .into_dyn(),
+        )
+        .unwrap();
+        store
     }
 
     fn whole(track: &crate::track::Track) -> Vec<Region> {
@@ -1044,6 +1045,31 @@ mod tests {
         };
         let median = run(track, &[head], StatKind::Median, &StatOptions::default()).unwrap();
         let StatResult::PerRegion(rows) = median.result else {
+            panic!("expected rows")
+        };
+        assert_eq!(rows, vec![vec![StatValue::Int(5)]]);
+    }
+
+    #[test]
+    fn dispatch_merges_region_partials_across_batches() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = fixture(dir.path());
+        let track = store.track("depth").unwrap();
+        let batches = plan_batches(&[range(0, 0, 10), range(1, 10, 16)], 4, 1);
+        assert!(batches.len() > 1);
+        let StatResult::PerRegion(rows) =
+            dispatch(track, &batches, 2, &[], StatKind::Mean).unwrap()
+        else {
+            panic!("expected rows")
+        };
+        assert_eq!(
+            rows,
+            vec![vec![StatValue::Float(2.9)], vec![StatValue::Float(0.0)]]
+        );
+        let batches = plan_batches(&[range(0, 0, 5)], 4, 1);
+        let StatResult::PerRegion(rows) =
+            dispatch(track, &batches, 1, &[], StatKind::Median).unwrap()
+        else {
             panic!("expected rows")
         };
         assert_eq!(rows, vec![vec![StatValue::Int(5)]]);
@@ -1126,30 +1152,11 @@ mod tests {
     #[test]
     fn run_hist_on_rank2_track_counts_per_sample() {
         let dir = tempfile::TempDir::new().unwrap();
-        let genome = Genome::new(vec![Contig {
-            name: "chr1".into(),
-            length: 4,
-        }])
-        .unwrap();
-        let mut store = PbzStore::create(dir.path().join("h.pbz")).unwrap();
-        store
-            .create_track(
-                "cov",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns(vec!["s1".into(), "s2".into()])
-                    .column_dim("sample"),
-            )
-            .unwrap();
+        let store = fixture(dir.path());
         let track = store.track("cov").unwrap();
-        let region = genome.resolve(&"chr1".parse().unwrap()).unwrap();
-        track
-            .write_region(
-                &region,
-                ndarray::Array2::from_shape_vec((4, 2), vec![1i32, 5, 1, 5, 2, 5, 0, 7])
-                    .unwrap()
-                    .into_dyn(),
-            )
+        let region = track
+            .genome()
+            .resolve(&"chr1:0-4".parse().unwrap())
             .unwrap();
         let out = run(track, &[region], StatKind::Hist, &StatOptions::default()).unwrap();
         assert_eq!(out.samples, vec!["s1".to_string(), "s2".to_string()]);

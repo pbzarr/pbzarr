@@ -9,10 +9,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      # Tool-gated e2e tests (samtools/d4tools/htslib) must not silently skip
-      # in CI; the pixi env provides the tools.
-      PBZ_REQUIRE_TOOLS: "1"
     steps:
       - uses: actions/checkout@v4
 

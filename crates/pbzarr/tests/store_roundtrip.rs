@@ -5,6 +5,8 @@ use pbzarr::genome::Contig;
 use pbzarr::io::Dtype;
 use pbzarr::{Genome, PbzError, PbzStore, TrackConfig};
 use tempfile::TempDir;
+use zarrs::filesystem::FilesystemStore;
+use zarrs::group::GroupBuilder;
 use zarrs::storage::ReadableWritableListableStorage;
 use zarrs::storage::store::MemoryStore;
 
@@ -43,13 +45,26 @@ fn create_track_builds_flat_group() {
         .create_track("depth", tiny_genome(), TrackConfig::new(Dtype::I32))
         .unwrap();
 
+    // A bare child group without pbz attributes must be skipped by discovery.
+    let storage: ReadableWritableListableStorage = Arc::new(FilesystemStore::new(&path).unwrap());
+    GroupBuilder::new()
+        .build(storage, "/notatrack")
+        .unwrap()
+        .store_metadata()
+        .unwrap();
+
     let store = PbzStore::open(&path).unwrap();
+    let names: Vec<&str> = store.track_names().collect();
+    assert_eq!(names, vec!["depth"]);
     let t = store.track("depth").expect("track discovered");
     assert_eq!(t.dtype(), Dtype::I32);
     assert_eq!(t.rank(), 1);
     // flat values length == ΣL == 1500
     assert_eq!(t.total_len(), 1500);
-    assert_eq!(t.genome().checksum(), tiny_genome().checksum());
+    let g = t.genome();
+    assert_eq!(g.checksum(), tiny_genome().checksum());
+    assert_eq!(g.name(), Some("test"));
+    assert_eq!(g.offsets(), vec![0, 1000, 1500]);
 }
 
 #[test]
@@ -68,24 +83,6 @@ fn create_track_rejects_invalid_direct_child_names_before_writing() {
         assert!(error.contains(&format!("{invalid:?}")), "{error}");
         assert!(store.track_names().next().is_none());
     }
-}
-
-#[test]
-fn open_discovers_only_conforming_groups() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("s.pbz");
-    let mut store = PbzStore::create(&path).unwrap();
-    store
-        .create_track("depth", tiny_genome(), TrackConfig::new(Dtype::I32))
-        .unwrap();
-
-    let reopened = PbzStore::open(&path).unwrap();
-    let names: Vec<&str> = reopened.track_names().collect();
-    assert_eq!(names, vec!["depth"]);
-    let g = reopened.track("depth").unwrap().genome();
-    assert_eq!(g.name(), Some("test"));
-    assert_eq!(g.contigs().len(), 2);
-    assert_eq!(g.offsets(), vec![0, 1000, 1500]);
 }
 
 /// Proves `PbzStore`/`Track` are storage-agnostic: a `MemoryStore` (no

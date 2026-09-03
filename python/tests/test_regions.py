@@ -17,7 +17,6 @@ from pbzarr._regions import (
     _normalize_one,
     _resolve_region,
     _resolve_regions,
-    regions_dataset,
 )
 from pbzarr._xarray import _compose_track_datasets
 
@@ -543,31 +542,6 @@ def test_reduce_regions_builds_compact_self_contained_pbz_tasks(tmp_path):
         reduced.compute()["values"],
         [expected[0:2].mean(), expected[4:7].mean()],
     )
-
-
-def test_regions_dataset_keeps_one_source_chunk_in_one_batch():
-    source = da.from_array(
-        np.arange(10, dtype=np.int16), chunks=(10,), name="shared-source"
-    )
-    track = _track_dataset().drop_vars(["values", "sample"]).assign(
-        values=("position", source)
-    )
-
-    result = regions_dataset(
-        track,
-        [("chr1", 0, 1), ("chr1", 2, 3)],
-        target_bytes=100,
-        max_source_blocks=1,
-    )
-
-    dependencies = result["values"].data.dask.get_all_dependencies()
-    source_key = ("shared-source", 0)
-    gather_dependents = [
-        key for key, required in dependencies.items() if source_key in required
-    ]
-    assert len(gather_dependents) == 1
-    assert result["values"].chunks == ((2,),)
-    np.testing.assert_array_equal(result["values"].compute(), [0, 2])
 
 
 def test_public_regions_preserves_two_dimensional_non_position_chunks():

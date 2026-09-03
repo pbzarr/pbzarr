@@ -1,7 +1,6 @@
 //! End-to-end: synthesize multi-column bgzipped+tabix BEDs and import them via
 //! the schema generation (`plan_bed_schema`/`execute_bed_schema_plan`) and
-//! `from_bed_matrix`, then read the tracks back. Skipped if bgzip/tabix are
-//! unavailable.
+//! `from_bed_matrix`, then read the tracks back.
 
 mod common;
 
@@ -16,7 +15,7 @@ use pbzarr_readers::{
 };
 use tempfile::TempDir;
 
-use common::{htslib_available, write_bed_bgzip_tabix, write_headerless_bed_bgzip_tabix};
+use common::{write_bed_bgzip_tabix, write_headerless_bed_bgzip_tabix};
 
 fn genome(cs: &[(&str, u64)]) -> Genome {
     Genome::new(
@@ -32,12 +31,6 @@ fn genome(cs: &[(&str, u64)]) -> Genome {
 
 #[test]
 fn schema_plan_rejects_an_ambiguous_named_bed_column() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::schema_plan_rejects_an_ambiguous_named_bed_column: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -63,12 +56,6 @@ fn schema_plan_rejects_an_ambiguous_named_bed_column() {
 
 #[test]
 fn indexed_duplicate_header_labels_are_safe_for_per_column_tracks() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::indexed_duplicate_header_labels_are_safe_for_per_column_tracks: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -105,12 +92,6 @@ fn indexed_duplicate_header_labels_are_safe_for_per_column_tracks() {
 
 #[test]
 fn indexed_schema_without_a_target_names_the_selector_one_based() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::indexed_schema_without_a_target_names_the_selector_one_based: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -139,12 +120,6 @@ fn indexed_schema_without_a_target_names_the_selector_one_based() {
 
 #[test]
 fn grouped_indexed_columns_reject_duplicate_persisted_labels() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::grouped_indexed_columns_reject_duplicate_persisted_labels: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -179,12 +154,6 @@ fn grouped_indexed_columns_reject_duplicate_persisted_labels() {
 
 #[test]
 fn grouped_schema_requires_exactly_matching_descriptions() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::grouped_schema_requires_exactly_matching_descriptions: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -222,51 +191,7 @@ fn grouped_schema_requires_exactly_matching_descriptions() {
 }
 
 #[test]
-fn grouped_schema_preserves_the_matching_track_description() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::grouped_schema_preserves_the_matching_track_description: bgzip/tabix not on PATH"
-        );
-        return;
-    }
-    let dir = TempDir::new().unwrap();
-    let bed = write_bed_bgzip_tabix(
-        dir.path(),
-        "grouped-description",
-        &["chrom", "start", "end", "cov", "mapq"],
-        &[("chr1", 0, 8, vec!["4", "9"])],
-    );
-    let mut cov = BedColumnSpec::named("cov", Dtype::U16);
-    cov.track_name = Some("stats".into());
-    cov.description = Some("Quality statistics".into());
-    let mut mapq = BedColumnSpec::named("mapq", Dtype::U16);
-    mapq.track_name = Some("stats".into());
-    mapq.description = Some("Quality statistics".into());
-    let config = Config {
-        column_dim: Some("metric".into()),
-        ..Config::default()
-    };
-    let plan = plan_bed_schema(&[Source::new(bed)], &BedSchema(vec![cov, mapq]), &config).unwrap();
-    let output = dir.path().join("grouped-description.pbz");
-    let mut store = PbzStore::create(&output).unwrap();
-    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 8)]), config).unwrap();
-
-    let metadata = std::fs::read_to_string(output.join("stats").join("zarr.json")).unwrap();
-    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
-    assert_eq!(
-        metadata["attributes"]["perbase:description"],
-        "Quality statistics"
-    );
-}
-
-#[test]
 fn grouped_schema_one_source_preserves_bed_column_order() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::grouped_schema_one_source_preserves_bed_column_order: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -280,8 +205,10 @@ fn grouped_schema_one_source_preserves_bed_column_order() {
     let sources = [Source::new(bed)];
     let mut mapq = BedColumnSpec::named("mapq", Dtype::U16);
     mapq.track_name = Some("stats".into());
+    mapq.description = Some("Quality statistics".into());
     let mut cov = BedColumnSpec::named("cov", Dtype::U16);
     cov.track_name = Some("stats".into());
+    cov.description = Some("Quality statistics".into());
     let schema = BedSchema(vec![mapq, cov]);
     let config = Config {
         column_dim: Some("BED column".into()),
@@ -289,7 +216,8 @@ fn grouped_schema_one_source_preserves_bed_column_order() {
     };
 
     let plan = plan_bed_schema(&sources, &schema, &config).unwrap();
-    let mut store = PbzStore::create(dir.path().join("grouped.pbz")).unwrap();
+    let output = dir.path().join("grouped.pbz");
+    let mut store = PbzStore::create(&output).unwrap();
     execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 8)]), config).unwrap();
 
     let track = store.track("stats").unwrap();
@@ -318,16 +246,17 @@ fn grouped_schema_one_source_preserves_bed_column_order() {
             if index < 4 { vec![60, 4] } else { vec![30, 9] }
         );
     }
+
+    let metadata = std::fs::read_to_string(output.join("stats").join("zarr.json")).unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(
+        metadata["attributes"]["perbase:description"],
+        "Quality statistics"
+    );
 }
 
 #[test]
 fn unique_schema_two_sources_uses_labeled_source_axis_per_track() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::unique_schema_two_sources_uses_labeled_source_axis_per_track: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let first = write_bed_bgzip_tabix(
         dir.path(),
@@ -387,12 +316,6 @@ fn unique_schema_two_sources_uses_labeled_source_axis_per_track() {
 
 #[test]
 fn grouped_schema_two_sources_reports_rank_three_before_track_creation() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::grouped_schema_two_sources_reports_rank_three_before_track_creation: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let first = write_bed_bgzip_tabix(
         dir.path(),
@@ -446,12 +369,6 @@ fn grouped_schema_two_sources_reports_rank_three_before_track_creation() {
 
 #[test]
 fn unique_schema_two_sources_requires_column_dimension() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::unique_schema_two_sources_requires_column_dimension: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let first = write_bed_bgzip_tabix(
         dir.path(),
@@ -480,12 +397,6 @@ fn unique_schema_two_sources_requires_column_dimension() {
 
 #[test]
 fn partially_grouped_schema_is_rejected() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::partially_grouped_schema_is_rejected: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -516,12 +427,6 @@ fn partially_grouped_schema_is_rejected() {
 
 #[test]
 fn schema_plan_errors_are_shape_aware_and_preflighted() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::schema_plan_errors_are_shape_aware_and_preflighted: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -570,12 +475,6 @@ fn schema_plan_errors_are_shape_aware_and_preflighted() {
 
 #[test]
 fn unique_schema_rejects_duplicate_source_axis_labels() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::unique_schema_rejects_duplicate_source_axis_labels: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let first = write_bed_bgzip_tabix(
         dir.path(),
@@ -610,12 +509,6 @@ fn unique_schema_rejects_duplicate_source_axis_labels() {
 
 #[test]
 fn schema_execution_rejects_a_column_dimension_changed_after_planning() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::schema_execution_rejects_a_column_dimension_changed_after_planning: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -651,12 +544,6 @@ fn schema_execution_rejects_a_column_dimension_changed_after_planning() {
 
 #[test]
 fn schema_plan_rejects_invalid_column_dimension_names() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::schema_plan_rejects_invalid_column_dimension_names: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -686,12 +573,6 @@ fn schema_plan_rejects_invalid_column_dimension_names() {
 
 #[test]
 fn schema_plan_rejects_maximum_index_without_panicking() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::schema_plan_rejects_maximum_index_without_panicking: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -715,12 +596,6 @@ fn schema_plan_rejects_maximum_index_without_panicking() {
 
 #[test]
 fn multi_column_mixed_dtype_roundtrip() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::multi_column_mixed_dtype_roundtrip: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -784,10 +659,6 @@ fn multi_column_mixed_dtype_roundtrip() {
 
 #[test]
 fn multi_source_matrix_import_roundtrip() {
-    if !htslib_available() {
-        eprintln!("skip matrix import test: bgzip/tabix not on PATH");
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let a = write_bed_bgzip_tabix(
         dir.path(),
@@ -857,12 +728,6 @@ fn multi_source_matrix_import_roundtrip() {
 /// track, so the routing keys on that, not on source count.
 #[test]
 fn single_source_with_column_dim_is_one_column_2d() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::single_source_with_column_dim_is_one_column_2d: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -908,12 +773,6 @@ fn single_source_with_column_dim_is_one_column_2d() {
 
 #[test]
 fn uncovered_positions_read_back_as_zero() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::uncovered_positions_read_back_as_zero: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     // chr1 is length 40 but records cover only [0,10) and [20,30); the gap
     // [10,20) and the tail [30,40) are never written and must read as zero.
@@ -973,12 +832,6 @@ fn uncovered_positions_read_back_as_zero() {
 
 #[test]
 fn population_failure_leaves_all_tracks_unpublished() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::population_failure_leaves_all_tracks_unpublished: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),
@@ -1008,10 +861,6 @@ fn population_failure_leaves_all_tracks_unpublished() {
 
 #[test]
 fn reordered_headers_are_rejected() {
-    if !htslib_available() {
-        eprintln!("skip import_bed_multi::reordered_headers_are_rejected: bgzip/tabix not on PATH");
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let a = write_bed_bgzip_tabix(
         dir.path(),
@@ -1061,17 +910,27 @@ fn reordered_headers_are_rejected() {
 
 #[test]
 fn headerless_bed4_cohort_roundtrip() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::headerless_bed4_cohort_roundtrip: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let a = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 0, 8, vec!["4"])]);
     let b = write_headerless_bed_bgzip_tabix(dir.path(), "s2", &[("chr1", 0, 8, vec!["9"])]);
     let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
     let sources = [Source::new(a), Source::new(b)];
+
+    let error = from_bed_matrix(
+        &mut store,
+        &sources,
+        genome(&[("chr1", 8)]),
+        &BedImportOptions::default(),
+        Config {
+            column_dim: Some("sample".into()),
+            ..Config::default()
+        },
+    )
+    .err()
+    .expect("headerless input without a track name must fail")
+    .to_string();
+    assert!(error.contains("track name is required"), "{error}");
+
     let options = BedImportOptions {
         track: Some("depth".into()),
         ..BedImportOptions::default()
@@ -1110,33 +969,7 @@ fn headerless_bed4_cohort_roundtrip() {
 }
 
 #[test]
-fn headerless_without_track_errors() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::headerless_without_track_errors: bgzip/tabix not on PATH"
-        );
-        return;
-    }
-    let dir = TempDir::new().unwrap();
-    let bed = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 0, 8, vec!["4"])]);
-    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
-    let sources = [Source::new(bed)];
-    let result = from_bed_matrix(
-        &mut store,
-        &sources,
-        genome(&[("chr1", 8)]),
-        &BedImportOptions::default(),
-        Config::default(),
-    );
-    assert!(result.is_err());
-}
-
-#[test]
 fn bed3_imports_bool_presence() {
-    if !htslib_available() {
-        eprintln!("skip import_bed_multi::bed3_imports_bool_presence: bgzip/tabix not on PATH");
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 2, 5, vec![])]);
     let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
@@ -1175,12 +1008,6 @@ fn bed3_imports_bool_presence() {
 
 #[test]
 fn single_source_wide_track_with_joint_inference() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::single_source_wide_track_with_joint_inference: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     // cov fits u8 alone; mapq's 300 forces the joint dtype up to u16.
     let bed = write_bed_bgzip_tabix(
@@ -1231,12 +1058,6 @@ fn single_source_wide_track_with_joint_inference() {
 
 #[test]
 fn wide_track_rejects_word_bool_field_before_creating_tracks() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed_multi::wide_track_rejects_word_bool_field_before_creating_tracks: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     // Mirrors a FIRE pileup: numeric fields plus a true/false word column.
     let bed = write_bed_bgzip_tabix(

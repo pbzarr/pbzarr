@@ -1,16 +1,20 @@
-//! Shared bigWig fixture writer for the reader/import tests.
+//! Shared fixture writers for the reader/import tests.
 //!
 //! Synthesizes tiny `.bw` files in-process with `bigtools::BigWigWrite`. That
 //! writer needs a tokio runtime; a current-thread one with `channel_size = 0`
 //! keeps it single-threaded, which is plenty for fixtures of a few intervals.
+//! BED fixtures are BGZF-compressed and tabix-indexed in-process with noodles.
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use bigtools::BigWigWrite;
 use bigtools::beddata::BedParserStreamingIterator;
+use noodles_bgzf as bgzf;
+use noodles_core::Position;
+use noodles_csi as csi;
+use noodles_tabix as tabix;
 
 /// Write a bigWig from `intervals` (`chrom, start, end, value`) over the given
 /// `chrom_sizes`. Intervals must be sorted by start within each chrom; pass
@@ -48,24 +52,7 @@ pub fn write_bigwig(
     bw_path
 }
 
-/// True if both `bgzip` and `tabix` are on PATH. With `PBZ_REQUIRE_TOOLS`
-/// set (CI), a missing tool panics instead of letting callers self-skip.
-#[allow(dead_code)]
-pub fn htslib_available() -> bool {
-    let ok = ["bgzip", "tabix"].iter().all(|bin| {
-        Command::new(bin)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    });
-    if !ok && std::env::var_os("PBZ_REQUIRE_TOOLS").is_some() {
-        panic!("PBZ_REQUIRE_TOOLS is set but bgzip/tabix are not on PATH");
-    }
-    ok
-}
-
-/// Write a plain BED with a `#`-prefixed header, bgzip it, and tabix-index it.
+/// Write a BGZF-compressed BED with a `#`-prefixed header and a tabix index.
 /// `rows` are `(chrom, start, end, data_cells)`; the header names chrom/start/end
 /// plus one entry per data cell. Returns the `.bed.gz` path (sibling `.tbi` next
 /// to it). Rows MUST be coordinate-sorted.
@@ -95,33 +82,44 @@ fn write_bed_impl(
     header: Option<&[&str]>,
     rows: &[(&str, u64, u64, Vec<&str>)],
 ) -> PathBuf {
-    let bed_path = dir.join(format!("{name}.bed"));
-    let mut f = std::fs::File::create(&bed_path).unwrap();
-    if let Some(header) = header {
-        writeln!(f, "#{}", header.join("\t")).unwrap();
-    }
-    for (chrom, start, end, cells) in rows {
-        write!(f, "{chrom}\t{start}\t{end}").unwrap();
-        for c in cells {
-            write!(f, "\t{c}").unwrap();
-        }
-        writeln!(f).unwrap();
-    }
-    drop(f);
-
-    let status = Command::new("bgzip")
-        .arg("-f")
-        .arg(&bed_path)
-        .status()
-        .unwrap();
-    assert!(status.success(), "bgzip failed");
     let gz_path = dir.join(format!("{name}.bed.gz"));
-
-    let status = Command::new("tabix")
-        .args(["-f", "-p", "bed"])
-        .arg(&gz_path)
-        .status()
+    let mut writer = std::fs::File::create(&gz_path)
+        .map(bgzf::io::Writer::new)
         .unwrap();
-    assert!(status.success(), "tabix failed");
+
+    let mut indexer = tabix::index::Indexer::default();
+    indexer.set_header(csi::binning_index::index::header::Builder::bed().build());
+
+    if let Some(header) = header {
+        writeln!(writer, "#{}", header.join("\t")).unwrap();
+    }
+
+    let mut start_position = writer.virtual_position();
+    for (chrom, start, end, cells) in rows {
+        write!(writer, "{chrom}\t{start}\t{end}").unwrap();
+        for c in cells {
+            write!(writer, "\t{c}").unwrap();
+        }
+        writeln!(writer).unwrap();
+
+        let end_position = writer.virtual_position();
+        indexer
+            .add_record(
+                chrom,
+                Position::try_from(usize::try_from(*start).unwrap() + 1).unwrap(),
+                Position::try_from(usize::try_from(*end).unwrap()).unwrap(),
+                csi::binning_index::index::reference_sequence::bin::Chunk::new(
+                    start_position,
+                    end_position,
+                ),
+            )
+            .unwrap();
+        start_position = end_position;
+    }
+
+    writer.finish().unwrap();
+
+    let index = indexer.build();
+    tabix::fs::write(dir.join(format!("{name}.bed.gz.tbi")), &index).unwrap();
     gz_path
 }

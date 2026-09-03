@@ -223,44 +223,6 @@ mod tests {
     }
 
     #[test]
-    fn from_str_trait() {
-        let r: RegionQuery = "chr1:100-200".parse().unwrap();
-        assert_eq!(r.contig, "chr1");
-        assert_eq!(r.start, Some(100));
-        assert_eq!(r.end, Some(200));
-    }
-
-    #[test]
-    fn display_range() {
-        let r = RegionQuery {
-            contig: "chr1".into(),
-            start: Some(1000),
-            end: Some(2000),
-        };
-        assert_eq!(r.to_string(), "chr1:1000-2000");
-    }
-
-    #[test]
-    fn display_single_position() {
-        let r = RegionQuery {
-            contig: "chr1".into(),
-            start: Some(5000),
-            end: None,
-        };
-        assert_eq!(r.to_string(), "chr1:5000");
-    }
-
-    #[test]
-    fn display_contig_only() {
-        let r = RegionQuery {
-            contig: "chr1".into(),
-            start: None,
-            end: None,
-        };
-        assert_eq!(r.to_string(), "chr1");
-    }
-
-    #[test]
     fn display_round_trip() {
         let cases = ["chr1", "chr1:1000", "chr1:1000-2000"];
         for input in cases {

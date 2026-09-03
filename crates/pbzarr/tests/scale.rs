@@ -435,62 +435,23 @@ fn cascade_genome() -> Genome {
 fn cascade_factor_set_matches_naive_binning_i32() {
     // {4, 6, 24}: two roots (4, 6) and one child (24, parent 6); every
     // contig ends mid-bin for every factor, and chr2 is shorter than one
-    // aligned unit (lcm(4, 6, 24) = 24).
+    // aligned unit (lcm(4, 6, 24) = 24). The af track is NaN-fill f32 with
+    // exactly representable values; chr2's first six positions are all NaN,
+    // so factor 4's and 6's first chr2 bins are all-NaN and must yield NaN.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("s.pbz");
     let mut store = PbzStore::create(&path).unwrap();
     store
         .create_track("depth", cascade_genome(), TrackConfig::new(Dtype::I32))
         .unwrap();
-
-    let track = store.track("depth").unwrap();
-    let chr1: Vec<i32> = (0..53).map(|i| (i * 7) % 23 - 5).collect();
-    let chr2: Vec<i32> = (0..13).map(|i| 100 - 9 * i).collect();
-    for (name, vals) in [("chr1", &chr1), ("chr2", &chr2)] {
-        let region = track
-            .genome()
-            .resolve(&format!("{name}:0-{}", vals.len()).parse().unwrap())
-            .unwrap();
-        track
-            .write_region(&region, Array1::from(vals.clone()).into_dyn())
-            .unwrap();
-    }
-
-    let report = scale(&store, "depth", &factors_config(vec![4, 6, 24])).unwrap();
-    let as_f64: Vec<Vec<f64>> = [&chr1, &chr2]
-        .iter()
-        .map(|v| v.iter().map(|&x| f64::from(x)).collect())
-        .collect();
-    for lvl in &report.levels {
-        let f = lvl.factor;
-        let level = open_array(&path, &format!("/depth/scales/{f}/mean"));
-        let got = read_all_f32(&level).into_raw_vec_and_offset().0;
-        let expect = naive_means(&as_f64, f);
-        assert_eq!(lvl.bins as usize, expect.len(), "factor {f}: bins");
-        assert_eq!(got, expect, "factor {f}");
-    }
-}
-
-#[test]
-fn cascade_factor_set_matches_naive_binning_f32_nan() {
-    // Same factor graph on a NaN-fill f32 track with exactly representable
-    // values; chr2's first six positions are all NaN, so factor 4's and 6's
-    // first chr2 bins are all-NaN and must yield NaN.
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("s.pbz");
-    let mut store = PbzStore::create(&path).unwrap();
     store
         .create_track("af", cascade_genome(), TrackConfig::new(Dtype::F32))
         .unwrap();
 
-    let track = store.track("af").unwrap();
-    let chr1: Vec<f32> = (0..53)
-        .map(|i| if i % 5 == 0 { f32::NAN } else { i as f32 })
-        .collect();
-    let chr2: Vec<f32> = (0..13)
-        .map(|i| if i < 6 { f32::NAN } else { (i * 2) as f32 })
-        .collect();
-    for (name, vals) in [("chr1", &chr1), ("chr2", &chr2)] {
+    let track = store.track("depth").unwrap();
+    let depth_chr1: Vec<i32> = (0..53).map(|i| (i * 7) % 23 - 5).collect();
+    let depth_chr2: Vec<i32> = (0..13).map(|i| 100 - 9 * i).collect();
+    for (name, vals) in [("chr1", &depth_chr1), ("chr2", &depth_chr2)] {
         let region = track
             .genome()
             .resolve(&format!("{name}:0-{}", vals.len()).parse().unwrap())
@@ -500,70 +461,54 @@ fn cascade_factor_set_matches_naive_binning_f32_nan() {
             .unwrap();
     }
 
-    let report = scale(&store, "af", &factors_config(vec![4, 6, 24])).unwrap();
-    let as_f64: Vec<Vec<f64>> = [&chr1, &chr2]
+    let track = store.track("af").unwrap();
+    let af_chr1: Vec<f32> = (0..53)
+        .map(|i| if i % 5 == 0 { f32::NAN } else { i as f32 })
+        .collect();
+    let af_chr2: Vec<f32> = (0..13)
+        .map(|i| if i < 6 { f32::NAN } else { (i * 2) as f32 })
+        .collect();
+    for (name, vals) in [("chr1", &af_chr1), ("chr2", &af_chr2)] {
+        let region = track
+            .genome()
+            .resolve(&format!("{name}:0-{}", vals.len()).parse().unwrap())
+            .unwrap();
+        track
+            .write_region(&region, Array1::from(vals.clone()).into_dyn())
+            .unwrap();
+    }
+
+    let config = ScaleConfig {
+        factors: Some(vec![4, 6, 24]),
+        workers: 3,
+        ..ScaleConfig::default()
+    };
+    let depth_report = scale(&store, "depth", &config).unwrap();
+    let af_report = scale(&store, "af", &config).unwrap();
+
+    let depth_f64: Vec<Vec<f64>> = [&depth_chr1, &depth_chr2]
         .iter()
         .map(|v| v.iter().map(|&x| f64::from(x)).collect())
         .collect();
-    for lvl in &report.levels {
+    for lvl in &depth_report.levels {
+        let f = lvl.factor;
+        let level = open_array(&path, &format!("/depth/scales/{f}/mean"));
+        let got = read_all_f32(&level).into_raw_vec_and_offset().0;
+        let expect = naive_means(&depth_f64, f);
+        assert_eq!(lvl.bins as usize, expect.len(), "factor {f}: bins");
+        assert_eq!(got, expect, "factor {f}");
+    }
+
+    let af_f64: Vec<Vec<f64>> = [&af_chr1, &af_chr2]
+        .iter()
+        .map(|v| v.iter().map(|&x| f64::from(x)).collect())
+        .collect();
+    for lvl in &af_report.levels {
         let f = lvl.factor;
         let level = open_array(&path, &format!("/af/scales/{f}/mean"));
         let got = read_all_f32(&level).into_raw_vec_and_offset().0;
-        let expect = naive_means(&as_f64, f);
-        assert_f32_bins_eq(&got, &expect, &format!("factor {f}"));
-    }
-}
-
-#[test]
-fn workers_three_matches_workers_one_bitwise() {
-    // The {4, 6, 24} reference fixture again, computed once serially
-    // (workers = 1) and once with an odd worker count (workers = 3, to
-    // shake alignment bugs); every level must be bitwise identical, and
-    // both must match the naive reference.
-    let dir = TempDir::new().unwrap();
-    let chr1: Vec<i32> = (0..53).map(|i| (i * 7) % 23 - 5).collect();
-    let chr2: Vec<i32> = (0..13).map(|i| 100 - 9 * i).collect();
-
-    let mut paths = Vec::new();
-    for workers in [1usize, 3] {
-        let path = dir.path().join(format!("w{workers}.pbz"));
-        let mut store = PbzStore::create(&path).unwrap();
-        store
-            .create_track("depth", cascade_genome(), TrackConfig::new(Dtype::I32))
-            .unwrap();
-        let track = store.track("depth").unwrap();
-        for (name, vals) in [("chr1", &chr1), ("chr2", &chr2)] {
-            let region = track
-                .genome()
-                .resolve(&format!("{name}:0-{}", vals.len()).parse().unwrap())
-                .unwrap();
-            track
-                .write_region(&region, Array1::from(vals.clone()).into_dyn())
-                .unwrap();
-        }
-        let config = ScaleConfig {
-            factors: Some(vec![4, 6, 24]),
-            workers,
-            ..ScaleConfig::default()
-        };
-        scale(&store, "depth", &config).unwrap();
-        paths.push(path);
-    }
-
-    let as_f64: Vec<Vec<f64>> = [&chr1, &chr2]
-        .iter()
-        .map(|v| v.iter().map(|&x| f64::from(x)).collect())
-        .collect();
-    for f in [4u64, 6, 24] {
-        let serial = read_all_f32(&open_array(&paths[0], &format!("/depth/scales/{f}/mean")))
-            .into_raw_vec_and_offset()
-            .0;
-        let parallel = read_all_f32(&open_array(&paths[1], &format!("/depth/scales/{f}/mean")))
-            .into_raw_vec_and_offset()
-            .0;
-        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
-        assert_eq!(bits(&serial), bits(&parallel), "factor {f}: workers 1 vs 3");
-        assert_eq!(serial, naive_means(&as_f64, f), "factor {f}: reference");
+        let expect = naive_means(&af_f64, f);
+        assert_f32_bins_eq(&got, &expect, &format!("af factor {f}"));
     }
 }
 

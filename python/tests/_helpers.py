@@ -1,17 +1,6 @@
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
-
-def _have(bin_: str) -> bool:
-    return shutil.which(bin_) is not None
-
-
-htslib = pytest.mark.skipif(
-    not (_have("bgzip") and _have("tabix")),
-    reason="bgzip/tabix (htslib) not on PATH",
-)
+import pysam
 
 
 def write_bed_bgzip_tabix(dirp: Path, name: str, header: list[str],
@@ -22,9 +11,7 @@ def write_bed_bgzip_tabix(dirp: Path, name: str, header: list[str],
         f.write("#" + "\t".join(header) + "\n")
         for chrom, start, end, cells in rows:
             f.write("\t".join([chrom, str(start), str(end), *cells]) + "\n")
-    subprocess.run(["bgzip", "-f", str(bed)], check=True)
-    gz = dirp / f"{name}.bed.gz"
-    subprocess.run(["tabix", "-f", "-p", "bed", str(gz)], check=True)
+    gz = Path(pysam.tabix_index(str(bed), preset="bed", force=True))
     return gz
 
 

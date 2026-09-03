@@ -22,4 +22,8 @@ rayon = "1"
 
 [dev-dependencies]
 ndarray = "0.17"
+noodles-bgzf = { version = "0.48", features = ["libdeflate"] }
+noodles-core = "0.20"
+noodles-csi = "0.57"
+noodles-tabix = "0.63"
 tempfile = "3"

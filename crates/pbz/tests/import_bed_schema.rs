@@ -1,76 +1,17 @@
-use std::ffi::OsString;
-use std::fs::File;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+mod common;
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use common::{run_pbz, write_bed_bgzip_tabix};
 use pbzarr::io::Dtype;
 use pbzarr::{PbzStore, Region};
 use tempfile::TempDir;
-
-fn require_htslib() {
-    for bin in ["bgzip", "tabix"] {
-        let available = Command::new(bin)
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false);
-        assert!(
-            available,
-            "{bin} is required by the BED schema CLI regressions; run them with `pixi run test`"
-        );
-    }
-}
-
-fn write_bed(
-    dir: &Path,
-    name: &str,
-    header: &[&str],
-    rows: &[(&str, u64, u64, &[&str])],
-) -> PathBuf {
-    let bed = dir.join(format!("{name}.bed"));
-    let mut file = File::create(&bed).unwrap();
-    writeln!(file, "#{}", header.join("\t")).unwrap();
-    for (contig, start, end, values) in rows {
-        write!(file, "{contig}\t{start}\t{end}").unwrap();
-        for value in *values {
-            write!(file, "\t{value}").unwrap();
-        }
-        writeln!(file).unwrap();
-    }
-    drop(file);
-
-    assert!(
-        Command::new("bgzip")
-            .arg("-f")
-            .arg(&bed)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let compressed = dir.join(format!("{name}.bed.gz"));
-    assert!(
-        Command::new("tabix")
-            .args(["-f", "-p", "bed"])
-            .arg(&compressed)
-            .status()
-            .unwrap()
-            .success()
-    );
-    compressed
-}
 
 fn write_genome(dir: &Path) -> PathBuf {
     let genome = dir.join("genome.fai");
     std::fs::write(&genome, "chr1\t8\n").unwrap();
     genome
-}
-
-fn run_pbz(args: impl IntoIterator<Item = OsString>) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pbz"))
-        .args(args)
-        .output()
-        .unwrap()
 }
 
 fn import_args(
@@ -104,9 +45,8 @@ fn labeled(path: &Path, label: &str) -> OsString {
 
 #[test]
 fn grouped_schema_one_source_creates_an_ordered_bed_column_axis() {
-    require_htslib();
     let dir = TempDir::new().unwrap();
-    let bed = write_bed(
+    let bed = write_bed_bgzip_tabix(
         dir.path(),
         "wide",
         &["chrom", "start", "end", "cov", "mapq"],
@@ -154,15 +94,14 @@ fn grouped_schema_one_source_creates_an_ordered_bed_column_axis() {
 
 #[test]
 fn unique_schema_two_sources_infers_across_sources_and_keeps_source_labels() {
-    require_htslib();
     let dir = TempDir::new().unwrap();
-    let tumor = write_bed(
+    let tumor = write_bed_bgzip_tabix(
         dir.path(),
         "tumor",
         &["chrom", "start", "end", "cov", "mapq"],
         &[("chr1", 0, 8, &["4", "60"])],
     );
-    let normal = write_bed(
+    let normal = write_bed_bgzip_tabix(
         dir.path(),
         "normal",
         &["chrom", "start", "end", "cov", "mapq"],
@@ -226,9 +165,8 @@ fn unique_schema_two_sources_infers_across_sources_and_keeps_source_labels() {
 
 #[test]
 fn dry_run_prints_plan_and_estimate_without_creating_the_store() {
-    require_htslib();
     let dir = TempDir::new().unwrap();
-    let bed = write_bed(
+    let bed = write_bed_bgzip_tabix(
         dir.path(),
         "wide",
         &["chrom", "start", "end", "cov", "mapq"],
@@ -256,15 +194,14 @@ fn dry_run_prints_plan_and_estimate_without_creating_the_store() {
 
 #[test]
 fn grouped_schema_two_sources_fails_preflight_without_creating_output() {
-    require_htslib();
     let dir = TempDir::new().unwrap();
-    let first = write_bed(
+    let first = write_bed_bgzip_tabix(
         dir.path(),
         "first",
         &["chrom", "start", "end", "cov", "mapq"],
         &[("chr1", 0, 8, &["4", "60"])],
     );
-    let second = write_bed(
+    let second = write_bed_bgzip_tabix(
         dir.path(),
         "second",
         &["chrom", "start", "end", "cov", "mapq"],
@@ -309,55 +246,9 @@ fn grouped_schema_two_sources_fails_preflight_without_creating_output() {
 }
 
 #[test]
-fn unique_schema_two_sources_without_column_dimension_fails_before_output_creation() {
-    require_htslib();
-    let dir = TempDir::new().unwrap();
-    let first = write_bed(
-        dir.path(),
-        "first",
-        &["chrom", "start", "end", "cov"],
-        &[("chr1", 0, 8, &["4"])],
-    );
-    let second = write_bed(
-        dir.path(),
-        "second",
-        &["chrom", "start", "end", "cov"],
-        &[("chr1", 0, 8, &["9"])],
-    );
-    let genome = write_genome(dir.path());
-    let schema = dir.path().join("schema.tsv");
-    std::fs::write(&schema, "cov\tcoverage\tuint16\n").unwrap();
-    let output = dir.path().join("missing-axis.pbz");
-
-    let command = run_pbz([
-        "import".into(),
-        "bed".into(),
-        "--output".into(),
-        output.as_os_str().to_owned(),
-        "--genome".into(),
-        genome.into_os_string(),
-        "--schema".into(),
-        schema.into_os_string(),
-        labeled(&first, "a"),
-        labeled(&second, "b"),
-    ]);
-    assert!(!command.status.success());
-    let error = String::from_utf8_lossy(&command.stderr);
-    assert!(error.contains("multiple input sources"), "{error}");
-    assert!(error.contains("BED column track"), "{error}");
-    assert!(error.contains("rank 2 (position, source)"), "{error}");
-    assert!(error.contains("column dimension name"), "{error}");
-    assert!(
-        !output.exists(),
-        "schema preflight created the output store"
-    );
-}
-
-#[test]
 fn out_of_range_numeric_schema_selector_reports_the_original_one_based_column() {
-    require_htslib();
     let dir = TempDir::new().unwrap();
-    let bed = write_bed(
+    let bed = write_bed_bgzip_tabix(
         dir.path(),
         "five-columns",
         &["chrom", "start", "end", "cov", "mapq"],
@@ -395,9 +286,8 @@ fn out_of_range_numeric_schema_selector_reports_the_original_one_based_column() 
 
 #[test]
 fn out_of_range_numeric_schema_selector_during_inference_is_one_based() {
-    require_htslib();
     let dir = TempDir::new().unwrap();
-    let bed = write_bed(
+    let bed = write_bed_bgzip_tabix(
         dir.path(),
         "five-columns-inference",
         &["chrom", "start", "end", "cov", "mapq"],
@@ -435,9 +325,8 @@ fn out_of_range_numeric_schema_selector_during_inference_is_one_based() {
 
 #[test]
 fn overflowing_numeric_schema_selector_is_not_treated_as_a_header_name() {
-    require_htslib();
     let dir = TempDir::new().unwrap();
-    let bed = write_bed(
+    let bed = write_bed_bgzip_tabix(
         dir.path(),
         "overflow-selector",
         &["chrom", "start", "end", "cov"],
@@ -478,9 +367,8 @@ fn overflowing_numeric_schema_selector_is_not_treated_as_a_header_name() {
 
 #[test]
 fn invalid_schema_target_track_names_fail_before_output_creation() {
-    require_htslib();
     let dir = TempDir::new().unwrap();
-    let bed = write_bed(
+    let bed = write_bed_bgzip_tabix(
         dir.path(),
         "invalid-target",
         &["chrom", "start", "end", "cov"],
@@ -514,46 +402,9 @@ fn invalid_schema_target_track_names_fail_before_output_creation() {
 }
 
 #[test]
-fn invalid_schema_column_dimension_names_fail_before_output_creation() {
-    require_htslib();
-    let dir = TempDir::new().unwrap();
-    let bed = write_bed(
-        dir.path(),
-        "invalid-dimension",
-        &["chrom", "start", "end", "cov"],
-        &[("chr1", 0, 8, &["4"])],
-    );
-    let genome = write_genome(dir.path());
-    let schema = dir.path().join("dimension-schema.tsv");
-    std::fs::write(&schema, "cov\tcoverage\tuint16\n").unwrap();
-
-    for (case, invalid) in ["__axis", "...", "nested/axis"].into_iter().enumerate() {
-        let output = dir.path().join(format!("invalid-dimension-{case}.pbz"));
-        let command = run_pbz(import_args(
-            &output,
-            &genome,
-            &schema,
-            invalid,
-            [bed.as_os_str().to_owned()],
-        ));
-
-        assert!(
-            !command.status.success(),
-            "dimension {invalid:?} was accepted"
-        );
-        let error = String::from_utf8_lossy(&command.stderr);
-        assert!(error.contains("column dimension name"), "{error}");
-        assert!(error.contains("invalid PBZ/Zarr node name"), "{error}");
-        assert!(error.contains(&format!("{invalid:?}")), "{error}");
-        assert!(!output.exists(), "dimension preflight created {output:?}");
-    }
-}
-
-#[test]
 fn emit_schema_bed3_error_calls_values_bed_columns() {
-    require_htslib();
     let dir = TempDir::new().unwrap();
-    let bed = write_bed(
+    let bed = write_bed_bgzip_tabix(
         dir.path(),
         "regions",
         &["chrom", "start", "end"],

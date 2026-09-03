@@ -1,196 +1,28 @@
-//! End-to-end: synthesize a small d4 file via the system `d4tools` (skipped
-//! if unavailable), import via `import::from_d4`, read back via `Track::read_region`.
+//! End-to-end: import the committed d4 fixtures under `fixtures/d4/` via
+//! `import::from_d4`, read back via `Track::read_region`.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use pbzarr::import::{Config, Source};
 use pbzarr::{PbzStore, Region};
 use pbzarr_readers::{D4Reader, from_d4};
 use tempfile::TempDir;
 
-/// True if `d4tools` is on PATH. With `PBZ_REQUIRE_TOOLS` set (CI), a
-/// missing tool panics instead of letting callers self-skip.
-fn have_d4tools() -> bool {
-    let ok = Command::new("d4tools")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !ok && std::env::var_os("PBZ_REQUIRE_TOOLS").is_some() {
-        panic!("PBZ_REQUIRE_TOOLS is set but d4tools is not on PATH");
-    }
-    ok
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/d4")
+        .join(name)
 }
 
-/// Write a tiny bedGraph-based d4 where positions [i*10, (i+1)*10) carry value
-/// `(i % 50) + 1` (1-indexed bands of 10), then call `d4tools create --genome`.
-fn write_synthetic_d4(tmp: &Path, chrom: &str, len: u32) -> std::path::PathBuf {
-    let sizes_path = tmp.join("genome.sizes");
-    let mut sf = std::fs::File::create(&sizes_path).unwrap();
-    writeln!(sf, "{chrom}\t{len}").unwrap();
-    drop(sf);
-
-    let bg_path = tmp.join("data.bedgraph");
-    let mut bf = std::fs::File::create(&bg_path).unwrap();
-    for i in 0..(len / 10) {
-        let s = i * 10;
-        let e = (i + 1) * 10;
-        let v = (i % 50) + 1;
-        writeln!(bf, "{chrom}\t{s}\t{e}\t{v}").unwrap();
-    }
-    drop(bf);
-
-    let d4_path = tmp.join("out.d4");
-    let status = Command::new("d4tools")
-        .args(["create", "--genome"])
-        .arg(&sizes_path)
-        .arg(&bg_path)
-        .arg(&d4_path)
-        .status()
-        .unwrap();
-    assert!(status.success(), "d4tools create failed");
-    d4_path
-}
-
-/// Like `write_synthetic_d4` but every value is offset by `base`, so distinct
-/// cohort columns carry distinct data.
-fn write_synthetic_d4_offset(tmp: &Path, tag: &str, chrom: &str, len: u32, base: i32) -> PathBuf {
-    let sizes_path = tmp.join(format!("{tag}.sizes"));
-    std::fs::write(&sizes_path, format!("{chrom}\t{len}\n")).unwrap();
-
-    let bg_path = tmp.join(format!("{tag}.bedgraph"));
-    let mut bf = std::fs::File::create(&bg_path).unwrap();
-    for i in 0..(len / 10) {
-        let s = i * 10;
-        let e = (i + 1) * 10;
-        let v = base + (i % 50) as i32 + 1;
-        writeln!(bf, "{chrom}\t{s}\t{e}\t{v}").unwrap();
-    }
-    drop(bf);
-
-    let d4_path = tmp.join(format!("{tag}.d4"));
-    let status = Command::new("d4tools")
-        .args(["create", "--genome"])
-        .arg(&sizes_path)
-        .arg(&bg_path)
-        .arg(&d4_path)
-        .status()
-        .unwrap();
-    assert!(status.success(), "d4tools create failed");
-    d4_path
-}
-
-/// Write a fixed-point d4 file (with --denominator) for testing rejection.
-fn write_fixed_point_d4(tmp: &Path, chrom: &str, len: u32, denominator: u32) -> PathBuf {
-    let sizes_path = tmp.join("fixedpoint.sizes");
-    std::fs::write(&sizes_path, format!("{chrom}\t{len}\n")).unwrap();
-
-    let bg_path = tmp.join("fixedpoint.bedgraph");
-    let mut bf = std::fs::File::create(&bg_path).unwrap();
-    for i in 0..(len / 10) {
-        let s = i * 10;
-        let e = (i + 1) * 10;
-        let v = (i % 50) + 1;
-        writeln!(bf, "{chrom}\t{s}\t{e}\t{v}").unwrap();
-    }
-    drop(bf);
-
-    let d4_path = tmp.join("fixedpoint.d4");
-    let status = Command::new("d4tools")
-        .args(["create", "--genome"])
-        .arg(&sizes_path)
-        .arg(&bg_path)
-        .arg("--denominator")
-        .arg(denominator.to_string())
-        .arg(&d4_path)
-        .status()
-        .unwrap();
-    assert!(status.success(), "d4tools create with --denominator failed");
-    d4_path
-}
-
-/// A sharded track must import to the same bytes as an unsharded one. The
-/// length (10_000) is not a multiple of the shard span (4_000), so the run
-/// exercises full interior shards, multiple inner chunks per shard, and a
-/// partial edge shard. Imported with >1 worker to confirm concurrent writes to
-/// distinct shard files stay correct.
-#[test]
-fn sharded_scalar_import_matches_unsharded() {
-    if !have_d4tools() {
-        eprintln!("skip: d4tools not on PATH");
-        return;
-    }
-    let dir = TempDir::new().unwrap();
-    let d4 = write_synthetic_d4(dir.path(), "chr1", 10_000);
-    let src = || vec![Source::new(d4.clone())];
-    let region = |store: &PbzStore| Region {
-        contig: store.genome_for("depth").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 10_000,
-    };
-
-    let plain_path = dir.path().join("plain.pbz");
-    let mut plain = PbzStore::create(&plain_path).unwrap();
-    from_d4(
-        &mut plain,
-        "depth",
-        &src(),
-        Config {
-            chunk_size: Some(1_000),
-            ..Config::default()
-        },
-    )
-    .unwrap();
-
-    let sharded_path = dir.path().join("sharded.pbz");
-    let mut sharded = PbzStore::create(&sharded_path).unwrap();
-    from_d4(
-        &mut sharded,
-        "depth",
-        &src(),
-        Config {
-            workers: 4,
-            chunk_size: Some(1_000),
-            shard_size: Some(4_000),
-            ..Config::default()
-        },
-    )
-    .unwrap();
-
-    let plain_data = plain
-        .track("depth")
-        .unwrap()
-        .read_region::<i32>(&region(&plain))
-        .unwrap();
-    let sharded_data = sharded
-        .track("depth")
-        .unwrap()
-        .read_region::<i32>(&region(&sharded))
-        .unwrap();
-    assert_eq!(plain_data, sharded_data);
-}
-
-/// Same equivalence for a 2D cohort track: three distinct-valued sources, a
-/// sharded layout spanning multiple inner chunks plus a partial edge shard,
-/// imported with >1 worker, must match the unsharded import column-for-column.
+/// Sharded/unsharded equivalence for a 2D cohort track: three distinct-valued
+/// sources, a sharded layout spanning multiple inner chunks plus a partial
+/// edge shard, imported with >1 worker, must match the unsharded import
+/// column-for-column.
 #[test]
 fn sharded_cohort_import_matches_unsharded() {
-    if !have_d4tools() {
-        eprintln!("skip: d4tools not on PATH");
-        return;
-    }
     let dir = TempDir::new().unwrap();
-    let sources: Vec<Source> = [0, 100, 200]
-        .iter()
-        .enumerate()
-        .map(|(i, &base)| {
-            Source::labeled(
-                write_synthetic_d4_offset(dir.path(), &format!("s{i}"), "chr1", 10_000, base),
-                format!("s{i}"),
-            )
-        })
+    let sources: Vec<Source> = (0..3)
+        .map(|i| Source::labeled(fixture(&format!("cohort_s{i}.d4")), format!("s{i}")))
         .collect();
     let region = |store: &PbzStore| Region {
         contig: store.genome_for("depth").unwrap().id("chr1").unwrap(),
@@ -245,12 +77,8 @@ fn sharded_cohort_import_matches_unsharded() {
 
 #[test]
 fn import_one_d4_into_scalar_track() {
-    if !have_d4tools() {
-        eprintln!("skip: d4tools not on PATH");
-        return;
-    }
     let dir = TempDir::new().unwrap();
-    let d4 = write_synthetic_d4(dir.path(), "chr1", 1_000);
+    let d4 = fixture("banded_1k.d4");
 
     let store_path = dir.path().join("out.pbz");
     let mut store = PbzStore::create(&store_path).unwrap();
@@ -280,26 +108,9 @@ fn import_one_d4_into_scalar_track() {
 /// name before handing it to the reader.
 #[test]
 fn import_d4_multi_contig_writes_correct_contigs() {
-    if !have_d4tools() {
-        eprintln!("skip: d4tools not on PATH");
-        return;
-    }
     let dir = TempDir::new().unwrap();
-
-    // d4 has chr2 first, chr1 second. chr2 values: 100. chr1 values: 7.
-    let d4_path = dir.path().join("a.d4");
-    let bg_path = d4_path.with_extension("bedgraph");
-    let sizes_path = d4_path.with_extension("sizes");
-    std::fs::write(&bg_path, "chr2\t0\t500\t100\nchr1\t0\t300\t7\n").unwrap();
-    std::fs::write(&sizes_path, "chr2\t500\nchr1\t300\n").unwrap();
-    let status = Command::new("d4tools")
-        .args(["create", "--genome"])
-        .arg(&sizes_path)
-        .arg(&bg_path)
-        .arg(&d4_path)
-        .status()
-        .unwrap();
-    assert!(status.success(), "d4tools create failed");
+    // Fixture has chr2 first, chr1 second. chr2 values: 100. chr1 values: 7.
+    let d4_path = fixture("multi_contig.d4");
 
     let store_path = dir.path().join("out.pbz");
     let mut store = PbzStore::create(&store_path).unwrap();
@@ -339,24 +150,15 @@ fn import_d4_multi_contig_writes_correct_contigs() {
     assert!(chr2.iter().all(|&v| v == 100), "chr2 should have value 100");
 }
 
+/// Fix-point (non-integral) d4 files are rejected at open time.
 #[test]
 fn fixed_point_d4_is_rejected() {
-    if !have_d4tools() {
-        eprintln!("skip: d4tools not on PATH");
-        return;
-    }
-    let dir = TempDir::new().unwrap();
-    let d4 = write_fixed_point_d4(dir.path(), "chr1", 1_000, 100);
-
-    let result = D4Reader::open(&d4);
-    match result {
-        Err(e) => {
-            let err_msg = e.to_string();
-            assert!(
-                err_msg.contains("fix-point"),
-                "error message should contain 'fix-point', got: {err_msg}"
-            );
-        }
-        Ok(_) => panic!("expected error when opening fixed-point d4"),
-    }
+    let err = D4Reader::open(fixture("fixed_point.d4"))
+        .err()
+        .expect("expected error when opening fixed-point d4");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("fix-point"),
+        "error message should contain 'fix-point', got: {msg}"
+    );
 }

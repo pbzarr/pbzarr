@@ -1,6 +1,5 @@
 //! End-to-end: synthesize a bgzipped+tabix BED, import one selected column via
-//! `from_bed_matrix`, read back via `Track::read_region`. Skipped if
-//! bgzip/tabix are unavailable.
+//! `from_bed_matrix`, read back via `Track::read_region`.
 
 mod common;
 
@@ -11,7 +10,7 @@ use pbzarr::{PbzStore, Region};
 use pbzarr_readers::{BedImportOptions, from_bed_matrix};
 use tempfile::TempDir;
 
-use common::{htslib_available, write_bed_bgzip_tabix};
+use common::write_bed_bgzip_tabix;
 
 fn genome(contigs: &[(&str, u64)]) -> Genome {
     Genome::new(
@@ -28,12 +27,6 @@ fn genome(contigs: &[(&str, u64)]) -> Genome {
 
 #[test]
 fn single_column_selection_imports_a_scalar_track() {
-    if !htslib_available() {
-        eprintln!(
-            "skip import_bed::single_column_selection_imports_a_scalar_track: bgzip/tabix not on PATH"
-        );
-        return;
-    }
     let dir = TempDir::new().unwrap();
     let bed = write_bed_bgzip_tabix(
         dir.path(),

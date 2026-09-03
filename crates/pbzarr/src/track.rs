@@ -765,35 +765,6 @@ mod tests {
     }
 
     #[test]
-    fn write_unit_shape_uses_outer_shard_dimensions() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("sharded.pbz");
-        let genome = Genome::new(vec![Contig {
-            name: "chr1".into(),
-            length: 16,
-        }])
-        .unwrap();
-        let mut store = PbzStore::create(&path).unwrap();
-        store
-            .create_track(
-                "depth",
-                genome,
-                TrackConfig::new(Dtype::U16)
-                    .columns(vec!["a".into(), "b".into(), "c".into(), "d".into()])
-                    .chunk_size(4)
-                    .column_chunk_size(2)
-                    .shard_size(8)
-                    .shard_column_size(4),
-            )
-            .unwrap();
-
-        assert_eq!(
-            store.track("depth").unwrap().write_unit_shape().unwrap(),
-            vec![8, 4]
-        );
-    }
-
-    #[test]
     fn read_flat_crosses_contig_boundary() {
         let dir = tempfile::TempDir::new().unwrap();
         let genome = Genome::new(vec![

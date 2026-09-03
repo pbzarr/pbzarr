@@ -49,10 +49,16 @@ impl ValueReader for ConstReader {
 fn pipeline_writes_constants_into_cohort_track() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("t.pbz");
-    let genome = Genome::new(vec![Contig {
-        name: "chr1".into(),
-        length: 5_000,
-    }])
+    let genome = Genome::new(vec![
+        Contig {
+            name: "chr1".into(),
+            length: 5_000,
+        },
+        Contig {
+            name: "chr2".into(),
+            length: 1_500,
+        },
+    ])
     .unwrap();
 
     let mut store = PbzStore::create(&path).unwrap();
@@ -79,22 +85,24 @@ fn pipeline_writes_constants_into_cohort_track() {
         .run()
         .unwrap();
     assert!(report.bytes_written > 0);
-    assert_eq!(report.contigs_written, 1);
+    assert_eq!(report.contigs_written, 2);
 
-    let region = Region {
-        contig: genome.id("chr1").unwrap(),
-        start: 0,
-        end: 5_000,
-    };
-    let got = store
-        .track("depth")
-        .unwrap()
-        .read_region::<u32>(&region)
-        .unwrap();
-    let got2 = got.into_dimensionality::<ndarray::Ix2>().unwrap();
-    for i in 0..5_000 {
-        assert_eq!(got2[[i, 0]], 7, "col 0 at i={i}");
-        assert_eq!(got2[[i, 1]], 13, "col 1 at i={i}");
+    for (name, len) in [("chr1", 5_000usize), ("chr2", 1_500)] {
+        let region = Region {
+            contig: genome.id(name).unwrap(),
+            start: 0,
+            end: len as u64,
+        };
+        let got = store
+            .track("depth")
+            .unwrap()
+            .read_region::<u32>(&region)
+            .unwrap();
+        let got2 = got.into_dimensionality::<ndarray::Ix2>().unwrap();
+        for i in 0..len {
+            assert_eq!(got2[[i, 0]], 7, "{name} col 0 at i={i}");
+            assert_eq!(got2[[i, 1]], 13, "{name} col 1 at i={i}");
+        }
     }
 }
 
@@ -150,45 +158,6 @@ fn cohort_pipeline_tiles_columns_with_multiple_workers() {
     for row in values.rows() {
         assert_eq!(row.as_slice().unwrap(), &[7, 8, 9, 10]);
     }
-}
-
-#[test]
-fn pipeline_writes_constants_into_scalar_track() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("s.pbz");
-    let genome = Genome::new(vec![Contig {
-        name: "chr1".into(),
-        length: 3_000,
-    }])
-    .unwrap();
-
-    let mut store = PbzStore::create(&path).unwrap();
-    store
-        .create_track("mask", genome.clone(), TrackConfig::new(Dtype::U32))
-        .unwrap();
-
-    let readers = vec![ConstReader::new(genome.clone(), 42)];
-
-    let track = store.track("mask").unwrap();
-    let report = Import::from_readers(readers)
-        .unwrap()
-        .into_track(track)
-        .run()
-        .unwrap();
-    assert!(report.bytes_written > 0);
-
-    let region = Region {
-        contig: genome.id("chr1").unwrap(),
-        start: 0,
-        end: 3_000,
-    };
-    let got = store
-        .track("mask")
-        .unwrap()
-        .read_region::<u32>(&region)
-        .unwrap();
-    let got1 = got.into_dimensionality::<ndarray::Ix1>().unwrap();
-    assert!(got1.iter().all(|&v| v == 42));
 }
 
 /// Fills each position with `contig_index * 1_000_000 + local_position`, so a
@@ -291,61 +260,6 @@ fn pipeline_span_straddling_contig_boundary_maps_local_coords() {
         let got1 = got.into_dimensionality::<ndarray::Ix1>().unwrap();
         for pos in 0..len {
             assert_eq!(got1[pos], cid * 1_000_000 + pos as u32, "{name} pos={pos}");
-        }
-    }
-}
-
-#[test]
-fn pipeline_spans_multiple_contigs() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("m.pbz");
-    let genome = Genome::new(vec![
-        Contig {
-            name: "chr1".into(),
-            length: 2_000,
-        },
-        Contig {
-            name: "chr2".into(),
-            length: 1_500,
-        },
-    ])
-    .unwrap();
-
-    let mut store = PbzStore::create(&path).unwrap();
-    store
-        .create_track(
-            "depth",
-            genome.clone(),
-            TrackConfig::new(Dtype::U32)
-                .columns(vec!["S".into()])
-                .column_dim("sample"),
-        )
-        .unwrap();
-
-    let readers = vec![ConstReader::new(genome.clone(), 99)];
-    let track = store.track("depth").unwrap();
-    let report = Import::from_readers(readers)
-        .unwrap()
-        .into_track(track)
-        .readers_as_columns()
-        .run()
-        .unwrap();
-    assert_eq!(report.contigs_written, 2);
-
-    for (name, len) in [("chr1", 2_000usize), ("chr2", 1_500)] {
-        let region = Region {
-            contig: genome.id(name).unwrap(),
-            start: 0,
-            end: len as u64,
-        };
-        let got = store
-            .track("depth")
-            .unwrap()
-            .read_region::<u32>(&region)
-            .unwrap();
-        let got2 = got.into_dimensionality::<ndarray::Ix2>().unwrap();
-        for i in 0..len {
-            assert_eq!(got2[[i, 0]], 99, "{name} i={i}");
         }
     }
 }

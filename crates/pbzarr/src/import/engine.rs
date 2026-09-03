@@ -2190,13 +2190,15 @@ mod tests {
             )
             .unwrap();
 
-        let reader = SynthReader::new(genome, Dtype::F32, 0..10, 0);
+        let (tap_tx, tap_rx) = bounded::<TapMessage>(16);
+        let reader = SynthReader::new(genome, Dtype::F32, 16..26, 0);
         let report = Import::from_readers(vec![reader])
             .unwrap()
             .into_track(store.track("signal").unwrap())
+            .with_tap(tap_tx)
             .run()
             .unwrap();
-        // Chunks 16,16,8: only the first has coverage.
+        // Chunks 16,16,8: only the middle has coverage.
         assert_eq!(report.tasks_completed, 1);
         assert_eq!(report.tasks_skipped, 2);
 
@@ -2207,17 +2209,37 @@ mod tests {
             .unwrap()
             .into_dimensionality::<Ix1>()
             .unwrap();
-        for pos in 0..10 {
+        for pos in 16..26 {
             assert_eq!(values[pos], pos as f32);
         }
-        // Uncovered positions of the WRITTEN buffer (10..16) and of the
-        // ELIDED buffers (16..40) both read back as the NaN fill.
-        for pos in 10..40 {
+        // Uncovered positions of the WRITTEN buffer (26..32) and of the
+        // ELIDED buffers (0..16, 32..40) both read back as the NaN fill.
+        for pos in (0..16).chain(26..40) {
             assert!(values[pos].is_nan(), "position {pos} should be NaN");
         }
         assert_eq!(
             chunk_file_count(&dir.path().join("fill.pbz/signal/values")),
             1
+        );
+
+        let messages: Vec<TapMessage> = tap_rx.try_iter().collect();
+        let filled: Vec<_> = messages
+            .iter()
+            .filter(|m| matches!(m, TapMessage::Filled { .. }))
+            .collect();
+        let skipped: Vec<_> = messages
+            .iter()
+            .filter(|m| matches!(m, TapMessage::Skipped { .. }))
+            .collect();
+        assert_eq!(filled.len(), 1);
+        assert_eq!(skipped.len(), 2);
+        assert_eq!(
+            filled[0],
+            &TapMessage::Filled {
+                track: "signal".into(),
+                position: 16..32,
+                columns: 0..1,
+            }
         );
     }
 
@@ -2267,51 +2289,6 @@ mod tests {
         for pos in 0..64 {
             assert_eq!(values[pos], 100 + pos as i32);
         }
-    }
-
-    #[test]
-    fn tap_reports_filled_and_skipped_buffers() {
-        let dir = TempDir::new().unwrap();
-        let genome = one_contig(48);
-        let mut store = PbzStore::create(dir.path().join("tap.pbz")).unwrap();
-        store
-            .create_track(
-                "depth",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32).chunk_size(16),
-            )
-            .unwrap();
-
-        let (tap_tx, tap_rx) = bounded::<TapMessage>(16);
-        let reader = SynthReader::new(genome, Dtype::I32, 16..32, 0);
-        let report = Import::from_readers(vec![reader])
-            .unwrap()
-            .into_track(store.track("depth").unwrap())
-            .with_tap(tap_tx)
-            .run()
-            .unwrap();
-        assert_eq!(report.tasks_completed, 1);
-        assert_eq!(report.tasks_skipped, 2);
-
-        let messages: Vec<TapMessage> = tap_rx.try_iter().collect();
-        let filled: Vec<_> = messages
-            .iter()
-            .filter(|m| matches!(m, TapMessage::Filled { .. }))
-            .collect();
-        let skipped: Vec<_> = messages
-            .iter()
-            .filter(|m| matches!(m, TapMessage::Skipped { .. }))
-            .collect();
-        assert_eq!(filled.len(), 1);
-        assert_eq!(skipped.len(), 2);
-        assert_eq!(
-            filled[0],
-            &TapMessage::Filled {
-                track: "depth".into(),
-                position: 16..32,
-                columns: 0..1,
-            }
-        );
     }
 
     /// Reader whose `read_into` records how many decodes run at once. Each

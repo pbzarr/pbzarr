@@ -289,11 +289,20 @@ mod tests {
     fn load_bed_reads_gzip_input() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("r.bed.gz");
-        let file = std::fs::File::create(&path).unwrap();
-        let mut enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-        enc.write_all(b"chr1\t0\t5\n").unwrap();
-        enc.finish().unwrap();
+        // Two finished members, as bgzip produces; a single-member decoder
+        // would silently drop chr2.
+        let mut bytes = Vec::new();
+        for line in [&b"chr1\t0\t5\n"[..], &b"chr2\t1\t4\n"[..]] {
+            let mut enc = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
+            enc.write_all(line).unwrap();
+            enc.finish().unwrap();
+        }
+        std::fs::write(&path, &bytes).unwrap();
         let regions = load_bed_regions(&path, &genome()).unwrap();
-        assert_eq!(regions[0].region.end, 5);
+        let flat: Vec<(String, u64, u64)> = regions
+            .iter()
+            .map(|n| (n.chrom.clone(), n.region.start, n.region.end))
+            .collect();
+        assert_eq!(flat, vec![("chr1".into(), 0, 5), ("chr2".into(), 1, 4)]);
     }
 }

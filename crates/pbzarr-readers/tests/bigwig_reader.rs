@@ -12,11 +12,6 @@ use pbzarr_readers::BigWigReader;
 use tempfile::TempDir;
 
 #[test]
-fn open_missing_file_errors() {
-    assert!(BigWigReader::open("/no/such/file.bw").is_err());
-}
-
-#[test]
 fn open_reports_contigs_and_schema() {
     let dir = TempDir::new().unwrap();
     let bw = common::write_bigwig(
@@ -36,18 +31,6 @@ fn open_reports_contigs_and_schema() {
     assert_eq!(c1.length, 1000);
     assert_eq!(c2.length, 500);
     assert_eq!(reader.output_schema().len(), 1);
-}
-
-#[test]
-fn contigs_reads_header_pairs() {
-    let dir = TempDir::new().unwrap();
-    let bw = common::write_bigwig(
-        dir.path(),
-        "a",
-        &[("chr1", 1000), ("chr2", 500)],
-        &[("chr1", 0, 1000, 5.0), ("chr2", 0, 500, 5.0)],
-        false,
-    );
 
     // bigtools does not guarantee chrom order, so compare as a sorted set.
     let mut contigs = pbzarr_readers::bigwig::contigs(&bw).unwrap();
@@ -56,6 +39,8 @@ fn contigs_reads_header_pairs() {
         contigs,
         vec![("chr1".to_owned(), 1000u64), ("chr2".to_owned(), 500u64)]
     );
+
+    assert!(BigWigReader::open("/no/such/file.bw").is_err());
 }
 
 #[test]
@@ -84,23 +69,10 @@ fn read_into_fills_values_and_nan_gaps() {
     for i in 10..20 {
         assert!(buf[i].is_nan(), "pos {} should be NaN", start as usize + i);
     }
-}
 
-#[test]
-fn empty_region_is_noop() {
-    let dir = TempDir::new().unwrap();
-    let bw = common::write_bigwig(
-        dir.path(),
-        "a",
-        &[("chr1", 100)],
-        &[("chr1", 0, 100, 3.0)],
-        false,
-    );
-
-    let mut reader = BigWigReader::open(&bw).unwrap();
     // 0-row view: contract is just "don't crash".
-    let mut buf: Array1<f32> = Array1::zeros(0);
-    let mut outputs = [OutputSinkMut::F32(buf.view_mut())];
+    let mut empty: Array1<f32> = Array1::zeros(0);
+    let mut outputs = [OutputSinkMut::F32(empty.view_mut())];
     reader.read_into("chr1", 50, 50, &mut outputs).unwrap();
 }
 
@@ -118,29 +90,4 @@ fn unknown_contig_errors() {
     let mut buf: Array1<f32> = Array1::zeros(10);
     let mut outputs = [OutputSinkMut::F32(buf.view_mut())];
     assert!(reader.read_into("chrX", 0, 10, &mut outputs).is_err());
-}
-
-#[test]
-fn fork_produces_independent_reader() {
-    let dir = TempDir::new().unwrap();
-    let bw = common::write_bigwig(
-        dir.path(),
-        "a",
-        &[("chr1", 200)],
-        &[("chr1", 0, 200, 42.0)],
-        false,
-    );
-
-    let mut a = BigWigReader::open(&bw).unwrap();
-    let mut b = a.fork().unwrap();
-
-    let mut buf_a: Array1<f32> = Array1::zeros(8);
-    let mut buf_b: Array1<f32> = Array1::zeros(8);
-    a.read_into("chr1", 0, 8, &mut [OutputSinkMut::F32(buf_a.view_mut())])
-        .unwrap();
-    b.read_into("chr1", 0, 8, &mut [OutputSinkMut::F32(buf_b.view_mut())])
-        .unwrap();
-
-    assert_eq!(buf_a, buf_b);
-    assert!(buf_a.iter().all(|&v| v == 42.0));
 }

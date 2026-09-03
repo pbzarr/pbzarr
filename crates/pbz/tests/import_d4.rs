@@ -1,51 +1,16 @@
-//! End-to-end: synthesize a small d4 file via the system `d4tools` (skipped
-//! if unavailable), import it via `pbz import d4`, then read it back with
-//! `pbz stat`.
+//! End-to-end: import the committed d4 fixture under `fixtures/d4/` via
+//! `pbz import d4`, then read it back with `pbz stat`.
 
 use std::ffi::OsString;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
-/// True if `d4tools` is on PATH. With `PBZ_REQUIRE_TOOLS` set (CI), a
-/// missing tool panics instead of letting the test self-skip.
-fn have_d4tools() -> bool {
-    let ok = Command::new("d4tools")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    if !ok && std::env::var_os("PBZ_REQUIRE_TOOLS").is_some() {
-        panic!("PBZ_REQUIRE_TOOLS is set but d4tools is not on PATH");
-    }
-    ok
-}
-
-/// Write a single-contig d4 file by piping a bedGraph through `d4tools
-/// create`. Each `values[i]` covers position `i`.
-fn write_d4(dir: &Path, name: &str, chrom: &str, values: &[i32]) -> PathBuf {
-    let sizes_path = dir.join(format!("{name}.sizes"));
-    std::fs::write(&sizes_path, format!("{chrom}\t{}\n", values.len())).unwrap();
-
-    let bg_path = dir.join(format!("{name}.bedgraph"));
-    let mut bg = std::fs::File::create(&bg_path).unwrap();
-    for (pos, value) in values.iter().enumerate() {
-        writeln!(bg, "{chrom}\t{pos}\t{}\t{value}", pos + 1).unwrap();
-    }
-    drop(bg);
-
-    let d4_path = dir.join(format!("{name}.d4"));
-    let status = Command::new("d4tools")
-        .args(["create", "--genome"])
-        .arg(&sizes_path)
-        .arg(&bg_path)
-        .arg(&d4_path)
-        .status()
-        .unwrap();
-    assert!(status.success(), "d4tools create failed");
-    d4_path
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/d4")
+        .join(name)
 }
 
 fn run_pbz(args: impl IntoIterator<Item = OsString>) -> Output {
@@ -70,17 +35,9 @@ fn labeled(path: &Path, label: &str) -> OsString {
 
 #[test]
 fn import_d4_then_stat_mean() {
-    if !have_d4tools() {
-        eprintln!("skip: d4tools not on PATH");
-        return;
-    }
     let dir = TempDir::new().unwrap();
-    let fixture = write_d4(
-        dir.path(),
-        "fixture",
-        "chr1",
-        &[5, 5, 5, 7, 7, 0, 0, 0, 0, 0],
-    );
+    // chr1 length 1000, bands of 10, band i valued (i % 50) + 1.
+    let d4 = fixture("banded_1k.d4");
 
     let store = dir.path().join("store.pbz");
     let import = run_pbz([
@@ -90,7 +47,7 @@ fn import_d4_then_stat_mean() {
         store.as_os_str().to_owned(),
         "--track".into(),
         "depth".into(),
-        fixture.as_os_str().to_owned(),
+        d4.as_os_str().to_owned(),
         "--no-progress".into(),
     ]);
     assert!(
@@ -102,7 +59,7 @@ fn import_d4_then_stat_mean() {
     let mean = run_pbz(["stat".into(), store.into_os_string(), "depth".into()]);
     assert_eq!(
         stdout_of(&mean),
-        "#chrom\tstart\tend\tmean\nchr1\t0\t10\t2.9\n"
+        "#chrom\tstart\tend\tmean\nchr1\t0\t1000\t25.5\n"
     );
 
     // Two labeled sources sharing the fixture form a 2-column cohort track.
@@ -115,8 +72,8 @@ fn import_d4_then_stat_mean() {
         "--track".into(),
         "depth".into(),
         "--no-progress".into(),
-        labeled(&fixture, "s1"),
-        labeled(&fixture, "s2"),
+        labeled(&d4, "s1"),
+        labeled(&d4, "s2"),
     ]);
     assert!(
         cohort_import.status.success(),
@@ -124,8 +81,8 @@ fn import_d4_then_stat_mean() {
         String::from_utf8_lossy(&cohort_import.stderr)
     );
 
-    // Sorted values are 0,0,0,0,0,5,5,5,7,7; the lower-middle rule (index
-    // (10-1)/2 = 4, 0-based) picks 0 for both identical columns.
+    // Values 1..=50 each cover 20 positions; the lower-middle rule (index
+    // (1000-1)/2 = 499, 0-based) picks 25 for both identical columns.
     let median = run_pbz([
         "stat".into(),
         "-s".into(),
@@ -135,6 +92,6 @@ fn import_d4_then_stat_mean() {
     ]);
     assert_eq!(
         stdout_of(&median),
-        "#chrom\tstart\tend\ts1\ts2\nchr1\t0\t10\t0\t0\n"
+        "#chrom\tstart\tend\ts1\ts2\nchr1\t0\t1000\t25\t25\n"
     );
 }

@@ -3,8 +3,6 @@
 
 mod common;
 
-use std::path::Path;
-
 use pbzarr::import::{Config, Source};
 use pbzarr::{PbzStore, Region};
 use pbzarr_readers::from_bigwig;
@@ -15,25 +13,6 @@ fn banded(chrom: &str, len: u32, base: f32) -> Vec<(&str, u32, u32, f32)> {
     (0..(len / 10))
         .map(|i| (chrom, i * 10, (i + 1) * 10, ((i % 50) + 1) as f32 + base))
         .collect()
-}
-
-/// Count chunk data files under a contig's track array (everything but
-/// `zarr.json`). zarrs does not write chunks that equal the fill value.
-#[allow(dead_code)]
-fn count_chunk_files(array_dir: &Path) -> usize {
-    fn walk(dir: &Path, n: &mut usize) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                walk(&path, n);
-            } else if path.file_name().and_then(|s| s.to_str()) != Some("zarr.json") {
-                *n += 1;
-            }
-        }
-    }
-    let mut n = 0;
-    walk(array_dir, &mut n);
-    n
 }
 
 #[test]

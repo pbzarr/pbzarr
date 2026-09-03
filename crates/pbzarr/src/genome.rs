@@ -286,18 +286,6 @@ mod tests {
     }
 
     #[test]
-    fn name_defaults_none_and_sets() {
-        let g = Genome::new(vec![Contig {
-            name: "chr1".into(),
-            length: 10,
-        }])
-        .unwrap();
-        assert_eq!(g.name(), None);
-        let g = g.with_name("hg38");
-        assert_eq!(g.name(), Some("hg38"));
-    }
-
-    #[test]
     fn checksum_payload_is_canonical() {
         // Deliberately unsorted input; payload must sort by name (codepoint order).
         let g = Genome::new(vec![

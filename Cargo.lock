@@ -1861,7 +1861,7 @@ checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "pbz"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1871,6 +1871,9 @@ dependencies = [
  "log",
  "ndarray",
  "noodles-bgzf 0.48.0",
+ "noodles-core",
+ "noodles-csi 0.57.0",
+ "noodles-tabix",
  "pbzarr",
  "pbzarr-readers",
  "rayon",
@@ -1879,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "pbzarr"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -1900,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "pbzarr-python"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "pbzarr",
  "pbzarr-readers",
@@ -1909,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "pbzarr-readers"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bigtools",

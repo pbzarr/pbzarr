@@ -1,5 +1,5 @@
 //! Depth-walk expectations, hand-computed from the `bam_common` fixture. See
-//! `bam_common::write_sam`'s doc comment for the per-record table this file's
+//! `bam_common::fixture`'s doc comment for the per-record table this file's
 //! expectations are derived from.
 
 mod bam_common;
@@ -57,10 +57,7 @@ fn walk_sub_window(
 /// single knob is expected to have; the rest of the fixture is untouched.
 #[test]
 fn depth_single_knob_filter_permutations() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
+    let fx = bam_common::fixture();
 
     struct Case {
         name: &'static str,
@@ -140,10 +137,7 @@ fn depth_single_knob_filter_permutations() {
 /// r8b supplies it -- so the same expectation pins both filter settings.
 #[test]
 fn del_run_does_not_claim_overlap_slot_when_deletions_uncounted() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some(bam) = bam_common::del_overlap_bam(dir.path()) else {
-        return;
-    };
+    let bam = bam_common::del_overlap_bam();
 
     let mut expected = vec![0i32; 60];
     for v in &mut expected[10..35] {
@@ -184,10 +178,7 @@ fn del_run_does_not_claim_overlap_slot_when_deletions_uncounted() {
 /// `ProperOnly` here but for a different reason (dedup is off entirely).
 #[test]
 fn overlap_mode_gates_on_proper_pair_flag() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some(bam) = bam_common::improper_pair_overlap_bam(dir.path()) else {
-        return;
-    };
+    let bam = bam_common::improper_pair_overlap_bam();
 
     let mut expected_deduped = vec![0i32; 60];
     for v in &mut expected_deduped[10..45] {
@@ -237,10 +228,7 @@ fn overlap_mode_gates_on_proper_pair_flag() {
 /// materializes 0xFF placeholder scores.
 #[test]
 fn qual_star_record_counts_at_every_min_bq() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
+    let fx = bam_common::fixture();
 
     for min_bq in [0u8, 30, 255] {
         let filter = DepthFilter {
@@ -280,10 +268,7 @@ fn qual_star_record_counts_at_every_min_bq() {
 /// all-T), not into `n`: the base is known even when its quality isn't.
 #[test]
 fn qual_star_record_tallies_bases_in_composition() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
+    let fx = bam_common::fixture();
     let filter = DepthFilter {
         min_bq: 30,
         ..DepthFilter::default()
@@ -341,10 +326,7 @@ fn walk_fields(
 /// order-independent one.
 #[test]
 fn composition_depth_matches_depth_mode_across_modes() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some(bam) = bam_common::mixed_overlap_bam(dir.path()) else {
-        return;
-    };
+    let bam = bam_common::mixed_overlap_bam();
 
     const LEN: u64 = 120;
     for overlap in [OverlapMode::None, OverlapMode::ProperOnly, OverlapMode::All] {
@@ -389,10 +371,7 @@ fn composition_depth_matches_depth_mode_across_modes() {
 ///   abs 40-44: r1b + r2 (M start) -> depth 2
 #[test]
 fn depth_sub_window_clips_ops_and_preserves_overlap_gating() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
+    let fx = bam_common::fixture();
     let depth = walk_sub_window(&fx.bam, &DepthFilter::default(), 27, 45);
 
     let mut expected = vec![2i32; 3]; // abs 27,28,29
@@ -404,8 +383,8 @@ fn depth_sub_window_clips_ops_and_preserves_overlap_gating() {
 
 /// A 20M paired read at `start` whose mate starts at `mate_start`, built
 /// directly rather than through a fixture so the pairing state machine can be
-/// driven with record shapes samtools won't write (an empty qname, or a
-/// hundred half-present pairs).
+/// driven with record shapes samtools won't write (a hundred half-present
+/// pairs, or a `SEQ = *` record with a non-`*` QUAL).
 fn synthetic_read(qname: &str, flags: u16, start: u64, mate_start: i64) -> AlignedRead {
     AlignedRead {
         flags,
@@ -419,46 +398,6 @@ fn synthetic_read(qname: &str, flags: u16, start: u64, mate_start: i64) -> Align
         seq: vec![b'A'; 20],
         qual: vec![30u8; 20],
     }
-}
-
-/// Unnamed records (SAM `QNAME = *`) all hash to the same key, so pairing
-/// them would let unrelated reads consume each other's claims. Two nameless
-/// "pairs" must therefore count as four independent reads.
-#[test]
-fn nameless_records_never_pair() {
-    let reads = [
-        synthetic_read("", 99, 10, 25),
-        synthetic_read("", 99, 10, 25),
-        synthetic_read("", 147, 25, 10),
-        synthetic_read("", 147, 25, 10),
-    ];
-
-    let filter = DepthFilter::default();
-    let mut acc = Accumulators::new(1, 60);
-    let mut mates = MateBuffer::default();
-    for read in &reads {
-        walk_record(
-            read,
-            0,
-            60,
-            &filter,
-            ImportMode::Depth,
-            &mut acc,
-            &mut mates,
-        );
-    }
-
-    let mut expected = vec![0i32; 60];
-    for v in &mut expected[10..25] {
-        *v = 2;
-    }
-    for v in &mut expected[25..30] {
-        *v = 4;
-    }
-    for v in &mut expected[30..45] {
-        *v = 2;
-    }
-    assert_eq!(acc.fields[0], expected);
 }
 
 /// A parked read whose mate never arrives must not sit in the buffer for the
@@ -498,10 +437,7 @@ fn parked_entries_drain_once_the_sweep_passes_their_mate() {
 /// different depths depending on its container.
 #[test]
 fn nameless_records_never_pair_on_either_backend() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some((bam, cram, fasta)) = bam_common::nameless_overlap_pair(dir.path()) else {
-        return;
-    };
+    let (bam, cram, fasta) = bam_common::nameless_overlap_pair();
 
     // Four independent 20M reads: two at [10,30), two at [25,45).
     let mut expected = vec![0i32; 60];
@@ -583,10 +519,7 @@ fn seq_star_record_counts_depth_and_tallies_n() {
 /// the leading window is the uncovered one.
 #[test]
 fn read_windows_matches_read_into_and_reports_coverage() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
+    let fx = bam_common::fixture();
     let mut reader =
         BamReader::open(&fx.bam, None, ImportMode::Depth, DepthFilter::default()).unwrap();
     let len = 100u64;
@@ -685,10 +618,7 @@ fn depth_with_fields(
 /// produces must match the full decode position for position.
 #[test]
 fn depth_only_decode_matches_full_decode_on_bam() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
+    let fx = bam_common::fixture();
     let full = depth_with_fields(&fx.bam, None, RecordFields::Full);
     let depth_only = depth_with_fields(&fx.bam, None, RecordFields::DepthOnly);
     assert_eq!(full, expected_default().to_vec());
@@ -703,10 +633,7 @@ fn depth_only_decode_matches_full_decode_on_bam() {
 /// The depth parity above is what shows the CIGAR survives the mask.
 #[test]
 fn depth_only_decode_matches_full_decode_on_cram() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let Some(fx) = bam_common::fixture(dir.path()) else {
-        return;
-    };
+    let fx = bam_common::fixture();
     let reference = Some(fx.fasta.as_path());
     let full = depth_with_fields(&fx.cram, reference, RecordFields::Full);
     let depth_only = depth_with_fields(&fx.cram, reference, RecordFields::DepthOnly);

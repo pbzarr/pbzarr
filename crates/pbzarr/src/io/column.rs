@@ -104,17 +104,6 @@ mod tests {
     }
 
     #[test]
-    fn bool_accepts_zero_one_and_words() {
-        let mut buf = Array1::<bool>::from_elem(4, false);
-        {
-            let mut s = ColumnSinkMut::Bool(buf.view_mut());
-            s.fill_run(0, 2, "1").unwrap();
-            s.fill_run(2, 4, "false").unwrap();
-        }
-        assert_eq!(buf.to_vec(), vec![true, true, false, false]);
-    }
-
-    #[test]
     fn f32_parse_error_is_reported() {
         let mut buf = Array1::<f32>::zeros(3);
         let mut s = ColumnSinkMut::F32(buf.view_mut());
@@ -141,5 +130,7 @@ mod tests {
         check_parse!(F32, f32, "1.5", 1.5);
         check_parse!(F64, f64, "1.5", 1.5);
         check_parse!(Bool, bool, "true", true);
+        check_parse!(Bool, bool, "1", true);
+        check_parse!(Bool, bool, "0", false);
     }
 }

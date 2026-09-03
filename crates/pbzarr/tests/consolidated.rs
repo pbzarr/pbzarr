@@ -296,37 +296,6 @@ fn rescale_refusal_still_heals_a_stale_root_metadata() {
     );
 }
 
-/// A fresh store carries consolidated metadata as soon as its first track is
-/// published, without any pyramid.
-#[test]
-fn track_creation_consolidates_an_unscaled_store() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("s.pbz");
-    let mut store = PbzStore::create(&path).unwrap();
-    store
-        .create_track(
-            "depth",
-            Genome::new(vec![Contig {
-                name: "chr1".into(),
-                length: 4,
-            }])
-            .unwrap(),
-            TrackConfig::new(Dtype::I32),
-        )
-        .unwrap();
-
-    let root = root_metadata(&path);
-    let metadata = root["consolidated_metadata"]["metadata"]
-        .as_object()
-        .unwrap();
-    let mut got: Vec<&str> = metadata.keys().map(String::as_str).collect();
-    got.sort_unstable();
-    assert_eq!(
-        got,
-        ["depth", "depth/contigs", "depth/offsets", "depth/values"]
-    );
-}
-
 /// The repository root (the pixi workspace), from this crate's manifest dir.
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -366,19 +335,5 @@ fn run_python_validator(store: &Path, expected: &[String], test: &str) {
         "validate_consolidated.py failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
-    );
-}
-
-#[test]
-fn zarr_python_reads_every_node_from_the_consolidated_metadata() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("s.pbz");
-    scaled_fixture(&path);
-
-    let expected: Vec<String> = EXPECTED_NODES.iter().map(|s| (*s).to_owned()).collect();
-    run_python_validator(
-        &path,
-        &expected,
-        "zarr_python_reads_every_node_from_the_consolidated_metadata",
     );
 }

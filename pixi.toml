@@ -20,12 +20,13 @@ check = { depends-on = ["fmt-check", "clippy", "test"] }
 clean = "cargo clean"
 doc = "cargo doc --workspace --no-deps --open"
 
-# --- dev feature: tooling for running the import e2e tests ---
-[feature.dev.dependencies]
-# osx-arm64 has 0.3.11; linux-64/osx-64 ship 0.3.10. Pin to the 0.3 line.
+# --- fixtures feature: tools for regenerating the committed fixtures/ tree ---
+[feature.fixtures.dependencies]
 d4tools = ">=0.3.11.post0,<0.4"
-htslib = ">=1.24,<2"
 samtools = ">=1.24,<1.25"
+
+[feature.fixtures.tasks]
+regen-fixtures = "bash scripts/regen_fixtures.sh"
 
 # --- validate feature: cross-language xarray round-trip ---
 [feature.validate.dependencies]
@@ -62,5 +63,6 @@ ipykernel = ">=7.2.0,<8"
 
 # --- environments ---
 [environments]
-default = { features = ["dev", "validate", "wheel"], solve-group = "default" }
-example = { features = ["dev", "validate", "wheel", "example"], solve-group = "default" }
+default = { features = ["validate", "wheel"], solve-group = "default" }
+fixtures = { features = ["fixtures"], solve-group = "default" }
+example = { features = ["validate", "wheel", "example"], solve-group = "default" }

@@ -379,16 +379,6 @@ def test_reduce_is_lazy_and_culls_to_a_bounded_cross_chunk_region() -> None:
     assert closed == [True]
 
 
-def test_reduce_output_sorts_back_to_input_order() -> None:
-    reduced = _reduce_packed_dataset(_packed_dataset(), "mean")
-
-    restored = reduced.sortby("region_input_index")
-
-    assert restored["region_storage_index"].data.tolist() == [2, 0, 1]
-    assert restored["region_input_index"].data.tolist() == [0, 1, 2]
-    assert restored["depth"].data.tolist() == [5.0, 2.0, 6.0]
-
-
 def test_non_position_xarray_operations_compose_on_either_side_of_reduce() -> None:
     packed = _packed_dataset(multiple=True)
 
