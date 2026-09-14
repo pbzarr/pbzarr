@@ -21,9 +21,12 @@ pbzarr-readers = { path = "../pbzarr-readers" }
 rayon = "1"
 
 [dev-dependencies]
+# Synthesize tiny BigWig fixtures in-process, matching the reader tests.
+bigtools = { version = "0.5.8", default-features = false, features = ["read", "write"] }
 ndarray = "0.17"
 noodles-bgzf = { version = "0.48", features = ["libdeflate"] }
 noodles-core = "0.20"
 noodles-csi = "0.57"
 noodles-tabix = "0.63"
 tempfile = "3"
+tokio = { version = "1", default-features = false, features = ["rt"] }

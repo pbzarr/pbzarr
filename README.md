@@ -119,6 +119,34 @@ pbzarr.import_bed(
 
 BED imports need a `.fai` or chromosome-sizes file because BED does not record chromosome lengths.
 
+## CLI examples
+
+Import a bigWig file into a `signal` track:
+
+```sh
+pbz import bigwig -o signal.pbz --track signal sample.bw
+```
+
+The import reads chromosome lengths from the bigWig header and stores values as `float32`. Uncovered bases contain `NaN`.
+
+Import several files as labeled columns:
+
+```sh
+pbz import bigwig -o cohort.pbz --track signal -c sample brain.bw:brain liver.bw:liver
+```
+
+All sources must describe the same genome. Without explicit labels, the import uses each file's stem as its column label.
+
+The command accepts the same import options as `pbz import d4`. These include `--file-list`, `--threads`, chunk and shard sizes, `--codecs`, `--scales`, and `--no-progress`.
+
+Preview the tracks and storage layout without writing a store:
+
+```sh
+pbz import bigwig -o cohort.pbz --track signal --file-list sources.tsv --dry-run
+```
+
+The source list contains one path per line, optionally followed by a tab and a label. If any source has a label, all sources must have labels.
+
 ## Format
 
 A `.pbz` collection is a Zarr v3 directory. Each child directory is a track.

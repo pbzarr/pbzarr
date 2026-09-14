@@ -16,10 +16,10 @@ use pbzarr::import::{
 use pbzarr::io::{Dtype, ValueReader as _};
 use pbzarr::{ExplicitArraySpec, Genome, PbzStore, ScaleConfig};
 use pbzarr_readers::{
-    BamReader, BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, D4Reader, DepthFilter,
-    ImportMode, InferRows, OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam,
-    from_bed_matrix, from_d4, infer_bed_dtypes, infer_bed_dtypes_for_sources, plan_bed_schema,
-    read_bed_layout,
+    BamReader, BedColumnSpec, BedImportOptions, BedSchema, BigWigReader, ColumnSelector, D4Reader,
+    DepthFilter, ImportMode, InferRows, OverlapMode, column_index_by_name, execute_bed_schema_plan,
+    from_bam, from_bed_matrix, from_bigwig, from_d4, infer_bed_dtypes,
+    infer_bed_dtypes_for_sources, plan_bed_schema, read_bed_layout,
 };
 
 mod fmt;
@@ -152,6 +152,9 @@ enum ImportCommand {
     Bam(BamArgs),
     /// Import per-base depth from d4 files.
     D4(D4Args),
+    /// Import per-base float32 signal from bigWig files (uncovered bases are NaN).
+    #[command(name = "bigwig")]
+    BigWig(BigWigArgs),
 }
 
 #[derive(Debug, Args)]
@@ -549,6 +552,32 @@ struct D4Options {
     track: String,
 }
 
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz import bigwig -o signal.pbz --track signal sample.bw\n  pbz import bigwig -o cohort.pbz --track signal -c sample brain.bw:brain liver.bw:liver"
+)]
+struct BigWigArgs {
+    #[command(flatten)]
+    global: GlobalOptions,
+    #[command(flatten)]
+    import: ImportOptions,
+    #[command(flatten)]
+    bigwig: BigWigOptions,
+}
+
+#[derive(Debug, Args)]
+struct BigWigOptions {
+    /// PBZ output store. It is created when absent.
+    #[arg(short('o'), long)]
+    output: PathBuf,
+    #[command(flatten)]
+    input: ImportInputOptions,
+    /// Output track name.
+    #[arg(long)]
+    track: String,
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::View(args) => view(args),
@@ -557,6 +586,7 @@ fn main() -> Result<()> {
             ImportCommand::Bed(args) => import_bed(args),
             ImportCommand::Bam(args) => import_bam(args),
             ImportCommand::D4(args) => import_d4(args),
+            ImportCommand::BigWig(args) => import_bigwig(args),
         },
         Command::Scale(args) => scale_cmd(args),
     }
@@ -1190,6 +1220,66 @@ fn import_d4(args: D4Args) -> Result<()> {
 
     debug!(
         "d4 import wrote {} bytes across {} contig(s)",
+        report.bytes_written, report.contigs_written
+    );
+    println!(
+        "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
+        output.display(),
+        report.tasks_completed,
+        report.tasks_skipped
+    );
+    Ok(())
+}
+
+fn import_bigwig(args: BigWigArgs) -> Result<()> {
+    init_logging(&args.global);
+    let sources: Vec<pbzarr::import::Source> = args
+        .bigwig
+        .input
+        .resolve_input()?
+        .into_iter()
+        .map(|source| pbzarr::import::Source {
+            path: source.path,
+            column_label: source.label,
+        })
+        .collect();
+    let n_sources = sources.len();
+    debug!("resolved {n_sources} bigWig source(s)");
+
+    let config = args.import.config(&args.bigwig.track)?;
+    let output = args.bigwig.output;
+
+    if args.import.dry_run {
+        let source = &sources[0];
+        let reader = BigWigReader::open(&source.path)
+            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
+        let source_columns = (n_sources > 1 || config.column_dim.is_some()).then(|| {
+            (
+                config
+                    .column_dim
+                    .clone()
+                    .unwrap_or_else(|| "sample".to_owned()),
+                sources
+                    .iter()
+                    .map(pbzarr::import::Source::label)
+                    .collect::<Vec<_>>(),
+            )
+        });
+        let tracks = vec![PlannedTrack {
+            name: args.bigwig.track.clone(),
+            dtype: Dtype::F32,
+            columns: source_columns,
+        }];
+        print_dry_run(&output, reader.contigs(), &tracks, &config, n_sources);
+        return Ok(());
+    }
+    let mut store = open_or_create(&output)?;
+
+    let report =
+        from_bigwig(&mut store, &args.bigwig.track, &sources, config).context("import bigWig")?;
+
+    debug!(
+        "bigWig import wrote {} bytes across {} contig(s)",
         report.bytes_written, report.contigs_written
     );
     println!(
