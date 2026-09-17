@@ -5,31 +5,25 @@
 
 # pbzarr
 
-## Synopsis
+## What is this?
 
-pbzarr is an array format for per-base genomic data. A track holds one value per base (depth, signal, a mask) for one sample or a whole cohort. A `.pbz` collection groups related tracks.
+pbzarr is a library for storing and analyzing genomic measurements at base-pair resolution. It stores measurements in two-dimensional arrays: one dimension for genomic position, and another for samples or other labels. You can run calculations across either dimension or both.
 
-The arrays are Zarr v3, so xarray, Dask, and other Zarr tools can read them directly. A question such as "mean depth across all samples in these windows" then becomes one array operation.
-
-pbzarr supports:
-
-- fast reads over genomic regions
-- one value or many labeled values at each base
-- compression across samples or other columns
-- parallel calculations with xarray and Dask
-- d4, bigWig, BED, and BAM/CRAM imports
-
-The project provides Rust and Python libraries and the `pbz` command-line tool.
+pbzarr uses [Zarr](https://zarr.dev/), an existing format for compressed arrays. It adds conventions for genomic coordinates and column labels, plus tools to import and analyze the data.
 
 ## Motivation
 
-Many genomic measurements assign one value to every base in a genome: sequencing depth, assay signal, conservation scores, accessibility masks. Formats like d4, bigWig, and BED handle these values well for a single sample. They compress them into a small file and read regions fast.
+Most bioinformatics files (BAM, BED, bigWig) hold data for one sample. And this makes sense, because most primary bionformatics analyses (i.e alignment) are sample independent. But many downstream analyses need comparisons across samples, over the whole genome or in regions of interest. That means opening each sample's files, reading the relevant data, performing computations, and storing the result.
 
-Most analyses, however, involve many samples at once: a population study, a case-control panel, every individual in a resequencing project. With one file per sample, a cohort of 200 samples is 200 files.
+Often these analyses are exploratory. We run them several times as we decide which samples to include, which regions to look at, or where to set a threshold. With a few regions or a small sample set, this is not that big of a deal. But as cohorts and region sets grow, more work goes into reading the files and bringing the measurements together. During exploratory analysis, we can repeat that work every time we ask a slightly different question, even though the underlying measurements have not changed.
 
-Cohort questions are per-position questions across samples: the mean depth at each site, or the sites covered at 10x in at least 90% of samples. Every such question becomes the same loop: open each file, read the same region again, join the results. This loop is slow at genome scale, and its cost increases with each added sample.
+pbzarr builds on the idea that these analyses often need the same two-dimensional array: one dimension for genomic position, and another for samples. pbzarr builds this array for the whole genome once and stores it in compressed chunks using [Zarr](https://zarr.dev/). Each analysis can then read the regions and samples it needs, without rebuilding the array from individual sample files.
 
-pbzarr stores the cohort as one two-dimensional array: one row per base, one column per sample. Values from all samples at a position sit next to each other on disk, so they compress together. Per-position questions become array operations that run in parallel across all positions and samples.
+This also has a few useful side effects:
+
+- [Xarray](https://docs.xarray.dev/en/stable/user-guide/data-structures.html) lets us attach genomic positions, sample names, and other labels to the dimensions, and organize different measurements together.
+- [Dask](https://docs.dask.org/en/stable/array.html) lets us run calculations in parallel, on one machine or across a cluster.
+- [Zarr](https://zarr.readthedocs.io/en/stable/user-guide/storage/) supports local and cloud storage. We can read the chunks we need from the cloud without downloading the whole dataset.
 
 ## Data model
 
