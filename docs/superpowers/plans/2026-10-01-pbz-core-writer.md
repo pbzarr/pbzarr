@@ -210,7 +210,7 @@ with xr.open_zarr(output, chunks=None, consolidated=False) as ds:
 - [x] Record actual results and supported limits in VALIDATION.md/RUST_CLI.md;
   update the proposal example to show the existing builder targeting Dataset.
 - [x] Commit `test: verify core imports with native Xarray`.
-- [ ] Run one fresh final review, fix material findings with regression tests,
+- [x] Run one fresh final review, fix material findings with regression tests,
   and rerun affected checks. No merge/push/release is part of this task.
 
 ## Self-review
@@ -235,3 +235,22 @@ Implementation rulings:
 * The initial success fixture used shard `[8,3]` with subchunk `[4,2]`, which
   native Zarr rejects. The valid fixture was corrected and the non-divisible
   case became a preflight rejection test. This follows native codec validation.
+
+Final review of d4d8cfc..dec1856 found no actionable findings. The reviewer
+inspected production changes, tests, the native-Xarray harness, and the rulings;
+it did not repeat the executed checks. No corrective pass was needed.
+
+Final scope rulings:
+
+* Accept the exclusions for Task 3 failure hardening, concurrency, CLI/Python
+  migration, append/replacement, pyramids, additional import dtypes and nD
+  authoring. They follow the approved scope; later milestones must supply any
+  such capability. This implementation promises none.
+* Keep the separately reviewed baseline Dataset reader and existing reader-test
+  Clippy violations outside this review. A baseline defect would need separate
+  investigation.
+* Keep the private Track adapter, as required by the minimal-change direction.
+  Future group-specific Track changes require adapter maintenance.
+
+Tasks 1, 2, and 4 are complete; Task 3 is skipped. Branch and worktree are
+preserved, with no merge, push, or release.
