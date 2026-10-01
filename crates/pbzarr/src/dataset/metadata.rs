@@ -119,9 +119,9 @@ pub(super) fn catalog(
         return Err(PbzError::Metadata("R1: expected Zarr v3 root group".into()));
     }
     let attrs = &root["attributes"];
-    if !attrs["zarr_conventions"]
+    if attrs["zarr_conventions"]
         .as_array()
-        .is_some_and(|a| a.iter().filter(|c| c["uuid"] == CONVENTION).count() == 1)
+        .is_none_or(|a| a.iter().filter(|c| c["uuid"] == CONVENTION).count() != 1)
     {
         return Err(PbzError::Metadata(
             "R1: missing PBZ convention identity".into(),
@@ -458,22 +458,22 @@ impl Dataset {
             if let Err(e) = serde_json::from_value::<ArrayMetadataV3>(info.metadata.clone()) {
                 report.issue(Some(&info.name), "ZARR", e.to_string(), false);
             }
-            if selected.is_none() {
-                if let Support::Unsupported { reason } = &info.logical_support {
-                    report.issue(Some(&info.name), "encoding", reason, true);
-                }
+            if selected.is_none()
+                && let Support::Unsupported { reason } = &info.logical_support
+            {
+                report.issue(Some(&info.name), "encoding", reason, true);
             }
             let mut genomic = Vec::new();
             for (i, (dim, &size)) in info.dims.iter().zip(&info.shape).enumerate() {
-                if let Some(old) = extents.insert(dim, size) {
-                    if old != size {
-                        report.issue(
-                            Some(&info.name),
-                            "D2",
-                            format!("inconsistent extent for {dim}"),
-                            false,
-                        );
-                    }
+                if let Some(old) = extents.insert(dim, size)
+                    && old != size
+                {
+                    report.issue(
+                        Some(&info.name),
+                        "D2",
+                        format!("inconsistent extent for {dim}"),
+                        false,
+                    );
                 }
                 match GenomicAxis::from_dimension(dim) {
                     Err(e) => report.issue(Some(&info.name), "G1", e.to_string(), false),
@@ -487,15 +487,15 @@ impl Dataset {
                                 false,
                             );
                         }
-                        if let Some(reference) = reference {
-                            if reference.extent(&axis)? != size {
-                                report.issue(
-                                    Some(&info.name),
-                                    "G2",
-                                    format!("wrong extent for {dim}"),
-                                    false,
-                                );
-                            }
+                        if let Some(reference) = reference
+                            && reference.extent(&axis)? != size
+                        {
+                            report.issue(
+                                Some(&info.name),
+                                "G2",
+                                format!("wrong extent for {dim}"),
+                                false,
+                            );
                         }
                     }
                     Ok(None) => {}
@@ -511,10 +511,10 @@ impl Dataset {
             }
         }
         for dim in relevant {
-            if matches!(GenomicAxis::from_dimension(dim), Ok(None)) {
-                if let Err(e) = self.validate_labels(dim) {
-                    report.error(Some(dim), "D3", e)?;
-                }
+            if matches!(GenomicAxis::from_dimension(dim), Ok(None))
+                && let Err(e) = self.validate_labels(dim)
+            {
+                report.error(Some(dim), "D3", e)?;
             }
         }
         Ok(report)

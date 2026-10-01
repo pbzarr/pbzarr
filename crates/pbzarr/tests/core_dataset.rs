@@ -1,3 +1,5 @@
+// Each range selects one axis; a single range intentionally describes rank one.
+#![allow(clippy::single_range_in_vec_init)]
 use pbzarr::PbzError;
 use pbzarr::dataset::{Dataset, FORMAT_VERSION, Role, Support};
 use serde_json::{Value, json};
@@ -405,4 +407,192 @@ fn integer_missing_sentinel_written_as_json_float_is_still_missing() {
     m["attributes"]["_FillValue"] = json!(5.0);
     put(&s, "contig_length/zarr.json", m);
     has_rule(s, "R6");
+}
+
+fn read_fixture() -> (ReadableWritableListableStorage, Trace) {
+    let (s, log) = fixture();
+    let mut m = metadata(&[12, 3], &["position", "sample"], "uint16");
+    m["chunk_grid"]["configuration"]["chunk_shape"] = json!([4, 3]);
+    put(&s, "depth/zarr.json", m);
+    values(&s, "depth", &(0..36_u16).collect::<Vec<_>>());
+    put(
+        &s,
+        "threshold/zarr.json",
+        metadata(&[2], &["threshold"], "int64"),
+    );
+    values(&s, "threshold", &[5_i64, 10]);
+    let mut m = metadata(&[12, 3, 2], &["position", "sample", "threshold"], "int8");
+    m["attributes"]["dtype"] = json!("bool");
+    put(&s, "callable/zarr.json", m);
+    values(
+        &s,
+        "callable",
+        &(0..72)
+            .map(|n| i8::from((n / 2) >= if n % 2 == 0 { 5 } else { 10 }))
+            .collect::<Vec<_>>(),
+    );
+    put(
+        &s,
+        "coverage/zarr.json",
+        metadata(&[4, 3], &["bin_4", "sample"], "float32"),
+    );
+    values(
+        &s,
+        "coverage",
+        &(0..12).map(|n| n as f32).collect::<Vec<_>>(),
+    );
+    put(&s, "mean/zarr.json", metadata(&[3], &["sample"], "float64"));
+    values(&s, "mean", &[1.5_f64, 2.5, 3.5]);
+    put(&s, "large_unsigned/zarr.json", metadata(&[], &[], "uint64"));
+    values(&s, "large_unsigned", &[(1_u64 << 53) + 1]);
+    put(&s, "large_signed/zarr.json", metadata(&[], &[], "int64"));
+    values(&s, "large_signed", &[(1_i64 << 53) + 1]);
+    let mut m = metadata(&[12], &["position"], "int16");
+    m["attributes"]["_FillValue"] = json!(-1);
+    put(&s, "missing_count/zarr.json", m);
+    values(
+        &s,
+        "missing_count",
+        &[0_i16, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1],
+    );
+    log.lock().unwrap().clear();
+    (s, log)
+}
+#[test]
+fn reads_selected_values_without_losing_rank_or_integer_precision() {
+    let (s, _) = read_fixture();
+    let ds = Dataset::open_with_storage(s).unwrap();
+    let a = ds.read_raw::<u16>("depth", &[2..4, 1..3]).unwrap();
+    assert_eq!(a.shape(), [2, 2]);
+    assert_eq!(a.iter().copied().collect::<Vec<_>>(), [7, 8, 10, 11]);
+    let a = ds.read_bool("callable", &[2..4, 1..3, 0..2]).unwrap();
+    assert_eq!(a.shape(), [2, 2, 2]);
+    assert_eq!(
+        a.iter().copied().collect::<Vec<_>>(),
+        [true, false, true, false, true, true, true, true]
+    );
+    assert_eq!(
+        ds.read_raw::<f32>("coverage", &[2..4, 0..1])
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [6.0, 9.0]
+    );
+    assert_eq!(
+        ds.read_raw::<f64>("mean", &[1..3])
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [2.5, 3.5]
+    );
+    let a = ds.read_raw::<u64>("large_unsigned", &[]).unwrap();
+    assert!(a.shape().is_empty());
+    assert_eq!(a[ndarray::IxDyn(&[])], (1_u64 << 53) + 1);
+    assert_eq!(
+        ds.read_raw::<i64>("large_signed", &[]).unwrap()[ndarray::IxDyn(&[])],
+        (1_i64 << 53) + 1
+    );
+    assert_eq!(
+        ds.read_raw::<i16>("missing_count", &[0..3])
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [0, 1, -1]
+    );
+}
+#[test]
+fn checks_bounds_and_dtype_before_payload_and_reads_only_selected_chunks() {
+    let (s, log) = read_fixture();
+    let ds = Dataset::open_with_storage(s).unwrap();
+    log.lock().unwrap().clear();
+    assert!(ds.read_raw::<u16>("depth", &[0..13, 0..1]).is_err());
+    assert!(ds.read_raw::<u16>("depth", &[0..1]).is_err());
+    assert!(ds.read_raw::<i16>("depth", &[0..1, 0..1]).is_err());
+    assert!(
+        !String::from_utf8(log.lock().unwrap().clone())
+            .unwrap()
+            .contains("/c")
+    );
+    let a = ds.read_raw::<u16>("depth", &[2..2, 0..3]).unwrap();
+    assert_eq!(a.shape(), [0, 3]);
+    assert!(
+        !String::from_utf8(log.lock().unwrap().clone())
+            .unwrap()
+            .contains("depth/c")
+    );
+    log.lock().unwrap().clear();
+    ds.read_raw::<u16>("depth", &[1..2, 1..2]).unwrap();
+    let trace = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+    assert!(trace.contains("depth/c/0/0"), "{trace}");
+    assert!(
+        !trace.contains("depth/c/1/0") && !trace.contains("depth/c/2/0"),
+        "{trace}"
+    );
+}
+#[test]
+fn masked_bool_is_explicitly_unsupported_but_raw_values_and_neighbors_are_readable() {
+    let (s, _) = read_fixture();
+    let mut m = metadata(&[12], &["position"], "int8");
+    m["attributes"] = json!({"dtype":"bool","_FillValue":0});
+    put(&s, "masked/zarr.json", m);
+    values(&s, "masked", &[0_i8, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]);
+    let mut unknown = metadata(&[12], &["position"], "uint16");
+    unknown["codecs"] = json!([{"name":"unknown"}]);
+    put(&s, "unsupported/zarr.json", unknown);
+    let ds = Dataset::open_with_storage(s).unwrap();
+    assert!(matches!(
+        ds.read_bool("masked", &[0..2]),
+        Err(PbzError::UnsupportedEncoding(_))
+    ));
+    assert_eq!(
+        ds.read_raw::<i8>("masked", &[0..2])
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert!(ds.read_raw::<u16>("depth", &[0..1, 0..1]).is_ok());
+}
+#[test]
+fn validates_read_dependencies_even_without_full_validation() {
+    let (s, _) = read_fixture();
+    values(
+        &s,
+        "sample",
+        &["s1".to_owned(), "s1".to_owned(), "s3".to_owned()],
+    );
+    assert!(matches!(
+        Dataset::open_with_storage(s)
+            .unwrap()
+            .read_raw::<u16>("depth", &[0..1, 0..1]),
+        Err(PbzError::Metadata(_))
+    ));
+}
+#[test]
+fn supports_physical_boolean_values() {
+    let (s, _) = fixture();
+    let mut m = metadata(&[12], &["position"], "bool");
+    m["fill_value"] = json!(false);
+    put(&s, "boolean/zarr.json", m);
+    values(
+        &s,
+        "boolean",
+        &[
+            true, false, true, false, true, false, true, false, true, false, true, false,
+        ],
+    );
+    assert_eq!(
+        Dataset::open_with_storage(s)
+            .unwrap()
+            .read_bool("boolean", &[0..3])
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [true, false, true]
+    );
 }

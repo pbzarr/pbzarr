@@ -108,3 +108,98 @@ pub(super) fn missing(info: &VariableInfo, value: &Value) -> bool {
     };
     integer(value).is_some_and(|v| Some(v) == integer(fill))
 }
+
+use super::ValidationStatus;
+use ndarray::{ArrayD, IxDyn};
+use std::ops::Range;
+use zarrs::array::ElementOwned;
+
+impl Dataset {
+    /// Read physical values in a rectangular selection, preserving all axes.
+    ///
+    /// Missing sentinels, scaling and Xarray logical encodings are not applied.
+    /// Supply one half-open range per stored dimension, or [] for a scalar.
+    /// Handles/reference metadata are cached; reopen after external mutation.
+    pub fn read_raw<T: ElementOwned>(
+        &self,
+        name: &str,
+        ranges: &[Range<u64>],
+    ) -> Result<ArrayD<T>> {
+        let info = self
+            .variables
+            .get(name)
+            .ok_or_else(|| PbzError::Metadata(format!("unknown array: {name}")))?;
+        if ranges.len() != info.shape.len()
+            || ranges
+                .iter()
+                .zip(&info.shape)
+                .any(|(r, &n)| r.start > r.end || r.end > n)
+        {
+            return Err(PbzError::InvalidRegion {
+                message: format!("selection outside {name} shape {:?}", info.shape),
+            });
+        }
+        let shape: Vec<usize> = ranges
+            .iter()
+            .map(|r| {
+                usize::try_from(r.end - r.start).map_err(|_| {
+                    PbzError::Metadata("selection shape exceeds addressable memory".into())
+                })
+            })
+            .collect::<Result<_>>()?;
+        shape
+            .iter()
+            .try_fold(1_usize, |n, &s| n.checked_mul(s))
+            .ok_or_else(|| PbzError::Metadata("selection element count overflow".into()))?;
+        let array = self.array(name)?;
+        T::validate_data_type(array.data_type()).map_err(|e| PbzError::InvalidDtype {
+            dtype: e.to_string(),
+        })?;
+        let report = self.validate_scope(Some(name))?;
+        if report.status != ValidationStatus::Valid {
+            let message = report
+                .issues
+                .iter()
+                .map(|i| format!("{}: {}", i.rule, i.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(if report.status == ValidationStatus::Incomplete {
+                PbzError::UnsupportedEncoding(message)
+            } else {
+                PbzError::Metadata(message)
+            });
+        }
+        if shape.contains(&0) {
+            return ArrayD::from_shape_vec(IxDyn(&shape), Vec::<T>::new())
+                .map_err(|e| PbzError::Metadata(e.to_string()));
+        }
+        array
+            .retrieve_array_subset::<ArrayD<T>>(&ArraySubset::new_with_ranges(ranges))
+            .map_err(|e| PbzError::Store(format!("read {name}: {e}")))
+    }
+    /// Decode physical Boolean or unmasked Xarray int8/dtype="bool" values.
+    /// Missing Boolean encodings require a representation not yet supported here.
+    pub fn read_bool(&self, name: &str, ranges: &[Range<u64>]) -> Result<ArrayD<bool>> {
+        let info = self
+            .variables
+            .get(name)
+            .ok_or_else(|| PbzError::Metadata(format!("unknown array: {name}")))?;
+        if info.attrs().get("_FillValue").is_some_and(|v| !v.is_null()) {
+            return Err(PbzError::UnsupportedEncoding(format!(
+                "{name}: masked Boolean encoding"
+            )));
+        }
+        if let Some(reason) = super::metadata::encoding_limit(info) {
+            return Err(PbzError::UnsupportedEncoding(format!("{name}: {reason}")));
+        }
+        if info.metadata["data_type"] == "bool" {
+            return self.read_raw::<bool>(name, ranges);
+        }
+        if info.metadata["data_type"] == "int8" && info.attrs()["dtype"] == "bool" {
+            return Ok(self.read_raw::<i8>(name, ranges)?.mapv(|v| v != 0));
+        }
+        Err(PbzError::UnsupportedEncoding(format!(
+            "{name}: no supported Boolean encoding"
+        )))
+    }
+}
