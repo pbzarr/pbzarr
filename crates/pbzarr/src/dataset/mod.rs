@@ -2,9 +2,12 @@
 //!
 //! This additive reader does not change format 0.4 or its existing opener.
 mod metadata;
+mod read;
 mod reference;
 use crate::{PbzError, Result};
-pub use metadata::{Role, Support, VariableInfo};
+pub use metadata::{
+    Role, Support, ValidationIssue, ValidationReport, ValidationStatus, VariableInfo,
+};
 pub use reference::{BinInterval, GenomicAxis, Reference};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use zarrs::storage::ReadableWritableListableStorage;
@@ -18,6 +21,8 @@ pub const FORMAT_VERSION: &str = "core-draft-1";
 /// variable's encoding is supported or that its values satisfy PBZ invariants.
 pub struct Dataset {
     storage: ReadableWritableListableStorage,
+    reference_cache: std::sync::OnceLock<Reference>,
+    handles: std::sync::Mutex<BTreeMap<String, Arc<read::ArrayHandle>>>,
     root: serde_json::Value,
     variables: BTreeMap<String, VariableInfo>,
 }
@@ -32,6 +37,8 @@ impl Dataset {
         let (root, variables) = metadata::catalog(&storage)?;
         Ok(Self {
             storage,
+            reference_cache: std::sync::OnceLock::new(),
+            handles: std::sync::Mutex::new(BTreeMap::new()),
             root,
             variables,
         })
