@@ -50,7 +50,7 @@ its own implementation plan against the preceding milestone's working interface.
 | Milestone | Independently testable result |
 | --- | --- |
 | A. Rust reader and conformance | Python's valid example stores can be cataloged, checked, and selectively read in Rust. Invalid examples produce the expected error category. |
-| B. Rust creation and import | Create root reference/coordinates; import existing 1D/2D inputs into root variables; add compatible tracks with preflight before mutation. Rust-written output opens directly in Xarray. Preserve explicit storage configuration. |
+| [B. Rust creation and import](2026-10-01-pbz-core-writer.md) | Create root reference/coordinates; import existing 1D/2D inputs into root variables; add compatible tracks with preflight before mutation. Rust-written output opens directly in Xarray. Preserve explicit storage configuration. |
 | C. CLI | Inspect arbitrary variables; select named dimensions for `view`/`stat`; handle bins as observations; honor missingness; reject unsupported output shapes clearly. |
 | D. Python API and derived writing | Promote Dataset/Track composition, genomic indexing, wrapper-owned windows, native escape/re-entry, resource lifetime, and supported new-track writes. Keep Dask lazy and avoid unnecessary NumPy conversion. |
 | E. Integrated workflow and release | Import → select → callable counts → windows → write → reopen across Rust/Python. Record reads/tasks/memory/write behavior, publish the format version, and reconcile the maintained spec, roadmap, examples, and release docs. |
