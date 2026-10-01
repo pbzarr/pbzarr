@@ -33,9 +33,9 @@ public pending-write context, or generic streaming callback framework is needed.
 
 1. Ordered references or labels differ: reject before destination writes.
 2. A prefix contains chunks without metadata: reject without deleting those bytes.
-3. Metadata persists before an error is returned: retain confirmed output and report uncertainty.
-4. A consolidated store partially completes an import: fresh Xarray must see completed arrays.
-5. Workers remain active after one fails: join before cleanup; preserve existing shard behavior.
+3. Successful imports preserve fill values, codecs, sharding and explicit singleton dimensions.
+4. Adding to a consolidated store succeeds: fresh Xarray must discover the new arrays.
+5. Existing source readers and legacy import paths retain their numerical and scheduling behavior.
 
 ## Public changes
 
@@ -71,10 +71,8 @@ Import::from_readers(readers)?
     .run()?;
 ```
 
-Use private prepared state and a small destination adapter. If structured
-partial-completion reporting needs an error addition, add one PbzError variant
-with original cause, confirmed track names, and unresolved paths; do not
-introduce a separate public writer/report hierarchy.
+Use private prepared state and a small destination adapter. Reuse ordinary
+PbzError propagation; Task 3's recovery and reporting machinery is skipped.
 
 ## Files and ownership
 
@@ -86,7 +84,6 @@ introduce a separate public writer/report hierarchy.
 | crates/pbzarr/src/import/destination.rs | Private adapter exposing the destination operations the engine already uses. |
 | crates/pbzarr/src/import/{routing,engine,mod}.rs | Consume/register the adapter, preserving scheduling and buffers. |
 | crates/pbzarr/src/store.rs or codec_spec.rs | Expose only existing dtype/fill/codec helpers needed for reuse. |
-| crates/pbzarr/src/error.rs | Partial-import details if needed. |
 | crates/pbzarr/tests/core_import.rs | New-layout creation, import, preflight, failure and regression checks. |
 | crates/pbzarr-readers/tests/core_import.rs | Existing file readers targeting the new layout. |
 | crates/pbzarr/examples/write_core_dataset.rs | Small Rust-generated import fixture. |
@@ -175,36 +172,12 @@ assert_eq!(ds.read_raw::<u32>("depth", &[0..12, 0..1])?,
 - [ ] Run `pixi run cargo test -p pbzarr`; expect all new and legacy tests to pass.
 - [ ] Commit `feat: target core datasets with the existing import builder`.
 
-## Task 3: Preserve completed output on failure
+## Task 3: Skipped at the user's request
 
-**Interfaces:** Keep preparation/publication private. Retain the existing
-success Report; errors expose original cause, confirmed tracks and unresolved
-paths. Dataset catalog/caches reflect confirmed writes; uncertain state
-requires reopening before another mutation.
-
-- [ ] Add a storage adapter that can fail a chosen set before, after, or partway
-  through persisting bytes, plus readback/erase failures. Seed existing bytes
-  and assert they are unchanged after each failed operation.
-- [ ] Inject failure at second/zarr.json in a two-track import. Assert first
-  is readable and second is absent after successful cleanup. Inject a source
-  population failure and assert neither new track is published. Run tests
-  before adding the missing publication behavior; expect these assertions to fail.
-- [ ] Preserve the existing population barrier, then publish metadata in request
-  order. Complete dimension coordinates first and retain completed coordinates.
-  Remove stale root consolidation before adding arrays, preserving other root
-  fields. Do not require final consolidation for completed tracks to be visible.
-- [ ] Stop and join workers before deleting owned incomplete paths. Remove
-  incomplete metadata before chunks. On failed metadata set, read back:
-  confirmed intended bytes means complete; confirmed incomplete means cleanup;
-  unreadable outcome means retain and report. Preserve the original error.
-  Attempt prior-root restoration after a partial root overwrite; report failed
-  restoration and stop, without restoring stale consolidation after completion.
-- [ ] Test metadata-write-after-persistence, failed cleanup/readback, root-update
-  failure, preexisting orphan prefixes, and a delayed worker during failure.
-  Prove no writes follow cleanup. Repeat partial success with initial
-  consolidated metadata.
-- [ ] Run `pixi run cargo test -p pbzarr --test core_import`; expect success.
-- [ ] Commit `fix: preserve completed core imports on publication failure`.
+Cleanup, uncertain-write reconciliation, root restoration, fault injection, and
+structured partial-completion reporting are excluded from this implementation.
+Retain ordinary preflight and successful-import metadata publication from Task 2.
+Errors propagate normally; a failed write may leave incomplete output.
 
 ## Task 4: Verify the new layout through native Xarray
 
@@ -230,7 +203,7 @@ with xr.open_zarr(output, chunks=None, consolidated=False) as ds:
 - [ ] Run the new backend/harness tests before the fixture implementation;
   expect the missing new-layout output.
 - [ ] Implement the small example and harness invocation using existing fixture
-  generation/Cargo target discovery. Check partial-publication output through
+  generation/Cargo target discovery. Check additions to consolidated input through
   native Xarray default discovery too. Retain all previous reader conformance.
 - [ ] Run `pixi run validate-core-dataset` and `pixi run check`, then
   `pixi run install-wheel` and `pixi run validate-roundtrip`.
@@ -243,7 +216,6 @@ with xr.open_zarr(output, chunks=None, consolidated=False) as ds:
 ## Self-review
 
 The plan covers required root metadata/coordinates (Task 1), compatible existing
-imports and explicit storage choices (Task 2), the accepted failure behavior
-(Task 3), and cross-language evidence (Task 4). It adds no Rust authoring
+imports and explicit storage choices (Task 2), successful metadata publication (Task 2), and cross-language evidence (Task 4). It adds no Rust authoring
 framework. Wider valid shapes remain covered by the completed reader and
 native Xarray/Zarr authoring. All five Review Focus cases have owning tests.

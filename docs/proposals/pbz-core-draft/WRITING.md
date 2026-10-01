@@ -57,22 +57,12 @@ so native Xarray can discover every completed array without a final
 batch-wide consolidation step. Create a new store's reference arrays before
 publishing its root PBZ metadata; creation requires an empty namespace.
 
-On failure, stop scheduling and join outstanding writes, then attempt cleanup
-only of incomplete paths created by this operation. Remove incomplete array
-metadata before its chunks. Never delete completed or preexisting arrays.
+Task 3's failure-hardening work is skipped at the user's request. Errors propagate
+normally; this milestone does not implement cleanup, uncertain-write readback,
+root restoration, structured partial-completion reporting, or fault-injection
+tests. Failed writes may leave incomplete output. Reopen after an import error.
+The broader failure policy remains design intent, not an implemented guarantee.
 
-A failed metadata write can still have persisted bytes. Read it back:
-confirmed intended metadata after successful population means complete;
-confirmed incomplete new metadata permits cleanup; failed readback means
-uncertain, so preserve and report the affected paths. Keep the original error
-and identify completed tracks and unresolved cleanup/storage outcomes.
-
-Preserve previous root bytes for best-effort restoration after a partial root
-overwrite. If restoration fails, report the uncertain root and stop. Do not
-restore stale consolidation after tracks have completed. Refresh the Dataset
-catalog after known changes; require reopening after an uncertain outcome.
-
-This is ordinary error handling, not a transaction or crash-recovery contract.
 Concurrent writers/readers, append, replacement, pyramids, automatic provenance,
 new source dtypes, and arbitrary-rank Rust authoring are outside this step.
 The [implementation plan](../../superpowers/plans/2026-10-01-pbz-core-writer.md)

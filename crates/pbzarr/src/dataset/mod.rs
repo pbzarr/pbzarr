@@ -4,6 +4,7 @@
 mod metadata;
 mod read;
 mod reference;
+mod write;
 use crate::{PbzError, Result};
 pub use metadata::{
     Role, Support, ValidationIssue, ValidationReport, ValidationStatus, VariableInfo,
