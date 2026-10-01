@@ -37,6 +37,8 @@ numpy = ">=2.0,<3"
 
 [feature.validate.tasks]
 validate-roundtrip = "python scripts/validate_xarray_read.py"
+validate-core-dataset = "python scripts/validate_core_dataset.py"
+dataset-track-poc = "python python/prototypes/dataset_track_poc/demo.py"
 
 # --- wheel feature: build + install + test the Python wheel ---
 [feature.wheel.dependencies]

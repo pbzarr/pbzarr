@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PBZ core draft root attributes",
+  "description": "Validates root attributes only. Array geometry and coordinate contents require a store validator. This is an unpublished proposal.",
+  "type": "object",
+  "required": ["zarr_conventions", "pbz:version", "pbz:reference"],
+  "properties": {
+    "zarr_conventions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/convention"},
+      "contains": {
+        "type": "object",
+        "required": ["uuid"],
+        "properties": {
+          "uuid": {"const": "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c"}
+        }
+      },
+      "minContains": 1,
+      "maxContains": 1
+    },
+    "pbz:version": {"const": "core-draft-1"},
+    "pbz:reference": {
+      "type": "object",
+      "required": ["names", "lengths"],
+      "properties": {
+        "names": {"$ref": "#/$defs/rootArrayName"},
+        "lengths": {"$ref": "#/$defs/rootArrayName"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "rootArrayName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/]+$",
+      "description": "Name of an existing direct root array, subject to Zarr node-name rules."
+    },
+    "convention": {
+      "type": "object",
+      "properties": {
+        "uuid": {"type": "string", "format": "uuid"},
+        "schema_url": {"type": "string", "format": "uri"},
+        "spec_url": {"type": "string", "format": "uri"},
+        "name": {"type": "string"},
+        "description": {"type": "string"}
+      },
+      "anyOf": [
+        {"required": ["uuid"]},
+        {"required": ["schema_url"]},
+        {"required": ["spec_url"]}
+      ],
+      "additionalProperties": false
+    }
+  }
+}

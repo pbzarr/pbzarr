@@ -4,6 +4,21 @@ PBZ is a small Zarr v3 convention for dense, per-base genomic data. The format s
 
 This document describes PBZ v0.4, the current layout and public APIs. Earlier contig-major and wrapper-oriented designs are historical only.
 
+## Development reader
+
+The additive Rust `pbzarr::dataset::Dataset` reads the provisional
+[`core-draft-1` root-Dataset convention](proposals/pbz-core-draft/README.md).
+It catalogs direct root arrays, validates reference and dimension coordinates,
+and reads typed rectangular subsets. `read_raw` preserves physical values and
+missing sentinels; `read_bool` decodes the supported Boolean encodings.
+The module caches metadata and reference geometry, so callers must reopen after
+external changes. It does not provide a concurrent-mutation snapshot.
+
+This reader is an explicit development entry point. The default `PbzStore`,
+CLI, and production Python API still use format 0.4. New-format creation,
+imports, and wrapper integration remain later milestones. Executed checks and
+encoding limits are in the [validation record](proposals/pbz-core-draft/VALIDATION.md).
+
 ## Goals
 
 PBZ makes per-base depth, signal, masks, and similar position-indexed data portable across Rust, Python, and ordinary Zarr tooling. It aims to preserve rank, keep genomic geometry explicit, and make xarray the normal Python read surface.
