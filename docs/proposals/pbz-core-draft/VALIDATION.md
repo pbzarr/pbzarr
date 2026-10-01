@@ -25,11 +25,18 @@ The comparison used `chunks=None` and the existing synthetic corpus at
 `/private/tmp/pbz-core-examples-20260930-9305`; that path is evidence from this
 run, not a test dependency.
 
-**Pending:** fresh generation through `pixi run validate-core-dataset` and
-the unchanged `pixi run validate-roundtrip`. Both stopped at a missing Dask
-import in the declared Pixi environment. Permission to add `dask-core` was
-requested; no dependency installation was inferred. Milestone A is not yet
-fully verified. The new harness generates its own temporary corpus.
+**Complete:** after approval, added `dask-core>=2024.12` to the Pixi
+validation feature and installed the locked dependencies in an independent
+worktree environment. `pixi run validate-core-dataset` generated fresh stores
+and passed all seven valid, sixteen invalid, and one unsupported-version case.
+It compared values, Boolean masks, dimensions, coordinate roles, references,
+bins, and selections; expression construction executed zero Dask tasks.
+
+`pixi run install-wheel` built and installed this worktree's Python extension.
+`pixi run validate-roundtrip` then passed the unchanged format-0.4 check.
+`pixi run check` passed again with 243 Rust tests and one ignored doctest.
+Dask is 2026.8.0; the other recorded versions are unchanged. Milestone A is
+complete. These results do not validate a new-format production writer.
 
 Instrumented in-memory storage observed zero measurement chunk reads during
 opening and validation. A selection from a `[12,3]` uint16 array with `[4,3]`

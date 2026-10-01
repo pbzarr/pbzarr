@@ -16,8 +16,10 @@ promise or prohibit legacy reading. Legacy reading needs a separate support
 decision. A reader must identify the format before it interprets the store.
 It must report an unsupported format explicitly.
 
-The current code, fixtures, and release roadmap still describe format 0.4.
-These decisions do not claim that the new format or APIs already work.
+The default entry points and release roadmap still use format 0.4. The additive
+`pbzarr::dataset::Dataset` reader now implements draft-format inspection,
+validation, and typed positional reads; see the [validation record](VALIDATION.md).
+Writing, imports, and CLI integration below remain later milestones.
 
 ## 1. Generic Rust storage with existing array infrastructure
 

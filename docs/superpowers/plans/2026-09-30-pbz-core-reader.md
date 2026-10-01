@@ -1,6 +1,6 @@
 # PBZ Core Reader Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make Rust inspect, validate, and read the new root-Dataset layout,
 including Python-written multidimensional, binned, non-genomic, and scalar data.
@@ -171,7 +171,7 @@ or dropping axes.
 consumes existing `Contig` and `RegionQuery` only. Do not use the order-insensitive
 genome checksum as reference identity or call unchecked prefix-offset arithmetic.
 
-- [ ] Add this public test and the corresponding overflow/empty cases:
+- [x] Add this public test and the corresponding overflow/empty cases:
 
 ```rust
 use pbzarr::{Contig, RegionQuery};
@@ -202,18 +202,18 @@ fn rejects_reference_extent_overflow() {
 }
 ```
 
-- [ ] Run `pixi run cargo test -p pbzarr --test core_reference`; record the
+- [x] Run `pixi run cargo test -p pbzarr --test core_reference`; record the
   expected missing-interface failure before implementation.
-- [ ] Implement prefix offsets with `checked_add`; reject empty/duplicate names
+- [x] Implement prefix offsets with `checked_add`; reject empty/duplicate names
   and lengths/totals above `i64::MAX`. Calculate ceil division as
   `length / width + u64::from(length % width != 0)` without adding `width - 1`.
   Preserve reference order. Check query bounds before mapping intersecting bins.
-- [ ] Add checks for `[]`, `[0,5,0]`, widths `1` and larger than a contig,
+- [x] Add checks for `[]`, `[0,5,0]`, widths `1` and larger than a contig,
   a query ending exactly at a bin boundary, unknown contigs, and out-of-bounds
   rows. Empty genomic axes accept no nonempty region. Reject empty genomic
   queries explicitly; raw positional selections in Task 4 can be empty. No
   empty query may select a bin merely by rounding.
-- [ ] Re-run the focused test; format the new files. Commit only this task's
+- [x] Re-run the focused test; format the new files. Commit only this task's
   files as `feat: add checked core reference geometry`.
 
 ## Task 2: Metadata-only root catalog
@@ -226,7 +226,7 @@ fn rejects_reference_extent_overflow() {
 and `PbzError::UnsupportedEncoding(String)` so callers can distinguish failure
 categories without parsing prose.
 
-- [ ] Use a local temporary store with hand-authored root/array `zarr.json`
+- [x] Use a local temporary store with hand-authored root/array `zarr.json`
   files, no measurement chunks, and the accepted three root attributes. Add an
   assertion that the resulting catalog has `depth` as Measurement and `contig`
   plus `contig_length` as Coordinate. Repeat with `sequence`/`sequence_length`.
@@ -239,21 +239,21 @@ assert!(matches!(dataset.variables()["contig_length"].role, Role::Coordinate));
 assert_eq!(dataset.variables()["depth"].dims, ["position", "sample"]);
 ```
 
-- [ ] Run `pixi run cargo test -p pbzarr --test core_dataset` and confirm these
+- [x] Run `pixi run cargo test -p pbzarr --test core_dataset` and confirm these
   new assertions fail before the reader exists.
-- [ ] Read direct root array metadata without constructing a decoded Zarr
+- [x] Read direct root array metadata without constructing a decoded Zarr
   handle for every measurement. Detect unsupported codecs/dtypes per variable;
   retain raw metadata and the variable's name instead of omitting it. Validate
   the root JSON envelope and convention UUID before interpreting references.
   Recognize dimension coordinates plus root/variable `coordinates` declarations
   according to native Xarray encoding. Do not assume names such as `values`,
   `contigs`, or `offsets` identify arrays in this new format.
-- [ ] Add a `ReadableStorageTraits` delegating test wrapper that records requested
+- [x] Add a `ReadableStorageTraits` delegating test wrapper that records requested
   keys using `Arc<Mutex<Vec<String>>>`; forward listing/size operations to its
   MemoryStore. Assert catalog opening reads metadata keys only, including when
   an unrelated measurement has an unknown codec name. Test a scalar without
   `dimension_names`, nested groups outside the root catalog, and unknown versions.
-- [ ] Re-run focused tests and `pixi run cargo test -p pbzarr --test store_roundtrip`
+- [x] Re-run focused tests and `pixi run cargo test -p pbzarr --test store_roundtrip`
   to verify current-format opening still behaves as before. Commit as
   `feat: catalog root dataset variables without reading measurements`.
 
@@ -268,7 +268,7 @@ checked geometry and Task 2's catalog. Reference/label buffers may be loaded;
 measurement and per-position auxiliary buffers may not be materialized merely
 to validate metadata/geometry. Report uncheckable content as incomplete.
 
-- [ ] Add table-driven public validation assertions for conformance rules R1–R6,
+- [x] Add table-driven public validation assertions for conformance rules R1–R6,
   D1–D4 and G1–G4 using small temporary metadata/coordinate stores. Include the
   case where `contig_length` has correct values but is classified as a track.
 
@@ -278,15 +278,15 @@ assert!(matches!(report.status, ValidationStatus::Invalid));
 assert!(report.issues.iter().any(|issue| issue.rule == "R3"));
 ```
 
-- [ ] Run `pixi run cargo test -p pbzarr --test core_dataset` and confirm a real
+- [x] Run `pixi run cargo test -p pbzarr --test core_dataset` and confirm a real
   missing validation behavior before adding it.
-- [ ] Load reference names as strings and reference lengths as signed/unsigned
+- [x] Load reference names as strings and reference lengths as signed/unsigned
   integers. Check missing declarations before conversion; never use `f64` as an
   intermediate for lengths or integer labels. Reuse checked `Reference::new`.
   Validate numeric labels in their stored domain, handling signed/unsigned
   values exactly and floating `-0.0`/`0.0` as the same label; NaN labels are missing.
   Repeated values are permitted in ordinary auxiliary coordinates.
-- [ ] Validate all dimension extents from metadata, canonical bin spelling,
+- [x] Validate all dimension extents from metadata, canonical bin spelling,
   contig-local bin totals, one leading genomic axis per measurement, and absence
   of stored genomic dimension coordinates. Treat absent scalar dimension names
   as `[]`; reject missing names on nonscalars. Ordinary genomic auxiliary
@@ -297,12 +297,12 @@ assert!(report.issues.iter().any(|issue| issue.rule == "R3"));
   Thus a very large canonical width is not incorrectly rejected or conflated
   with a different dimension name. Add a one-bin-per-nonempty-contig case with
   a width greater than `u64::MAX`.
-- [ ] Add cases with labels `2**53` and `2**53 + 1`, missing-sentinel labels,
+- [x] Add cases with labels `2**53` and `2**53 + 1`, missing-sentinel labels,
   two same-length but differently ordered references, a `bin_1` variable,
   repeated auxiliary labels, and an unsupported required coordinate codec.
   Unsupported dependencies yield `Incomplete`, not `Valid`; a confirmed violated
   invariant yields `Invalid` even when some other encoding is unsupported.
-- [ ] Run the focused tests and confirm measurement-chunk read counts remain
+- [x] Run the focused tests and confirm measurement-chunk read counts remain
   zero. Commit as `feat: validate core dataset coordinates and geometry`.
 
 ## Task 4: Typed reads with bounded selections
@@ -315,7 +315,7 @@ validated variable metadata and cached Zarr handles. The existing zarrs
 `Element::validate_data_type` checks the requested physical type, and
 `retrieve_array_subset::<ArrayD<T>>` performs the actual storage access.
 
-- [ ] Add tests reading a small `(position, sample, threshold)` subset, an
+- [x] Add tests reading a small `(position, sample, threshold)` subset, an
   independent bin array, a non-genomic vector, and a scalar. Write fixture
   values with existing `zarrs::ArrayBuilder` in the test; this is not a new
   production writer interface. Pin the raw-value contract:
@@ -330,21 +330,21 @@ let part = dataset.read_raw::<u16>("depth", &[2..4, 1..3]).unwrap();
 assert_eq!(part.shape(), &[2, 2]);
 ```
 
-- [ ] Run `pixi run cargo test -p pbzarr --test core_dataset` and record the
+- [x] Run `pixi run cargo test -p pbzarr --test core_dataset` and record the
   expected failure before implementing read methods.
-- [ ] Construct one Zarr `ArraySubset` range per named axis, check range count
+- [x] Construct one Zarr `ArraySubset` range per named axis, check range count
   and bounds before I/O, and preserve requested rank. Use the zero-axis subset
   for scalars. Return correctly shaped empty arrays for empty ranges without
   reading measurement chunks. Cache opened handles without caching all values.
-- [ ] Implement `read_bool` for physical bool and unmasked Xarray `int8` Boolean
+- [x] Implement `read_bool` for physical bool and unmasked Xarray `int8` Boolean
   encoding; do not mask then cast a NaN to bool. Reject masked logical Booleans
   explicitly. Raw physical reads remain possible by their explicit contract.
   An unsupported measurement must not prevent reading a supported neighbor.
-- [ ] Check storage keys for a small selection against a multi-chunk array:
+- [x] Check storage keys for a small selection against a multi-chunk array:
   only intersecting chunks are read in an unsharded fixture; a sharded fixture
   may fetch its containing shard, which must be reported separately. Test a
   wrong requested Rust element type and out-of-bounds selection before access.
-- [ ] Re-run tests, then `pixi run cargo clippy -p pbzarr --all-targets -- -D warnings`.
+- [x] Re-run tests, then `pixi run cargo clippy -p pbzarr --all-targets -- -D warnings`.
   Commit as `feat: read core arrays without rank or integer precision loss`.
 
 ## Task 5: Cross-language conformance command and completion evidence
@@ -359,7 +359,7 @@ values from recognized fixture variables. Status is one of `valid`, `invalid`,
 `incomplete`, or `unsupported_version`. Expected fixture errors produce a report;
 unexpected I/O errors exit nonzero. JSON integers must remain integers.
 
-- [ ] Add a Python integration script that imports the proposal's `examples.py`
+- [x] Add a Python integration script that imports the proposal's `examples.py`
   by its file path, runs `generate` inside a TemporaryDirectory, and invokes
   the Rust probe for each manifest entry. Compare decoded results with NumPy,
   rather than merely checking that Rust exited successfully.
@@ -375,26 +375,26 @@ if store.name == "values-and-missingness.pbz":
     assert report["values"]["missing_count_first_three"] == [0, 1, -1]
 ```
 
-- [ ] Build the probe once with
+- [x] Build the probe once with
   `pixi run cargo build -p pbzarr --example check_core_dataset`. Resolve its
   directory from `cargo metadata --no-deps --format-version 1` so an existing
   `CARGO_TARGET_DIR` is respected. Run the script and verify it reports a real
   disagreement until all fixture outcomes and values are implemented.
-- [ ] Include all seven valid stores, sixteen malformed stores, and the unknown
+- [x] Include all seven valid stores, sixteen malformed stores, and the unknown
   version. Compare 3D masks through `read_bool`, raw signed/unsigned values,
   sample means, selected reference/bin intervals, coordinate classification,
   and the unchanged zero-fill values. Add the extra validation cases from
   Tasks 1–4 to the shared corpus where useful to future Python validators.
-- [ ] Add `validate-core-dataset = "python scripts/validate_core_dataset.py"`
+- [x] Add `validate-core-dataset = "python scripts/validate_core_dataset.py"`
   under the existing validation tasks. Run `pixi run validate-core-dataset`,
   `pixi run check`, and the current `pixi run validate-roundtrip`. If the existing
   Python extension is unavailable, use the documented `pixi run install-wheel`
   before that current-format check; do not install a second dependency stack.
-- [ ] Update the proposal validation record with actual dependency versions,
+- [x] Update the proposal validation record with actual dependency versions,
   commands, pass/fail results, and storage read counts. Keep native construction
   laziness distinct from performance. Do not describe this read-only milestone
   as validating Rust-created new stores, append, or production Python wrappers.
-- [ ] Commit only the task files as `test: check core dataset fixtures across Rust and Xarray`.
+- [x] Commit only the task files as `test: check core dataset fixtures across Rust and Xarray`.
 
 ## Completion and handoff
 
@@ -420,3 +420,43 @@ Its detailed tasks cover the reader/conformance portion only; the milestone
 table explicitly assigns writing, imports, CLI, Python, and release work.
 Review-focus cases each have an owning task. No production code or test execution
 is claimed by writing this plan.
+
+## Milestone A completion — 2026-09-30
+
+The additive reader milestone is complete on `codex/pbz-core-reader`.
+Independent review found six Important issues; each received a failing regression
+test and a fix. There were no Critical findings or deferred Minor findings.
+The [validation record](../../proposals/pbz-core-draft/VALIDATION.md) owns the
+commands, dependency versions, measured results, and remaining capability limits.
+
+All five tasks are complete. Task 2 uses zarrs' existing
+`UsageLogStorageAdapter` instead of a custom forwarding wrapper; its key-level
+assertions verify the intended access behavior. The approved proposal and
+prototype files accompany the implementation so its documentation links work
+in a fresh checkout.
+
+Execution decisions and their limits:
+
+* Work is isolated from the dirty main checkout. Integration remains separate.
+* Genomic region queries reject out-of-bounds coordinates instead of applying
+  the legacy reader's clamping; callers relying on clamping must adapt.
+* The built-in storage logger supplies I/O evidence; replacing it with a custom
+  recorder would be necessary if its observations proved insufficient.
+* Writers, imports, CLI integration, prototype promotion, append, and release
+  behavior remain later milestones; the full new-format workflow is not ready.
+* Metadata validation does not read measurements and does not certify their
+  payload integrity. Actual reads surface decoding errors.
+* Reference and dimension labels load fully and may be revalidated. Byte-size
+  guards prevent unaddressable allocations, but large-cohort costs are unmeasured.
+* Scalar and non-genomic raw reads still require a valid root reference; broken
+  reference metadata can prevent otherwise usable result reads.
+* Chunk-access evidence is for unsharded fixtures; sharded amplification remains
+  unmeasured.
+* Cached handles and geometry require reopening after external mutation;
+  retaining an instance across writes can expose stale metadata.
+* The missing-Dask check was paused for the requested tooling approval. After
+  approval, `dask-core` was added through Pixi and the two remaining checks passed.
+  The worktree now has its own environment instead of a shared environment link.
+
+Next is milestone B. Its first design decision is how failed multi-variable
+imports publish completed results and clean up incomplete additions.
