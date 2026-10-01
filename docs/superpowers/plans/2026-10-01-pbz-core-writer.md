@@ -1,6 +1,6 @@
 # PBZ Core Import Migration Implementation Plan
 
-> **For agentic workers:** Use superpowers:executing-plans with the user's selected inline execution and one fresh final reviewer. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use superpowers:executing-plans with the user's selected inline execution and one fresh final reviewer. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make existing Rust imports write the new PBZ root-Dataset layout with the smallest necessary changes.
 
@@ -78,13 +78,13 @@ PbzError propagation; Task 3's recovery and reporting machinery is skipped.
 
 | Files | Necessary change |
 | --- | --- |
-| crates/pbzarr/src/dataset/write.rs | Root creation, root-array preparation, coordinate compatibility, publication and cleanup. |
+| crates/pbzarr/src/dataset/write.rs | Root creation, root-array preparation, coordinate compatibility and publication. |
 | crates/pbzarr/src/dataset/mod.rs | Register write module and refresh catalog/caches after mutation. |
 | crates/pbzarr/src/import/builder.rs | Store either legacy destinations or a Dataset plus existing TrackConfigs. |
 | crates/pbzarr/src/import/destination.rs | Private adapter exposing the destination operations the engine already uses. |
 | crates/pbzarr/src/import/{routing,engine,mod}.rs | Consume/register the adapter, preserving scheduling and buffers. |
 | crates/pbzarr/src/store.rs or codec_spec.rs | Expose only existing dtype/fill/codec helpers needed for reuse. |
-| crates/pbzarr/tests/core_import.rs | New-layout creation, import, preflight, failure and regression checks. |
+| crates/pbzarr/tests/core_import.rs | New-layout creation, import, preflight and regression checks. |
 | crates/pbzarr-readers/tests/core_import.rs | Existing file readers targeting the new layout. |
 | crates/pbzarr/examples/write_core_dataset.rs | Small Rust-generated import fixture. |
 | scripts/validate_core_dataset.py | Native Xarray check of Rust-imported stores. |
@@ -99,7 +99,7 @@ conformance cases; retain them without building new authoring APIs.
 the already-implemented checked type; use canonical contig/contig_length names
 for creation while continuing to read spec-valid alternate reference names.
 
-- [ ] Add a creation test to core_import.rs.
+- [x] Add a creation test to core_import.rs.
 
 ```rust
 #[test]
@@ -117,16 +117,16 @@ fn creates_shared_reference() {
 }
 ```
 
-- [ ] Run `pixi run cargo test -p pbzarr --test core_import`; expect the missing creation methods.
-- [ ] Use existing Zarr builders to write string contig names and int64 lengths,
+- [x] Run `pixi run cargo test -p pbzarr --test core_import`; expect the missing creation methods.
+- [x] Use existing Zarr builders to write string contig names and int64 lengths,
   their native dimension metadata, then root convention/reference attributes.
   Write reference data before its metadata and publish the root last. Require
   an empty namespace, use positive chunk extents for empty references, and
   do checked reference arithmetic through Reference.
-- [ ] Add empty-reference/zero-length and occupied-namespace tests, including
+- [x] Add empty-reference/zero-length and occupied-namespace tests, including
   metadata-free keys. Assert occupied bytes remain unchanged.
-- [ ] Run the focused test plus core_dataset/core_reference; expect success.
-- [ ] Commit `feat: create core datasets with shared reference coordinates`.
+- [x] Run the focused test plus core_dataset/core_reference; expect success.
+- [x] Commit `feat: create core datasets with shared reference coordinates`.
 
 ## Task 2: Target the existing import engine at root arrays
 
@@ -134,7 +134,7 @@ fn creates_shared_reference() {
 destination adapter. The adapter supplies the Track operations currently used
 by routing, estimates and writes; legacy calls delegate to Track.
 
-- [ ] Reuse the ConstReader test fixture from import_pipeline.rs and add a
+- [x] Reuse the ConstReader test fixture from import_pipeline.rs and add a
   single-source, explicit-singleton test using the public builder.
 
 ```rust
@@ -153,24 +153,24 @@ assert_eq!(ds.read_raw::<u32>("depth", &[0..12, 0..1])?,
            ndarray::ArrayD::from_elem(ndarray::IxDyn(&[12,1]), 7));
 ```
 
-- [ ] Run the focused test; expect the absent Dataset target.
-- [ ] Build unpublished arrays at /<track> from existing TrackConfigs. Reuse
+- [x] Run the focused test; expect the absent Dataset target.
+- [x] Build unpublished arrays at /<track> from existing TrackConfigs. Reuse
   dtype/fill/codec resolution and explicit layout settings. Prepare root
   string dimension coordinates; use existing coordinates only after decoding
   and comparing labels exactly. Do not write legacy perbase group metadata.
-- [ ] Feed existing routing and engine code through the private destination
+- [x] Feed existing routing and engine code through the private destination
   adapter. Retain source reads, buffers, shard locks, scheduling and taps.
   Reuse held Array handles before publication; do not reopen unpublished nodes.
   Preserve Track sealing on the legacy path.
-- [ ] Preflight all names/prefixes, dimensions, labels, ordered source references,
+- [x] Preflight all names/prefixes, dimensions, labels, ordered source references,
   types, codecs and shared inner position grids before any destination write.
   Keep estimate read-only. Reject unsupported coordinate encodings explicitly.
-- [ ] Add multi-source, multi-field, unsharded/sharded and all-fill cases.
+- [x] Add multi-source, multi-field, unsharded/sharded and all-fill cases.
   Compare with the legacy destination for the same source and layout.
   Add reordered-reference/label, collision, dtype and layout rejection tests
   using an instrumented store to assert zero mutations.
-- [ ] Run `pixi run cargo test -p pbzarr`; expect all new and legacy tests to pass.
-- [ ] Commit `feat: target core datasets with the existing import builder`.
+- [x] Run `pixi run cargo test -p pbzarr`; expect all new and legacy tests to pass.
+- [x] Commit `feat: target core datasets with the existing import builder`.
 
 ## Task 3: Skipped at the user's request
 
@@ -185,10 +185,10 @@ Errors propagate normally; a failed write may leave incomplete output.
 The example writes a fresh destination using Dataset::create and Import's
 new target. Native Xarray must open it directly as one Dataset.
 
-- [ ] Add backend tests using existing BigWig/BAM fixtures and reader constructors.
+- [x] Add backend tests using existing BigWig/BAM fixtures and reader constructors.
   Exercise one source, shared sample labels and multiple fields without
   duplicating legacy from_* convenience APIs.
-- [ ] Extend the conformance harness to invoke the Rust example and check
+- [x] Extend the conformance harness to invoke the Rust example and check
   actual data, coordinate classification, dimensions and storage layout.
 
 ```python
@@ -200,16 +200,16 @@ with xr.open_zarr(output, chunks=None, consolidated=False) as ds:
     np.testing.assert_array_equal(ds["depth"].values[:, 0], expected_depth)
 ```
 
-- [ ] Run the new backend/harness tests before the fixture implementation;
+- [x] Run the new backend/harness tests before the fixture implementation;
   expect the missing new-layout output.
-- [ ] Implement the small example and harness invocation using existing fixture
+- [x] Implement the small example and harness invocation using existing fixture
   generation/Cargo target discovery. Check additions to consolidated input through
   native Xarray default discovery too. Retain all previous reader conformance.
-- [ ] Run `pixi run validate-core-dataset` and `pixi run check`, then
+- [x] Run `pixi run validate-core-dataset` and `pixi run check`, then
   `pixi run install-wheel` and `pixi run validate-roundtrip`.
-- [ ] Record actual results and supported limits in VALIDATION.md/RUST_CLI.md;
+- [x] Record actual results and supported limits in VALIDATION.md/RUST_CLI.md;
   update the proposal example to show the existing builder targeting Dataset.
-- [ ] Commit `test: verify core imports with native Xarray`.
+- [x] Commit `test: verify core imports with native Xarray`.
 - [ ] Run one fresh final review, fix material findings with regression tests,
   and rerun affected checks. No merge/push/release is part of this task.
 
@@ -219,3 +219,19 @@ The plan covers required root metadata/coordinates (Task 1), compatible existing
 imports and explicit storage choices (Task 2), successful metadata publication (Task 2), and cross-language evidence (Task 4). It adds no Rust authoring
 framework. Wider valid shapes remain covered by the completed reader and
 native Xarray/Zarr authoring. All five Review Focus cases have owning tests.
+
+## Execution record
+
+Tasks 1 and 2 were completed in cbd323f and b83afcf. Task 3 was explicitly
+skipped. Task 4 verifies existing backend readers and native Xarray imports.
+The [validation record](../../proposals/pbz-core-draft/VALIDATION.md) records
+executed checks and limits.
+
+Implementation rulings:
+
+* Root destinations privately reuse Track with a populated Array handle and
+  separately held labels, avoiding duplicated bounded writes. A future Track
+  method that reads track-group metadata would require an adapter update.
+* The initial success fixture used shard `[8,3]` with subchunk `[4,2]`, which
+  native Zarr rejects. The valid fixture was corrected and the non-divisible
+  case became a preflight rejection test. This follows native codec validation.

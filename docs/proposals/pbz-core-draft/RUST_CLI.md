@@ -1,6 +1,6 @@
 # Rust and CLI decisions for the PBZ core draft
 
-Status: accepted design intent, 2026-09-30. This page describes the future
+Status: accepted direction with additive Rust support, 2026-10-01. This page describes the development
 [core convention](README.md), not the implemented format 0.4 behavior.
 It records five implementation boundaries for Rust and the CLI.
 The [conformance cases](CONFORMANCE.md) supply concrete examples and validation rules.
@@ -19,12 +19,13 @@ It must report an unsupported format explicitly.
 The default entry points and release roadmap still use format 0.4. The additive
 `pbzarr::dataset::Dataset` reader now implements draft-format inspection,
 validation, and typed positional reads; see the [validation record](VALIDATION.md).
-Existing Rust imports have a [milestone-B migration plan](../../superpowers/plans/2026-10-01-pbz-core-writer.md)
-and [creation/publication contract](WRITING.md). They are not implemented yet;
-CLI integration remains milestone C. Milestone B reuses the existing Import
-builder and TrackConfig for 1D/2D source imports; it adds no separate writer
-object or arbitrary-rank Rust authoring interface. Broader valid arrays remain
-readable through Dataset and writable through native Xarray/Zarr.
+Milestone B adds `Dataset::create` / `create_with_storage` and the existing
+Import builder's `into_dataset` target, reusing TrackConfig for 1D/2D source
+imports. See the [creation/import example and limits](WRITING.md) and
+[implementation plan](../../superpowers/plans/2026-10-01-pbz-core-writer.md).
+CLI integration remains milestone C. No separate writer object or arbitrary-rank
+Rust authoring interface was added. Broader valid arrays remain readable through
+Dataset and writable through native Xarray/Zarr.
 
 ## 1. Generic Rust storage with existing array infrastructure
 
@@ -62,9 +63,10 @@ For example, a requested `sample` dimension with one label produces
 The importer retains `column_dim` as a convenience parameter. It names the
 output dimension. The store does not require a column-role metadata field.
 
-For a new store, the importer establishes the root reference from an explicit
-reference input or validated source headers. Existing stores retain their root
-reference. Import preflight validates the ordered names and lengths before mutation.
+For a new store, callers pass an explicit checked Reference to Dataset creation;
+they can construct it from validated source headers. Existing stores retain their
+root reference. Import preflight validates the ordered names and lengths against
+that reference before mutation.
 
 An import that uses an existing dimension must supply the same labels in the
 same order. Mismatched references or labels fail before mutation. Import does

@@ -1,6 +1,6 @@
 # Rust imports for the PBZ core draft
 
-Status: narrowed implementation scope, 2026-10-01. This page concerns
+Status: implemented additive Rust import path, 2026-10-01. This page concerns
 `core-draft-1`; format 0.4 remains the current default. The
 [core convention](README.md) owns the schema.
 
@@ -16,6 +16,28 @@ and primitive widths. Native Xarray/Zarr can author those arrays. A valid
 arbitrary-rank, binned, scalar, or 64-bit variable does not need a matching
 source importer to be valid or readable. Initial Rust imports keep their
 current source dtypes and 1D/2D output.
+
+## Public API
+
+Create the Dataset, then use the existing import builder and routing methods:
+
+```rust
+let mut ds = Dataset::create(path, reference)?;
+Import::from_readers(readers)?
+    .into_dataset(&mut ds, vec![(
+        "depth".into(),
+        TrackConfig::new(Dtype::U32)
+            .columns(labels).column_dim("sample"),
+    )])
+    .readers_as_columns()
+    .run()?;
+```
+
+`Dataset::create_with_storage` accepts an existing Zarr storage handle.
+`into_dataset` only configures the operation. `estimate()` is read-only;
+a successful `run()` refreshes the supplied Dataset's catalog and caches.
+The [executable fixture](../../../crates/pbzarr/examples/write_core_dataset.rs)
+shows creation, sharding, explicit codecs, metadata notes, and later additions.
 
 ## Required format changes
 

@@ -1,5 +1,49 @@
 # Proposal validation
 
+## Rust import milestone — 2026-10-01
+
+Dataset creation and the existing Import builder now support the provisional
+root-Dataset convention. Format-0.4 entry points remain the default.
+
+Executed checks:
+
+* `pixi run check` passed formatting, workspace Clippy, and 256 Rust tests
+  (one doctest ignored). Strict Clippy for all core targets also passed.
+* `pixi run validate-core-dataset` passed the Rust-created fixture through native
+  Xarray, then all seven valid, sixteen invalid, and one unknown-version reader
+  cases. The new fixture checked shared reference/sample coordinates, ordinary
+  zero/false values, all-fill chunk omission, explicit Zstd settings, and shards
+  `[8,2]` with inner chunks `[4,1]` on a `[12,2]` depth array.
+* `(depth >= 5).sum("sample")` built without executing Dask tasks and computed
+  the expected counts. This checks lazy construction, not GPU support or peak memory.
+* Adding a Rust track after native Zarr consolidation preserved existing data,
+  sample metadata bytes, and root notes. Stale consolidation was removed, and
+  native Xarray's default discovery found the new track. Xarray warned that it
+  fell back to unconsolidated metadata, as expected for this milestone.
+* Three backend tests passed using existing BigWig/BAM fixtures: gap fills,
+  singleton sample dimensions, uncovered contigs, and BAM composition fields
+  sharing a two-sample coordinate.
+* Core import tests checked metadata publication after chunks, read-only estimates,
+  ordered label/reference rejection, orphan-name rejection, multi-field routing,
+  chunk/shard choices, explicit codecs, and unrelated unsupported neighbors.
+* `pixi run install-wheel` rebuilt the local extension, and
+  `pixi run validate-roundtrip` passed the existing format-0.4 round trip.
+
+An additional `cargo clippy -p pbzarr -p pbzarr-readers --all-targets -- -D warnings`
+check failed on three pre-existing `disallowed_types` uses in
+`crates/pbzarr-readers/tests/common/mod.rs` (lines 15, 109, 110), shared by
+several existing test binaries and the new backend test. This helper was not
+changed; these are not failures of the project's required `pixi run check`.
+
+Environment: macOS arm64, Rust 1.93.0, pinned zarrs 0.23.13 (`cac400e`),
+Python 3.12.13, NumPy 2.4.6, Xarray 2025.12.0, Zarr 3.2.1, Dask 2026.8.0.
+Fixtures are small, local synthetic stores. No performance claim is made.
+
+User-requested scope: Task 3 is skipped. No fault-injection, cleanup, recovery,
+or structured partial-completion reporting was added. Failed writes may leave
+incomplete output; callers must reopen after an error. CLI/Python integration,
+append, replacement, and arbitrary-rank Rust authoring remain outside this step.
+
 ## Rust reader milestone — 2026-09-30
 
 The additive `pbzarr::dataset::Dataset` uses `core-draft-1`.

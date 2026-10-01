@@ -13,8 +13,9 @@ scope. The [validation record](VALIDATION.md) distinguishes executed checks from
 future Rust/Python conformance requirements.
 The [implementation sequence and first Rust reader plan](../../superpowers/plans/2026-09-30-pbz-core-reader.md)
 turn this contract into staged work. The additive Rust `pbzarr::dataset::Dataset`
-reader implements milestone A of the development convention; the validation
-record distinguishes executed checks from work still pending.
+reader implements milestone A of the development convention. Dataset creation
+and existing 1D/2D imports implement milestone B; the validation record
+distinguishes executed checks from work still pending.
 The [Rust import migration plan](../../superpowers/plans/2026-10-01-pbz-core-writer.md)
 covers milestone B and its [writing contract](WRITING.md).
 
@@ -244,13 +245,15 @@ These are API contracts; they add no required metadata fields.
 * Arrays without the appended dimension keep their existing values and meaning.
   Derived results do not automatically recompute.
 
-Completed tracks remain when a later addition fails. Writers clean up incomplete
-additions where possible and preserve existing tracks. The
-[Rust writing contract](WRITING.md#publication-and-failure) defines the population
-barrier, coordinate publication, and reporting of uncertain storage outcomes.
+The current Rust import path populates all targets before publishing their
+metadata in request order. It preserves existing tracks and removes stale
+consolidated metadata so native Xarray can discover successful additions. The
+[Rust writing contract](WRITING.md#publication-and-failure) records the limits:
+errors propagate normally, incomplete output may remain, and callers must reopen
+after an error. Cleanup and uncertain-write reporting are deferred.
 
 This draft does not promise atomic multi-array updates, concurrent writers, or
-crash recovery. Publication mechanics remain implementation work.
+crash recovery.
 
 ## What the JSON Schema checks
 
