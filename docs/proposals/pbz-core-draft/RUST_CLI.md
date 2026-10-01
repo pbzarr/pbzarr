@@ -19,9 +19,12 @@ It must report an unsupported format explicitly.
 The default entry points and release roadmap still use format 0.4. The additive
 `pbzarr::dataset::Dataset` reader now implements draft-format inspection,
 validation, and typed positional reads; see the [validation record](VALIDATION.md).
-Writing and imports have a [milestone-B plan](../../superpowers/plans/2026-10-01-pbz-core-writer.md)
+Existing Rust imports have a [milestone-B migration plan](../../superpowers/plans/2026-10-01-pbz-core-writer.md)
 and [creation/publication contract](WRITING.md). They are not implemented yet;
-CLI integration remains milestone C.
+CLI integration remains milestone C. Milestone B reuses the existing Import
+builder and TrackConfig for 1D/2D source imports; it adds no separate writer
+object or arbitrary-rank Rust authoring interface. Broader valid arrays remain
+readable through Dataset and writable through native Xarray/Zarr.
 
 ## 1. Generic Rust storage with existing array infrastructure
 

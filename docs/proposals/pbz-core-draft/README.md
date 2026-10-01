@@ -15,7 +15,7 @@ The [implementation sequence and first Rust reader plan](../../superpowers/plans
 turn this contract into staged work. The additive Rust `pbzarr::dataset::Dataset`
 reader implements milestone A of the development convention; the validation
 record distinguishes executed checks from work still pending.
-The [Rust writer/import plan](../../superpowers/plans/2026-10-01-pbz-core-writer.md)
+The [Rust import migration plan](../../superpowers/plans/2026-10-01-pbz-core-writer.md)
 covers milestone B and its [writing contract](WRITING.md).
 
 ## Model
@@ -246,7 +246,7 @@ These are API contracts; they add no required metadata fields.
 
 Completed tracks remain when a later addition fails. Writers clean up incomplete
 additions where possible and preserve existing tracks. The
-[Rust writing contract](WRITING.md#completion-and-failure) defines the population
+[Rust writing contract](WRITING.md#publication-and-failure) defines the population
 barrier, coordinate publication, and reporting of uncertain storage outcomes.
 
 This draft does not promise atomic multi-array updates, concurrent writers, or
