@@ -181,7 +181,7 @@ def generate(destination):
         manifest["invalid"].append({"path": str(path.relative_to(destination)), "rule": rule})
 
     metadata_mutations = [
-        ("missing-reference", "root schema", "", lambda m: m["attributes"].pop("pbz:reference")),
+        ("missing-reference", "R2", "", lambda m: m["attributes"].pop("pbz:reference")),
         ("same-reference-pointer", "R2", "", lambda m: m["attributes"]["pbz:reference"].update(lengths="contig")),
         ("dangling-reference-pointer", "R2", "", lambda m: m["attributes"]["pbz:reference"].update(names="absent")),
         ("lengths-as-track", "R3", "", lambda m: m["attributes"].pop("coordinates")),

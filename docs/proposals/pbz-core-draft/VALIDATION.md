@@ -2,16 +2,34 @@
 
 ## Rust reader milestone — 2026-09-30
 
-The new `pbzarr::dataset::Dataset` is additive and uses `core-draft-1`.
-The targeted Rust tests currently pass: four reference tests and seventeen
-catalog/validation/read tests. Strict `cargo clippy -p pbzarr --all-targets -- -D warnings` passed.
-The probe accepted all seven previously generated valid stores, rejected all
-sixteen malformed stores, and distinguished the unknown version.
+The additive `pbzarr::dataset::Dataset` uses `core-draft-1`.
+Rust verification passed after independent review and fixes:
 
-Fresh fixture generation and the integrated Python harness are pending the
-Dask dependency in the declared Pixi environment. `pixi run check` passed: formatting, workspace Clippy, and 237 Rust tests
-(including doctests; one example ignored). The fresh Python check is not claimed
-as passing.
+* `pixi run check`: formatting, workspace Clippy, and 243 Rust tests passed
+  (including doctests; one example ignored).
+* `cargo clippy -p pbzarr --all-targets -- -D warnings` passed.
+* Four reference tests and 23 catalog/validation/read tests passed.
+* All six review findings were reproduced by failing regression tests and fixed:
+  native base64 floating missing sentinels; infinite coordinate labels;
+  mandatory Zarr extensions; chunk-grid/key/transformer/fill metadata;
+  masked physical Boolean capability reporting; and allocation byte bounds.
+* The rebuilt Rust probe matched all 47 arrays from the seven previously
+  generated valid stores against native Xarray/NumPy. Shapes, coordinate roles,
+  references, bin intervals, and selected depth matched. All sixteen invalid
+  stores and the unknown version returned the expected outcomes. The generator's
+  informal `root schema` label was corrected to executable rule `R2`.
+
+Environment: macOS arm64, Rust 1.93.0, pinned zarrs 0.23.13 (`cac400e`),
+Python 3.12.13, NumPy 2.4.6, Xarray 2025.12.0, Zarr 3.2.1.
+The comparison used `chunks=None` and the existing synthetic corpus at
+`/private/tmp/pbz-core-examples-20260930-9305`; that path is evidence from this
+run, not a test dependency.
+
+**Pending:** fresh generation through `pixi run validate-core-dataset` and
+the unchanged `pixi run validate-roundtrip`. Both stopped at a missing Dask
+import in the declared Pixi environment. Permission to add `dask-core` was
+requested; no dependency installation was inferred. Milestone A is not yet
+fully verified. The new harness generates its own temporary corpus.
 
 Instrumented in-memory storage observed zero measurement chunk reads during
 opening and validation. A selection from a `[12,3]` uint16 array with `[4,3]`
@@ -20,10 +38,17 @@ An empty selection requested no depth chunks. These are request-key assertions
 on unsharded fixtures, not memory, throughput, or sharded-I/O benchmarks.
 
 Physical integer values and sentinels remain exact; logical Boolean masks use
-the separate decoder. Unsupported required coordinate encodings yield an
-incomplete report. Masked logical Booleans, CF scaling/calendar decoding,
-production writers, append, GPU execution, and CLI/Python wrapper integration
-remain outside this reader milestone.
+the separate decoder. Unsupported required encodings yield an incomplete report.
+Invalid known metadata yields an invalid report. Masked logical Booleans,
+CF scaling/calendar decoding, production writers, append, GPU execution, and
+CLI/Python wrapper integration remain outside this reader milestone.
+
+Validation loads reference and dimension labels, and reads can revalidate
+labels; large-cohort coordinate costs have not been benchmarked. Measurement
+payload corruption is detected when reading those payloads, not by metadata
+validation. Raw reads, including scalars, require a valid root reference.
+Callers must reopen after external mutation because handles and geometry are
+cached; this is not a concurrent snapshot guarantee.
 
 
 ## Concrete conformance examples — 2026-09-30

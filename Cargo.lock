@@ -1887,6 +1887,7 @@ name = "pbzarr"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "base64",
  "crossbeam-channel",
  "fs-err",
  "hashbrown 0.17.1",

@@ -67,6 +67,16 @@ pub(super) fn encoding_limit(info: &VariableInfo) -> Option<String> {
         return Some(format!("unsupported logical dtype: {dtype}"));
     }
     let attrs = info.attrs();
+    if (dtype == "bool" || attrs["dtype"] == "bool")
+        && attrs.get("_FillValue").is_some_and(|v| !v.is_null())
+    {
+        return Some("masked logical Boolean is unsupported".into());
+    }
+    if matches!(dtype, "float32" | "float64")
+        && let Err(e) = super::read::float_fill(info)
+    {
+        return Some(e.to_string());
+    }
     for field in [
         "scale_factor",
         "add_offset",
@@ -95,19 +105,14 @@ pub(super) fn encoding_limit(info: &VariableInfo) -> Option<String> {
     None
 }
 fn support(info: &VariableInfo) -> Support {
-    let result = (|| -> std::result::Result<(), String> {
-        let meta: ArrayMetadataV3 =
-            serde_json::from_value(info.metadata.clone()).map_err(|e| e.to_string())?;
-        DataType::from_metadata(&meta.data_type).map_err(|e| e.to_string())?;
-        CodecChain::from_metadata(&meta.codecs).map_err(|e| e.to_string())?;
-        if let Some(reason) = encoding_limit(info) {
-            return Err(reason);
-        }
-        Ok(())
-    })();
+    let result = storage_metadata(info).and_then(|_| {
+        encoding_limit(info).map_or(Ok(()), |reason| Err(PbzError::UnsupportedEncoding(reason)))
+    });
     match result {
         Ok(()) => Support::Supported,
-        Err(reason) => Support::Unsupported { reason },
+        Err(e) => Support::Unsupported {
+            reason: e.to_string(),
+        },
     }
 }
 pub(super) fn catalog(
@@ -337,6 +342,7 @@ impl Dataset {
     }
     /// Load and check reference coordinates lazily; offsets retain stored order.
     pub fn reference(&self) -> Result<&Reference> {
+        root_encoding(&self.root)?;
         if let Some(r) = self.reference_cache.get() {
             return Ok(r);
         }
@@ -348,9 +354,7 @@ impl Dataset {
         for (name, length) in ns.iter().zip(ls.iter()) {
             let name = name
                 .as_str()
-                .filter(|n| {
-                    !n.is_empty() && !super::read::missing(names, &Value::String((*n).into()))
-                })
+                .filter(|n| !n.is_empty() && !super::read::missing(names, name))
                 .ok_or_else(|| PbzError::Metadata("R4: missing or empty contig name".into()))?;
             if !seen.insert(name) {
                 return Err(PbzError::Metadata("R4: duplicate contig name".into()));
@@ -393,11 +397,7 @@ impl Dataset {
             if super::read::missing(info, &value) {
                 return Err(PbzError::Metadata(format!("D3: missing label on {dim}")));
             }
-            let key = if value.is_f64() && value.as_f64() == Some(0.0) {
-                "0".into()
-            } else {
-                value.to_string()
-            };
+            let key = value.label_key();
             if !seen.insert(key) {
                 return Err(PbzError::Metadata(format!("D3: duplicate labels on {dim}")));
             }
@@ -455,8 +455,12 @@ impl Dataset {
                 );
                 continue;
             }
-            if let Err(e) = serde_json::from_value::<ArrayMetadataV3>(info.metadata.clone()) {
-                report.issue(Some(&info.name), "ZARR", e.to_string(), false);
+            // Neighboring unsupported arrays remain inspectable. A selected
+            // operation checks only its own encodings and required labels.
+            if (selected.is_none() || selected == Some(info.name.as_str()))
+                && let Err(e) = storage_metadata(info)
+            {
+                report.error(Some(&info.name), "ZARR", e)?;
             }
             if selected.is_none()
                 && let Support::Unsupported { reason } = &info.logical_support
@@ -519,4 +523,82 @@ impl Dataset {
         }
         Ok(report)
     }
+}
+
+fn plugin_error(name: &str, error: zarrs::plugin::PluginCreateError) -> PbzError {
+    use zarrs::plugin::PluginCreateError;
+    let message = format!("{name}: {error}");
+    match error {
+        PluginCreateError::NameInvalid { .. } | PluginCreateError::ConfigurationInvalid(_) => {
+            PbzError::Metadata(message)
+        }
+        _ => PbzError::UnsupportedEncoding(message),
+    }
+}
+pub(super) fn array_error(name: &str, error: zarrs::array::ArrayCreateError) -> PbzError {
+    use zarrs::array::ArrayCreateError as E;
+    match error {
+        E::DataTypeCreateError(e)
+        | E::CodecsCreateError(e)
+        | E::StorageTransformersCreateError(e)
+        | E::ChunkGridCreateError(e)
+        | E::ChunkKeyEncodingCreateError(e) => plugin_error(name, e),
+        E::AdditionalFieldUnsupportedError(e) => {
+            PbzError::UnsupportedEncoding(format!("{name}: {e}"))
+        }
+        E::StorageError(e) => PbzError::Store(e.to_string()),
+        e => PbzError::Metadata(format!("{name}: {e}")),
+    }
+}
+fn required_extensions(fields: &zarrs::metadata::v3::AdditionalFieldsV3) -> Result<()> {
+    for (name, field) in fields {
+        if field.must_understand() {
+            return Err(PbzError::UnsupportedEncoding(format!(
+                "required Zarr extension {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+pub(super) fn storage_metadata(info: &VariableInfo) -> Result<ArrayMetadataV3> {
+    use zarrs::array::{ChunkGrid, ChunkKeyEncoding, StorageTransformerChain};
+    let meta: ArrayMetadataV3 = serde_json::from_value(info.metadata.clone())
+        .map_err(|e| PbzError::Metadata(format!("{}: {e}", info.name)))?;
+    required_extensions(&meta.additional_fields)?;
+    let data_type =
+        DataType::from_metadata(&meta.data_type).map_err(|e| plugin_error(&info.name, e))?;
+    CodecChain::from_metadata(&meta.codecs).map_err(|e| plugin_error(&info.name, e))?;
+    if meta.chunk_grid.name() == "regular"
+        && info.metadata["chunk_grid"]["configuration"]["chunk_shape"]
+            .as_array()
+            .is_some_and(|s| s.len() != meta.shape.len())
+    {
+        return Err(PbzError::Metadata(format!(
+            "{}: chunk grid rank differs from shape",
+            info.name
+        )));
+    }
+    let grid = ChunkGrid::from_metadata(&meta.chunk_grid, &meta.shape)
+        .map_err(|e| plugin_error(&info.name, e))?;
+    if grid.dimensionality() != meta.shape.len() {
+        return Err(PbzError::Metadata(format!(
+            "{}: chunk grid rank differs from shape",
+            info.name
+        )));
+    }
+    data_type
+        .fill_value_v3(&meta.fill_value)
+        .map_err(|e| PbzError::Metadata(format!("{}: invalid storage fill: {e}", info.name)))?;
+    ChunkKeyEncoding::from_metadata(&meta.chunk_key_encoding)
+        .map_err(|e| plugin_error(&info.name, e))?;
+    let path = zarrs::node::NodePath::new(&format!("/{}", info.name))
+        .map_err(|e| PbzError::Metadata(e.to_string()))?;
+    StorageTransformerChain::from_metadata(&meta.storage_transformers, &path)
+        .map_err(|e| plugin_error(&info.name, e))?;
+    Ok(meta)
+}
+fn root_encoding(root: &Value) -> Result<()> {
+    let meta: zarrs::metadata::v3::GroupMetadataV3 =
+        serde_json::from_value(root.clone()).map_err(|e| PbzError::Metadata(format!("R1: {e}")))?;
+    required_extensions(&meta.additional_fields)
 }

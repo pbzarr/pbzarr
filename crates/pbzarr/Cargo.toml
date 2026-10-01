@@ -11,6 +11,7 @@ keywords = ["zarr", "genomics", "bioinformatics", "depth"]
 categories = ["science", "encoding"]
 
 [dependencies]
+base64 = "0.22.1"
 fs-err = "3"
 hashbrown = "0.17.1"
 log = "0.4"

@@ -596,3 +596,224 @@ fn supports_physical_boolean_values() {
         [true, false, true]
     );
 }
+
+#[test]
+fn native_base64_float_sentinels_are_decoded_before_label_validation() {
+    let (s, _) = fixture();
+    let mut m = metadata(&[3], &["sample"], "float64");
+    m["attributes"]["_FillValue"] = json!("AAAAAAA4j8A=");
+    put(&s, "sample/zarr.json", m);
+    values(&s, "sample", &[1.0_f64, 2.0, -999.0]);
+    has_rule(s, "D3");
+    let (s, _) = fixture();
+    let mut m = metadata(&[3], &["sample"], "float32");
+    m["attributes"]["_FillValue"] = json!("AAAAwMw4j8A=");
+    put(&s, "sample/zarr.json", m);
+    values(&s, "sample", &[1_f32, 2.0, -999.1]);
+    has_rule(s, "D3");
+}
+#[test]
+fn infinite_labels_keep_identity_but_nan_and_declared_infinity_are_missing() {
+    for (labels, fill, status) in [
+        (
+            [1.0_f64, f64::NEG_INFINITY, f64::INFINITY],
+            Value::Null,
+            ValidationStatus::Valid,
+        ),
+        (
+            [1.0, f64::INFINITY, f64::INFINITY],
+            Value::Null,
+            ValidationStatus::Invalid,
+        ),
+        (
+            [1.0, 2.0, f64::INFINITY],
+            json!("AAAAAAAA8H8="),
+            ValidationStatus::Invalid,
+        ),
+    ] {
+        let (s, _) = fixture();
+        let mut m = metadata(&[3], &["sample"], "float64");
+        if !fill.is_null() {
+            m["attributes"]["_FillValue"] = fill;
+        }
+        put(&s, "sample/zarr.json", m);
+        values(&s, "sample", &labels);
+        assert_eq!(
+            Dataset::open_with_storage(s)
+                .unwrap()
+                .validate()
+                .unwrap()
+                .status,
+            status
+        );
+    }
+}
+#[test]
+fn mandatory_extensions_block_interpretation_without_blocking_neighbors() {
+    for name in ["depth", "contig", ""] {
+        let (s, log) = read_fixture();
+        let (key, mut m) = match name {
+            "" => ("zarr.json".to_owned(), root("contig", "contig_length")),
+            "depth" => (
+                "depth/zarr.json".into(),
+                metadata(&[12, 3], &["position", "sample"], "uint16"),
+            ),
+            _ => (
+                "contig/zarr.json".into(),
+                metadata(&[2], &["contig"], "string"),
+            ),
+        };
+        m["new_semantics"] = json!({"must_understand":true});
+        put(&s, &key, m);
+        log.lock().unwrap().clear();
+        let ds = Dataset::open_with_storage(s).unwrap();
+        assert_eq!(ds.validate().unwrap().status, ValidationStatus::Incomplete);
+        assert!(matches!(
+            ds.read_raw::<u16>("depth", &[0..1, 0..1]),
+            Err(PbzError::UnsupportedEncoding(_))
+        ));
+        if name == "depth" {
+            assert!(ds.read_raw::<f64>("mean", &[0..1]).is_ok());
+        }
+        assert!(
+            !String::from_utf8(log.lock().unwrap().clone())
+                .unwrap()
+                .contains("depth/c")
+        );
+    }
+    let (s, _) = fixture();
+    let mut m = metadata(&[12, 3], &["position", "sample"], "uint16");
+    m["optional_annotation"] = json!({"must_understand":false});
+    put(&s, "depth/zarr.json", m);
+    assert_eq!(
+        Dataset::open_with_storage(s)
+            .unwrap()
+            .validate()
+            .unwrap()
+            .status,
+        ValidationStatus::Valid
+    );
+}
+#[test]
+fn validates_all_zarr_storage_metadata_before_advertising_support() {
+    let cases = vec![
+        (
+            "chunk_grid",
+            json!({"name":"regular","configuration":{"chunk_shape":[4]}}),
+            ValidationStatus::Invalid,
+        ),
+        (
+            "fill_value",
+            json!("not-a-number"),
+            ValidationStatus::Invalid,
+        ),
+        (
+            "chunk_grid",
+            json!({"name":"unknown"}),
+            ValidationStatus::Incomplete,
+        ),
+        (
+            "chunk_key_encoding",
+            json!({"name":"unknown"}),
+            ValidationStatus::Incomplete,
+        ),
+        (
+            "storage_transformers",
+            json!([{"name":"unknown"}]),
+            ValidationStatus::Incomplete,
+        ),
+    ];
+    for (field, value, status) in cases {
+        let (s, log) = read_fixture();
+        let mut m = metadata(&[12, 3], &["position", "sample"], "uint16");
+        m[field] = value;
+        put(&s, "depth/zarr.json", m);
+        log.lock().unwrap().clear();
+        let ds = Dataset::open_with_storage(s).unwrap();
+        assert!(matches!(
+            ds.variables()["depth"].logical_support,
+            Support::Unsupported { .. }
+        ));
+        let report = ds.validate().unwrap();
+        assert_eq!(report.status, status, "{report:?}");
+        let result = ds.read_raw::<u16>("depth", &[0..1, 0..1]);
+        assert!(match status {
+            ValidationStatus::Invalid => matches!(result, Err(PbzError::Metadata(_))),
+            _ => matches!(result, Err(PbzError::UnsupportedEncoding(_))),
+        });
+        assert!(
+            !String::from_utf8(log.lock().unwrap().clone())
+                .unwrap()
+                .contains("depth/c")
+        );
+    }
+}
+#[test]
+fn masked_physical_boolean_has_consistent_capability_report_and_raw_reads() {
+    let (s, _) = fixture();
+    let mut m = metadata(&[12], &["position"], "bool");
+    m["fill_value"] = json!(false);
+    m["attributes"]["_FillValue"] = json!(false);
+    put(&s, "masked/zarr.json", m);
+    values(
+        &s,
+        "masked",
+        &[
+            false, true, false, true, false, true, false, true, false, true, false, true,
+        ],
+    );
+    let ds = Dataset::open_with_storage(s).unwrap();
+    assert!(matches!(
+        ds.variables()["masked"].logical_support,
+        Support::Unsupported { .. }
+    ));
+    assert_eq!(ds.validate().unwrap().status, ValidationStatus::Incomplete);
+    assert!(matches!(
+        ds.read_bool("masked", &[0..2]),
+        Err(PbzError::UnsupportedEncoding(_))
+    ));
+    assert_eq!(
+        ds.read_raw::<bool>("masked", &[0..2])
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [false, true]
+    );
+}
+#[test]
+fn unaddressable_read_and_coordinate_buffers_return_errors_without_payload_reads() {
+    let (s, log) = fixture();
+    values(&s, "contig_length", &[1_i64 << 62, 0]);
+    let mut m = metadata(&[1_u64 << 62], &["position"], "uint64");
+    m["chunk_grid"]["configuration"]["chunk_shape"] = json!([1]);
+    put(&s, "depth/zarr.json", m);
+    let ds = Dataset::open_with_storage(s.clone()).unwrap();
+    log.lock().unwrap().clear();
+    assert!(matches!(
+        ds.read_raw::<u64>("depth", &[0..1_u64 << 62]),
+        Err(PbzError::UnsupportedEncoding(_))
+    ));
+    assert!(
+        !String::from_utf8(log.lock().unwrap().clone())
+            .unwrap()
+            .contains("depth/c")
+    );
+    let mut m = metadata(&[1_u64 << 62], &["sample"], "uint64");
+    m["chunk_grid"]["configuration"]["chunk_shape"] = json!([1]);
+    put(&s, "sample/zarr.json", m);
+    log.lock().unwrap().clear();
+    assert_eq!(
+        Dataset::open_with_storage(s)
+            .unwrap()
+            .validate()
+            .unwrap()
+            .status,
+        ValidationStatus::Incomplete
+    );
+    assert!(
+        !String::from_utf8(log.lock().unwrap().clone())
+            .unwrap()
+            .contains("sample/c")
+    );
+}

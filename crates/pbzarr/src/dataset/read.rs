@@ -1,13 +1,106 @@
+use super::ValidationStatus;
 use super::{Dataset, VariableInfo};
 use crate::{PbzError, Result};
+use base64::Engine;
+use ndarray::{ArrayD, IxDyn};
 use serde_json::Value;
 use std::sync::Arc;
 use zarrs::{
     array::{Array, ArraySubset},
-    metadata::{ArrayMetadata, v3::ArrayMetadataV3},
+    metadata::ArrayMetadata,
 };
 
 pub(super) type ArrayHandle = Array<dyn zarrs::storage::ReadableWritableListableStorageTraits>;
+
+/// Keep coordinate meaning in its physical domain, including infinities.
+pub(super) enum CoordinateValue {
+    String(String),
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
+}
+impl CoordinateValue {
+    pub(super) fn as_str(&self) -> Option<&str> {
+        if let Self::String(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+    pub(super) fn as_u64(&self) -> Option<u64> {
+        match self {
+            Self::Unsigned(v) => Some(*v),
+            Self::Signed(v) => u64::try_from(*v).ok(),
+            _ => None,
+        }
+    }
+    pub(super) fn label_key(&self) -> String {
+        match self {
+            Self::String(v) => format!("s:{v}"),
+            Self::Signed(v) => format!("i:{v}"),
+            Self::Unsigned(v) => format!("u:{v}"),
+            Self::Float(v) => format!("f:{}", if *v == 0.0 { 0 } else { v.to_bits() }),
+        }
+    }
+}
+
+/// Guard both ndarray's addressable shape and zarrs' byte allocation arithmetic.
+fn checked_shape<T>(shape: &[u64]) -> Result<Vec<usize>> {
+    let limit = || {
+        PbzError::UnsupportedEncoding("requested buffer exceeds addressable allocation size".into())
+    };
+    let dims: Vec<usize> = shape
+        .iter()
+        .map(|&n| {
+            usize::try_from(n)
+                .ok()
+                .filter(|&n| n <= isize::MAX as usize)
+                .ok_or_else(limit)
+        })
+        .collect::<Result<_>>()?;
+    let count = if dims.contains(&0) {
+        0
+    } else {
+        dims.iter()
+            .try_fold(1_usize, |n, &d| n.checked_mul(d))
+            .ok_or_else(limit)?
+    };
+    if count > isize::MAX as usize / std::mem::size_of::<T>().max(1) {
+        return Err(limit());
+    }
+    Ok(dims)
+}
+
+pub(super) fn float_fill(info: &VariableInfo) -> Result<Option<f64>> {
+    let fill = &info.attrs()["_FillValue"];
+    if fill.is_null() {
+        return Ok(None);
+    }
+    if let Some(number) = fill.as_f64() {
+        return Ok(Some(number));
+    }
+    if let Some(encoded) = fill.as_str() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| {
+                PbzError::UnsupportedEncoding(format!(
+                    "{}: invalid floating _FillValue: {e}",
+                    info.name
+                ))
+            })?;
+        let bytes: [u8; 8] = bytes.try_into().map_err(|_| {
+            PbzError::UnsupportedEncoding(format!(
+                "{}: floating _FillValue must encode a little-endian double",
+                info.name
+            ))
+        })?;
+        return Ok(Some(f64::from_le_bytes(bytes)));
+    }
+    Err(PbzError::UnsupportedEncoding(format!(
+        "{}: unsupported floating _FillValue",
+        info.name
+    )))
+}
 
 impl Dataset {
     pub(super) fn array(&self, name: &str) -> Result<Arc<ArrayHandle>> {
@@ -22,20 +115,19 @@ impl Dataset {
             .variables
             .get(name)
             .ok_or_else(|| PbzError::Metadata(format!("unknown array: {name}")))?;
-        let meta: ArrayMetadataV3 = serde_json::from_value(info.metadata.clone())
-            .map_err(|e| PbzError::Metadata(format!("{name}: {e}")))?;
+        let meta = super::metadata::storage_metadata(info)?;
         let array = Arc::new(
             Array::new_with_metadata(
                 self.storage.clone(),
                 &format!("/{name}"),
                 ArrayMetadata::V3(meta),
             )
-            .map_err(|e| PbzError::UnsupportedEncoding(format!("{name}: {e}")))?,
+            .map_err(|e| super::metadata::array_error(name, e))?,
         );
         handles.insert(name.into(), array.clone());
         Ok(array)
     }
-    pub(super) fn coordinate_values(&self, info: &VariableInfo) -> Result<Vec<Value>> {
+    pub(super) fn coordinate_values(&self, info: &VariableInfo) -> Result<Vec<CoordinateValue>> {
         if let Some(reason) = super::metadata::encoding_limit(info) {
             return Err(PbzError::UnsupportedEncoding(format!(
                 "{}: {reason}",
@@ -45,28 +137,28 @@ impl Dataset {
         let array = self.array(&info.name)?;
         let subset = ArraySubset::new_with_shape(info.shape.clone());
         macro_rules! load {
-            ($t:ty) => {{
+            ($t:ty,$convert:expr) => {{
+                checked_shape::<$t>(&info.shape)?;
+                // The interpretation buffer must be addressable as well.
+                checked_shape::<CoordinateValue>(&info.shape)?;
                 let values: Vec<$t> = array
                     .retrieve_array_subset(&subset)
                     .map_err(|e| PbzError::Store(format!("{}: {e}", info.name)))?;
-                values
-                    .into_iter()
-                    .map(|v| serde_json::to_value(v).unwrap_or(Value::Null))
-                    .collect()
+                values.into_iter().map($convert).collect()
             }};
         }
         Ok(match info.metadata["data_type"].as_str().unwrap_or("") {
-            "string" => load!(String),
-            "uint8" => load!(u8),
-            "uint16" => load!(u16),
-            "uint32" => load!(u32),
-            "uint64" => load!(u64),
-            "int8" => load!(i8),
-            "int16" => load!(i16),
-            "int32" => load!(i32),
-            "int64" => load!(i64),
-            "float32" => load!(f32),
-            "float64" => load!(f64),
+            "string" => load!(String, CoordinateValue::String),
+            "uint8" => load!(u8, |v| CoordinateValue::Unsigned(v.into())),
+            "uint16" => load!(u16, |v| CoordinateValue::Unsigned(v.into())),
+            "uint32" => load!(u32, |v| CoordinateValue::Unsigned(v.into())),
+            "uint64" => load!(u64, CoordinateValue::Unsigned),
+            "int8" => load!(i8, |v| CoordinateValue::Signed(v.into())),
+            "int16" => load!(i16, |v| CoordinateValue::Signed(v.into())),
+            "int32" => load!(i32, |v| CoordinateValue::Signed(v.into())),
+            "int64" => load!(i64, CoordinateValue::Signed),
+            "float32" => load!(f32, |v| CoordinateValue::Float(v.into())),
+            "float64" => load!(f64, CoordinateValue::Float),
             other => {
                 return Err(PbzError::UnsupportedEncoding(format!(
                     "{}: unsupported coordinate type {other}",
@@ -76,26 +168,9 @@ impl Dataset {
         })
     }
 }
-/// Compare a declared missing sentinel in the physical domain. Zarr fill alone
-/// never marks a value as missing.
-pub(super) fn missing(info: &VariableInfo, value: &Value) -> bool {
-    if value.is_null() {
-        return true;
-    }
+/// Storage fill alone never marks a value as missing.
+pub(super) fn missing(info: &VariableInfo, value: &CoordinateValue) -> bool {
     let fill = &info.attrs()["_FillValue"];
-    if fill.is_null() {
-        return false;
-    }
-    if value == fill {
-        return true;
-    }
-    // Floating coordinates may encode an integer-valued sentinel in JSON.
-    if info.metadata["data_type"]
-        .as_str()
-        .is_some_and(|t| t.starts_with("float"))
-    {
-        return value.as_f64() == fill.as_f64();
-    }
     let integer = |v: &Value| -> Option<i128> {
         v.as_i64()
             .map(i128::from)
@@ -106,11 +181,13 @@ pub(super) fn missing(info: &VariableInfo, value: &Value) -> bool {
                     .map(|f| f as i128)
             })
     };
-    integer(value).is_some_and(|v| Some(v) == integer(fill))
+    match value {
+        CoordinateValue::String(v) => fill.as_str() == Some(v),
+        CoordinateValue::Signed(v) => integer(fill) == Some(i128::from(*v)),
+        CoordinateValue::Unsigned(v) => integer(fill) == Some(i128::from(*v)),
+        CoordinateValue::Float(v) => v.is_nan() || float_fill(info).ok().flatten() == Some(*v),
+    }
 }
-
-use super::ValidationStatus;
-use ndarray::{ArrayD, IxDyn};
 use std::ops::Range;
 use zarrs::array::ElementOwned;
 
@@ -139,18 +216,8 @@ impl Dataset {
                 message: format!("selection outside {name} shape {:?}", info.shape),
             });
         }
-        let shape: Vec<usize> = ranges
-            .iter()
-            .map(|r| {
-                usize::try_from(r.end - r.start).map_err(|_| {
-                    PbzError::Metadata("selection shape exceeds addressable memory".into())
-                })
-            })
-            .collect::<Result<_>>()?;
-        shape
-            .iter()
-            .try_fold(1_usize, |n, &s| n.checked_mul(s))
-            .ok_or_else(|| PbzError::Metadata("selection element count overflow".into()))?;
+        let shape =
+            checked_shape::<T>(&ranges.iter().map(|r| r.end - r.start).collect::<Vec<_>>())?;
         let array = self.array(name)?;
         T::validate_data_type(array.data_type()).map_err(|e| PbzError::InvalidDtype {
             dtype: e.to_string(),
