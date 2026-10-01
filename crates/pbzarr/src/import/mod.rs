@@ -7,6 +7,7 @@
 
 mod builder;
 mod config;
+pub(crate) mod destination;
 mod engine;
 mod estimate;
 pub mod progress;

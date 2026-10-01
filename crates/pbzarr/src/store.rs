@@ -639,7 +639,7 @@ pub(crate) fn default_data_codecs(dtype: Dtype) -> Result<Vec<Arc<dyn BytesToByt
 /// Apply a user-supplied explicit spec to `builder`: the resolved codec
 /// chain (default little-endian `bytes` inserted when the spec names no
 /// array-to-bytes codec), plus the chunk grid override when present.
-fn apply_explicit_spec(
+pub(crate) fn apply_explicit_spec(
     builder: &mut zarrs::array::ArrayBuilder,
     track: &str,
     spec: &ExplicitArraySpec,
@@ -676,7 +676,7 @@ fn dtype_size(d: Dtype) -> usize {
 }
 
 /// Map `Dtype` → a zarrs `DataType` value.
-fn dtype_to_zarrs(d: Dtype) -> zarrs::array::DataType {
+pub(crate) fn dtype_to_zarrs(d: Dtype) -> zarrs::array::DataType {
     match d {
         Dtype::U8 => data_type::uint8(),
         Dtype::U16 => data_type::uint16(),
@@ -692,7 +692,7 @@ fn dtype_to_zarrs(d: Dtype) -> zarrs::array::DataType {
 
 /// Resolve a track's fill value: use the caller's `TrackConfig::fill_value`
 /// (a JSON scalar) when set, coerced to the track dtype, else the dtype default.
-fn resolve_fill_value(d: Dtype, custom: Option<&Value>) -> Result<FillValue> {
+pub(crate) fn resolve_fill_value(d: Dtype, custom: Option<&Value>) -> Result<FillValue> {
     let Some(v) = custom else {
         return Ok(default_fill_value(d));
     };

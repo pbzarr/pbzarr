@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crossbeam_channel::Sender;
 use zarrs::array::ArrayShardedExt;
 
+use super::destination::Destination;
 use crate::error::{PbzError, Result};
 use crate::import::config::Report;
 use crate::import::engine::{self, CostModel, PipelineOptions, TapMessage};
@@ -23,6 +24,7 @@ use crate::import::estimate::{GenomeGeometry, LayoutEstimate, LayoutKnobs, Track
 use crate::import::routing::{ImportRouting, SourceAxis};
 use crate::io::ValueReader;
 use crate::track::Track;
+use crate::{TrackConfig, dataset::Dataset};
 
 pub struct Import;
 
@@ -35,6 +37,7 @@ impl Import {
         Ok(ImportBuilder {
             readers,
             tracks: Vec::new(),
+            dataset: None,
             tracks_from: None,
             columns_from: None,
             options: PipelineOptions::default(),
@@ -48,6 +51,7 @@ impl Import {
 pub struct ImportBuilder<'t, R: ValueReader> {
     readers: Vec<R>,
     tracks: Vec<&'t Track>,
+    dataset: Option<(&'t mut Dataset, Vec<(String, TrackConfig)>)>,
     tracks_from: Option<SourceAxis>,
     columns_from: Option<SourceAxis>,
     options: PipelineOptions,
@@ -58,12 +62,29 @@ pub struct ImportBuilder<'t, R: ValueReader> {
 
 impl<'t, R: ValueReader> ImportBuilder<'t, R> {
     pub fn into_track(mut self, track: &'t Track) -> Self {
+        self.dataset = None;
         self.tracks = vec![track];
         self
     }
 
     pub fn into_tracks(mut self, tracks: &[&'t Track]) -> Self {
+        self.dataset = None;
         self.tracks = tracks.to_vec();
+        self
+    }
+
+    /// Import into new root arrays in a core-draft-1 Dataset.
+    ///
+    /// Configuration and estimate are read-only; run validates the whole request
+    /// before writing. Existing dimensions require identical ordered labels.
+    /// Errors may leave incomplete output; reopen the Dataset after an error.
+    pub fn into_dataset(
+        mut self,
+        dataset: &'t mut Dataset,
+        tracks: Vec<(String, TrackConfig)>,
+    ) -> Self {
+        self.tracks.clear();
+        self.dataset = Some((dataset, tracks));
         self
     }
 
@@ -114,7 +135,21 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
     /// then maps the resolved track geometry onto
     /// [`LayoutEstimate::compute`].
     pub fn estimate(&self) -> Result<LayoutEstimate> {
-        if self.tracks.is_empty() {
+        let prepared = self
+            .dataset
+            .as_ref()
+            .map(|(ds, specs)| ds.prepare_import(specs))
+            .transpose()?;
+        let legacy: Vec<_> = self
+            .tracks
+            .iter()
+            .map(|track| Destination::Legacy(track))
+            .collect();
+        let tracks: &[Destination<'_>] = prepared
+            .as_ref()
+            .map(|p| p.targets.as_slice())
+            .unwrap_or(&legacy);
+        if tracks.is_empty() {
             return Err(PbzError::Metadata(
                 "import: no destination tracks; call into_track(s) first".into(),
             ));
@@ -125,17 +160,19 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             .map(ValueReader::output_schema)
             .collect();
         let genomes: Vec<_> = self.readers.iter().map(ValueReader::contigs).collect();
-        ImportRouting::resolve(
+        let routing = ImportRouting::resolve_destinations(
             &schemas,
             &genomes,
-            &self.tracks,
+            tracks,
             self.tracks_from,
             self.columns_from,
             self.expected_labels.as_deref(),
         )?;
 
-        let mut shapes = Vec::with_capacity(self.tracks.len());
-        for track in &self.tracks {
+        engine::validate_layout(tracks, &routing)?;
+
+        let mut shapes = Vec::with_capacity(tracks.len());
+        for track in tracks {
             shapes.push(TrackShape {
                 name: track.name().to_owned(),
                 dtype: track.dtype(),
@@ -151,7 +188,7 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
         // the first track's geometry stands for the knobs; multi-track
         // routings only ever target scalar tracks, so the column knobs can
         // only come from a lone rank-2 track.
-        let first = self.tracks[0];
+        let first = &tracks[0];
         let rank2 = first.rank() == 2;
         let array = first.values_array()?;
         let write_unit = first.write_unit_shape()?;
@@ -193,8 +230,22 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
         ))
     }
 
-    pub fn run(self) -> Result<Report> {
-        if self.tracks.is_empty() {
+    pub fn run(mut self) -> Result<Report> {
+        let prepared = self
+            .dataset
+            .as_ref()
+            .map(|(ds, specs)| ds.prepare_import(specs))
+            .transpose()?;
+        let legacy: Vec<_> = self
+            .tracks
+            .iter()
+            .map(|track| Destination::Legacy(track))
+            .collect();
+        let tracks: &[Destination<'_>] = prepared
+            .as_ref()
+            .map(|p| p.targets.as_slice())
+            .unwrap_or(&legacy);
+        if tracks.is_empty() {
             return Err(PbzError::Metadata(
                 "import: no destination tracks; call into_track(s) first".into(),
             ));
@@ -205,21 +256,29 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             .map(ValueReader::output_schema)
             .collect();
         let genomes: Vec<_> = self.readers.iter().map(ValueReader::contigs).collect();
-        let routing = ImportRouting::resolve(
+        let routing = ImportRouting::resolve_destinations(
             &schemas,
             &genomes,
-            &self.tracks,
+            tracks,
             self.tracks_from,
             self.columns_from,
             self.expected_labels.as_deref(),
         )?;
-        engine::run_import(
+        engine::validate_layout(tracks, &routing)?;
+        if let (Some((ds, _)), Some(prepared)) = (self.dataset.as_mut(), prepared.as_ref()) {
+            ds.begin_import(prepared)?;
+        }
+        let report = engine::run_import(
             self.readers,
-            &self.tracks,
+            tracks,
             &routing,
             &self.options,
             self.cost_model.as_deref(),
             self.tap.as_ref(),
-        )
+        )?;
+        if let (Some((ds, _)), Some(prepared)) = (self.dataset.as_mut(), prepared.as_ref()) {
+            ds.finish_import(prepared)?;
+        }
+        Ok(report)
     }
 }

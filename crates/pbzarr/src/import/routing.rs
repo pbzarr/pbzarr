@@ -7,6 +7,7 @@
 
 use std::ops::Range;
 
+use super::destination::Destination;
 use crate::error::{PbzError, Result};
 use crate::genome::Genome;
 use crate::io::error::ReaderError;
@@ -55,6 +56,25 @@ impl ImportRouting {
         schemas: &[&OutputSchema],
         genomes: &[&Genome],
         tracks: &[&Track],
+        tracks_from: Option<SourceAxis>,
+        columns_from: Option<SourceAxis>,
+        expected_labels: Option<&[String]>,
+    ) -> Result<Self> {
+        let destinations: Vec<_> = tracks.iter().map(|t| Destination::Legacy(t)).collect();
+        Self::resolve_destinations(
+            schemas,
+            genomes,
+            &destinations,
+            tracks_from,
+            columns_from,
+            expected_labels,
+        )
+    }
+
+    pub(crate) fn resolve_destinations(
+        schemas: &[&OutputSchema],
+        genomes: &[&Genome],
+        tracks: &[Destination<'_>],
         tracks_from: Option<SourceAxis>,
         columns_from: Option<SourceAxis>,
         expected_labels: Option<&[String]>,

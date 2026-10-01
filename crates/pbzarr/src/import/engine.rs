@@ -37,6 +37,7 @@ use ndarray::{Array2, ArrayViewMut1, ArrayViewMut2, Axis, s};
 use zarrs::array::{Array, ArrayShardedExt, ArraySubset, CodecOptions, FillValue};
 use zarrs::storage::ReadableWritableListableStorageTraits;
 
+use super::destination::Destination;
 use crate::Result;
 use crate::error::PbzError;
 use crate::genome::Genome;
@@ -44,7 +45,6 @@ use crate::import::config::{ProgressSink, Report};
 use crate::import::estimate::human_bytes;
 use crate::import::routing::{ImportRouting, SourceAxis, TrackTarget};
 use crate::io::{Dtype, OutputSinkMut, ReaderError, ValueReader, WindowSink};
-use crate::track::Track;
 
 pub struct PipelineOptions {
     /// Decode worker thread count. On the first import in a process, this
@@ -313,7 +313,7 @@ macro_rules! tile_buffer {
             }
 
             /// The buffer must be one chunk-aligned write unit.
-            fn write_unsharded(self, track: &Track, pos: Range<u64>, cols: Range<u64>) -> Result<()> {
+            fn write_unsharded(self, track: &Destination<'_>, pos: Range<u64>, cols: Range<u64>) -> Result<()> {
                 match self {
                     $( TileBuffer::$variant(a) => {
                         if track.rank() == 1 {
@@ -389,7 +389,7 @@ tile_buffer! {
 
 /// Resolved write geometry for one target track.
 struct TargetGeom<'t> {
-    track: &'t Track,
+    track: &'t Destination<'t>,
     array: Arc<Array<dyn ReadableWritableListableStorageTraits>>,
     rank: usize,
     dtype: Dtype,
@@ -1367,17 +1367,14 @@ fn build_touch_plan(
     plan
 }
 
-pub(crate) fn run_import<R: ValueReader>(
-    readers: Vec<R>,
-    tracks: &[&Track],
-    routing: &ImportRouting,
-    options: &PipelineOptions,
-    cost_model: Option<&dyn CostModel>,
-    tap: Option<&Sender<TapMessage>>,
-) -> Result<Report> {
-    let n_readers = readers.len();
-    let n_fields = readers[0].output_schema().len();
+pub(crate) fn validate_layout(tracks: &[Destination<'_>], routing: &ImportRouting) -> Result<()> {
+    target_geometries(tracks, routing).map(|_| ())
+}
 
+fn target_geometries<'t>(
+    tracks: &'t [Destination<'t>],
+    routing: &ImportRouting,
+) -> Result<Vec<TargetGeom<'t>>> {
     let mut geoms: Vec<TargetGeom<'_>> = Vec::with_capacity(tracks.len());
     for (track, target) in tracks.iter().zip(&routing.targets) {
         let array = track.values_array()?;
@@ -1452,6 +1449,22 @@ pub(crate) fn run_import<R: ValueReader>(
             array_chunk_len: chunk_len,
         });
     }
+
+    Ok(geoms)
+}
+
+pub(crate) fn run_import<R: ValueReader>(
+    readers: Vec<R>,
+    tracks: &[Destination<'_>],
+    routing: &ImportRouting,
+    options: &PipelineOptions,
+    cost_model: Option<&dyn CostModel>,
+    tap: Option<&Sender<TapMessage>>,
+) -> Result<Report> {
+    let n_readers = readers.len();
+    let n_fields = readers[0].output_schema().len();
+
+    let geoms = target_geometries(tracks, routing)?;
 
     let genome = Arc::clone(tracks[0].genome());
     let total = tracks[0].total_len();

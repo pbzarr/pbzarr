@@ -380,7 +380,7 @@ impl Dataset {
         let _ = self.reference_cache.set(reference);
         Ok(self.reference_cache.get().expect("reference initialized"))
     }
-    fn validate_labels(&self, dim: &str) -> Result<()> {
+    pub(super) fn validate_labels(&self, dim: &str) -> Result<()> {
         let info = self
             .variables
             .get(dim)
