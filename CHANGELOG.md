@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/pbzarr/pbzarr/compare/v0.6.0...v0.7.0) (2026-10-02)
+
+
+### Features
+
+* **pbz:** add bigwig import CLI ([39ca5e8](https://github.com/pbzarr/pbzarr/commit/39ca5e804b0f49c89266b5b79902b7938d16d1f6))
+
 ## [0.6.0](https://github.com/pbzarr/pbzarr/compare/v0.5.1...v0.6.0) (2026-09-02)
 
 
