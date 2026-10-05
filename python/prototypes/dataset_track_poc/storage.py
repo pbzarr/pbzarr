@@ -20,19 +20,19 @@ import zarr
 from .genomic_index import Reference, get_index, genomic_width
 
 
-CORE_ATTRS = {
-    "zarr_conventions": [{"uuid": "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c", "name": "pbz:"}],
-    "pbz:version": "core-draft-1",
+PBZ_ATTRS = {
+    "zarr_conventions": [{"uuid": "d5bd7bea-0388-4e0a-9844-707c034e9add", "name": "pbz"}],
+    "pbz:version": "0.5",
     "pbz:reference": {"names": "contig", "lengths": "contig_length"},
 }
 
 
 def _reference(dataset):
-    if dataset.attrs.get("zarr_conventions") != CORE_ATTRS["zarr_conventions"]:
+    if dataset.attrs.get("zarr_conventions") != PBZ_ATTRS["zarr_conventions"]:
         raise ValueError("Expected the PBZ prototype convention marker.")
-    if dataset.attrs.get("pbz:version") != CORE_ATTRS["pbz:version"]:
-        raise ValueError("Expected the isolated core-draft-1 prototype format.")
-    if dataset.attrs.get("pbz:reference") != CORE_ATTRS["pbz:reference"]:
+    if dataset.attrs.get("pbz:version") != PBZ_ATTRS["pbz:version"]:
+        raise ValueError("Expected the isolated format-0.5 prototype format.")
+    if dataset.attrs.get("pbz:reference") != PBZ_ATTRS["pbz:reference"]:
         raise ValueError("This prototype requires contig/contig_length reference arrays.")
     if not {"contig", "contig_length"}.issubset(dataset.coords):
         raise ValueError("Reference arrays must decode as coordinates.")
@@ -56,7 +56,7 @@ def create_store(path, reference, coords=None, attrs=None):
     if not isinstance(reference, Reference):
         reference = Reference.from_mapping(reference)
     attrs = dict(attrs or {})
-    if (set(CORE_ATTRS) | {"coordinates"}).intersection(attrs):
+    if (set(PBZ_ATTRS) | {"coordinates"}).intersection(attrs):
         raise ValueError("User attributes cannot replace convention fields.")
     coords = dict(coords or {})
     if {"contig", "contig_length"}.intersection(coords):
@@ -65,7 +65,7 @@ def create_store(path, reference, coords=None, attrs=None):
         "contig": ("contig", np.asarray(reference.names, dtype=object)),
         "contig_length": ("contig", np.asarray(reference.lengths, dtype="int64")),
         **coords,
-    }, attrs={**attrs, **CORE_ATTRS})
+    }, attrs={**attrs, **PBZ_ATTRS})
     for dim in dataset.dims:
         if genomic_width(dim) is not None:
             raise ValueError("Genomic coordinates are implicit and cannot be supplied.")

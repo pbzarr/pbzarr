@@ -4,11 +4,11 @@
   "attributes": {
     "zarr_conventions": [
       {
-        "uuid": "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c",
-        "name": "pbz:"
+        "uuid": "d5bd7bea-0388-4e0a-9844-707c034e9add",
+        "name": "pbz"
       }
     ],
-    "pbz:version": "core-draft-1",
+    "pbz:version": "0.5",
     "pbz:reference": {
       "names": "contig",
       "lengths": "contig_length"

@@ -12,7 +12,7 @@ fn storage_error(error: impl std::fmt::Display) -> PbzError {
 }
 
 impl Dataset {
-    /// Create a new core-draft-1 Dataset with a fixed ordered reference.
+    /// Create a new format-0.5 Dataset with a fixed ordered reference.
     ///
     /// The storage namespace must be empty. No conversion or replacement is performed.
     pub fn create(path: impl AsRef<Path>, reference: Reference) -> Result<Self> {
@@ -67,7 +67,10 @@ impl Dataset {
         root.attributes_mut().extend(
             serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(
                 serde_json::json!({
-                    "zarr_conventions": [{"uuid":crate::PERBASE_CONVENTION_UUID,"name":"pbz:"}],
+                    "zarr_conventions": [{
+                        "uuid":crate::PBZ_CONVENTION_UUID,
+                        "name":crate::PBZ_CONVENTION_NAME,
+                    }],
                     "pbz:version":FORMAT_VERSION,
                     "pbz:reference":{"names":"contig","lengths":"contig_length"},
                     "coordinates":"contig_length"

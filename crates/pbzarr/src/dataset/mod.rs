@@ -13,8 +13,8 @@ pub use reference::{BinInterval, GenomicAxis, Reference};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use zarrs::storage::ReadableWritableListableStorage;
 
-/// Development convention token, not a published format version.
-pub const FORMAT_VERSION: &str = "core-draft-1";
+/// The `pbz:version` value written to, and required of, a root-Dataset store.
+pub const FORMAT_VERSION: &str = "0.5";
 
 /// A metadata catalog of the direct arrays in a root Xarray Dataset.
 ///

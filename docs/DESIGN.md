@@ -6,8 +6,8 @@ This document describes PBZ v0.4, the current layout and public APIs. Earlier co
 
 ## Development reader
 
-The additive Rust `pbzarr::dataset::Dataset` reads the provisional
-[`core-draft-1` root-Dataset convention](proposals/pbz-core-draft/README.md).
+The additive Rust `pbzarr::dataset::Dataset` reads the
+[format `0.5` root-Dataset schema](STORE_SPEC.md#format-05-store-schema).
 It catalogs direct root arrays, validates reference and dimension coordinates,
 and reads typed rectangular subsets. `read_raw` preserves physical values and
 missing sentinels; `read_bool` decodes the supported Boolean encodings.
@@ -15,9 +15,9 @@ The module caches metadata and reference geometry, so callers must reopen after
 external changes. It does not provide a concurrent-mutation snapshot.
 
 This reader is an explicit development entry point. The default `PbzStore`,
-CLI, and production Python API still use format 0.4. New-format creation,
-imports, and wrapper integration remain later milestones. Executed checks and
-encoding limits are in the [validation record](proposals/pbz-core-draft/VALIDATION.md).
+CLI, and production Python API still use format 0.4. A format `0.4` root
+presented to it reports as an unsupported format. CLI and wrapper integration
+remain later milestones.
 
 ## Goals
 

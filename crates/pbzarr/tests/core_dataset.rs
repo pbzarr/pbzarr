@@ -10,7 +10,7 @@ use zarrs::storage::{ReadableWritableListableStorage, StoreKey};
 
 fn root(names: &str, lengths: &str) -> Value {
     json!({"zarr_format":3,"node_type":"group","attributes":{
-        "zarr_conventions":[{"uuid":"b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c","name":"pbz:"}],
+        "zarr_conventions":[{"uuid":pbzarr::PBZ_CONVENTION_UUID,"name":pbzarr::PBZ_CONVENTION_NAME}],
         "pbz:version":FORMAT_VERSION,"pbz:reference":{"names":names,"lengths":lengths},
         "coordinates":lengths}})
 }
@@ -132,9 +132,20 @@ fn unsupported_version_is_distinct_from_bad_identity() {
     value["attributes"]["zarr_conventions"] = json!([]);
     put(&storage, "zarr.json", value);
     assert!(matches!(
-        Dataset::open_with_storage(storage),
+        Dataset::open_with_storage(storage.clone()),
         Err(PbzError::Metadata(_))
     ));
+    let mut value = root("contig", "contig_length");
+    value["attributes"]["zarr_conventions"] = json!([{
+        "uuid": pbzarr::PERBASE_CONVENTION_UUID,
+        "name": pbzarr::PERBASE_CONVENTION_NAME,
+    }]);
+    put(&storage, "zarr.json", value);
+    match Dataset::open_with_storage(storage) {
+        Err(PbzError::UnsupportedFormat(v)) => assert!(v.contains("0.4"), "got {v:?}"),
+        Err(other) => panic!("a 0.4 root must report an unsupported format, got {other:?}"),
+        Ok(_) => panic!("a 0.4 root must not open as a format-0.5 Dataset"),
+    }
 }
 
 use pbzarr::dataset::{GenomicAxis, ValidationStatus};

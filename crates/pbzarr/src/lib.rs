@@ -28,3 +28,10 @@ pub const PERBASE_CONVENTION_NAME: &str = "perbase";
 /// Minted uuid4 for the `perbase` convention. Stable across releases; the
 /// registry entry / schema_url are published later (design-to-conform-now).
 pub const PERBASE_CONVENTION_UUID: &str = "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c";
+
+/// The `pbz` Zarr convention name (the `zarr_conventions[].name`).
+pub const PBZ_CONVENTION_NAME: &str = "pbz";
+
+/// Minted uuid4 for the `pbz` convention. Distinct from the `perbase` uuid so a
+/// reader can tell the root-Dataset layout from the per-track group layout.
+pub const PBZ_CONVENTION_UUID: &str = "d5bd7bea-0388-4e0a-9844-707c034e9add";

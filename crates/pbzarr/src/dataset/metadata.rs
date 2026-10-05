@@ -8,7 +8,8 @@ use zarrs::{
     metadata::v3::ArrayMetadataV3,
 };
 
-const CONVENTION: &str = "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c";
+use crate::{PBZ_CONVENTION_UUID as CONVENTION, PERBASE_CONVENTION_UUID as LEGACY_CONVENTION};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -124,10 +125,13 @@ pub(super) fn catalog(
         return Err(PbzError::Metadata("R1: expected Zarr v3 root group".into()));
     }
     let attrs = &root["attributes"];
-    if attrs["zarr_conventions"]
-        .as_array()
-        .is_none_or(|a| a.iter().filter(|c| c["uuid"] == CONVENTION).count() != 1)
-    {
+    let conventions = attrs["zarr_conventions"].as_array();
+    if conventions.is_none_or(|a| a.iter().filter(|c| c["uuid"] == CONVENTION).count() != 1) {
+        if conventions.is_some_and(|a| a.iter().any(|c| c["uuid"] == LEGACY_CONVENTION)) {
+            return Err(PbzError::UnsupportedFormat(
+                "0.4 per-track group layout".into(),
+            ));
+        }
         return Err(PbzError::Metadata(
             "R1: missing PBZ convention identity".into(),
         ));

@@ -73,7 +73,7 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
         self
     }
 
-    /// Import into new root arrays in a core-draft-1 Dataset.
+    /// Import into new root arrays in a format-0.5 Dataset.
     ///
     /// Configuration and estimate are read-only; run validates the whole request
     /// before writing. Existing dimensions require identical ordered labels.
