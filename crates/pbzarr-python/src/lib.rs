@@ -636,16 +636,16 @@ fn import_bam(
 ///
 /// Format `0.4` writes a bare `zarr_conventions` marker root and takes its
 /// contigs from each import's sources. Format `0.5` writes one root Dataset
-/// whose `reference`, ordered `(contig, length)` pairs, is fixed here and
-/// shared by every track it later holds.
+/// whose reference, the ordered `contigs` pairs, is fixed here and shared by
+/// every track it later holds.
 #[pyfunction]
-#[pyo3(signature = (store_path, format="0.4".to_string(), reference=None))]
+#[pyo3(signature = (store_path, format="0.4".to_string(), contigs=None))]
 fn create_store(
     store_path: String,
     format: String,
-    reference: Option<Vec<(String, u64)>>,
+    contigs: Option<Vec<(String, u64)>>,
 ) -> PyResult<()> {
-    let contigs = match (Format::parse(&format)?, reference) {
+    let contigs = match (Format::parse(&format)?, contigs) {
         (Format::V04, None) => {
             return PbzStore::create(&store_path)
                 .map(|_| ())
@@ -653,12 +653,12 @@ fn create_store(
         }
         (Format::V04, Some(_)) => {
             return Err(PbzError::new_err(
-                "reference applies to format 0.5 only; a format 0.4 store takes its contigs from each import's sources",
+                "contigs applies to format 0.5 only; a format 0.4 store takes its contigs from each import's sources",
             ));
         }
         (Format::V05, None) => {
             return Err(PbzError::new_err(
-                "format 0.5 requires reference: the ordered contig names and lengths every track shares",
+                "format 0.5 requires contigs: the ordered contig names and lengths every track shares",
             ));
         }
         (Format::V05, Some(contigs)) => contigs,

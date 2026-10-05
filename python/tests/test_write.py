@@ -58,6 +58,45 @@ def test_import_d4_one_labeled_source_with_column_dim_is_two_dimensional(
         collection.close()
 
 
+def test_format_05_create_and_import_opens_as_one_xarray_dataset(
+    tmp_path, cohort_fixtures
+):
+    destination = tmp_path / "cohort.pbz"
+    pbzarr.create_store(destination, format="0.5", contigs={"chr1": 10000})
+
+    report = pbzarr.import_d4(
+        destination,
+        "depth",
+        list(zip(cohort_fixtures, ["s0", "s1"])),
+        format="0.5",
+    )
+    assert report["contigs_written"] == 1
+
+    with xr.open_zarr(destination, consolidated=False) as dataset:
+        assert set(dataset.data_vars) == {"depth"}
+        assert dataset["depth"].dims == ("position", "sample")
+        assert dataset["depth"].sizes["position"] == 10000
+        assert dataset["sample"].values.tolist() == ["s0", "s1"]
+        np.testing.assert_array_equal(dataset["contig"].values, ["chr1"])
+        np.testing.assert_array_equal(dataset["contig_length"].values, [10000])
+        expected = np.repeat((np.arange(1000) % 50) + 1, 10)
+        np.testing.assert_array_equal(dataset["depth"].values[:, 0], expected)
+        np.testing.assert_array_equal(dataset["depth"].values[:, 1], expected + 100)
+
+
+def test_format_05_rejects_scales_before_writing(tmp_path, cohort_fixtures):
+    destination = tmp_path / "scaled.pbz"
+    pbzarr.create_store(destination, format="0.5", contigs={"chr1": 10000})
+
+    with pytest.raises(ValueError, match="not supported by format"):
+        pbzarr.import_d4(
+            destination, "depth", cohort_fixtures[0], format="0.5", scales=[16]
+        )
+
+    with xr.open_zarr(destination, consolidated=False) as dataset:
+        assert not dataset.data_vars
+
+
 def test_import_bigwig_path_list_defaults_to_sample_axis(tmp_path, write_bigwig):
     first = write_bigwig("chr1", 20, "first", base=0.0)
     second = write_bigwig("chr1", 20, "second", base=10.0)

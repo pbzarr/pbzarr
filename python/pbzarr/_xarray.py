@@ -34,6 +34,7 @@ _RESERVED_NAMES = frozenset(
     }
 )
 _CHECKSUM_PATTERN = re.compile(r"md5:[0-9a-f]{32}\Z")
+_PBZ_CONVENTION_UUID = "d5bd7bea-0388-4e0a-9844-707c034e9add"
 
 
 def _open_zarr(source, *, group=None, storage_options=None) -> xr.Dataset:
@@ -55,6 +56,15 @@ def _has_perbase_marker(attrs: Mapping) -> bool:
     conventions = attrs.get("zarr_conventions", ())
     return isinstance(conventions, list) and any(
         isinstance(convention, Mapping) and convention.get("name") == "perbase"
+        for convention in conventions
+    )
+
+
+def _has_pbz_marker(attrs: Mapping) -> bool:
+    conventions = attrs.get("zarr_conventions", ())
+    return isinstance(conventions, list) and any(
+        isinstance(convention, Mapping)
+        and convention.get("uuid") == _PBZ_CONVENTION_UUID
         for convention in conventions
     )
 
