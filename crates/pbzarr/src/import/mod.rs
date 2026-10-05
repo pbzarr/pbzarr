@@ -13,6 +13,7 @@ mod estimate;
 pub mod progress;
 mod routing;
 mod source;
+mod target;
 
 pub use builder::{Import, ImportBuilder};
 pub use config::{Config, ProgressSink, Report};
@@ -25,3 +26,4 @@ pub use estimate::{
 };
 pub use routing::{ImportRouting, SourceAxis, TrackTarget};
 pub use source::Source;
+pub use target::{Axes, Target};

@@ -5,9 +5,8 @@ use std::path::PathBuf;
 use log::{debug, info, warn};
 use pbzarr::Genome;
 use pbzarr::PbzError;
-use pbzarr::PbzStore;
 use pbzarr::Result;
-use pbzarr::import::{Config, Import, PipelineOptions, Report, Source};
+use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
 use pbzarr::io::Dtype;
 use pbzarr::io::ValueReader as _;
 
@@ -28,8 +27,8 @@ use super::{DepthFilter, OverlapMode};
 /// column dimension yields scalar tracks; otherwise the sources become the
 /// columns of cohort tracks, whose dimension name comes from
 /// `config.column_dim` and defaults to `"sample"`.
-pub fn from_bam(
-    store: &mut PbzStore,
+pub fn from_bam<'t>(
+    target: impl Into<Target<'t>>,
     track_name: &str,
     sources: &[Source],
     mode: ImportMode,
@@ -158,19 +157,14 @@ pub fn from_bam(
         handle_budget: config.handle_budget,
         progress: config.progress.clone(),
     };
-    let report = store.create_tracks_with(specs, move |tracks| {
-        let builder = Import::from_readers(readers)?;
-        let mut builder = match mode {
-            ImportMode::Depth => builder.into_track(tracks[0]),
-            ImportMode::Composition => builder.into_tracks(tracks).fields_as_tracks(),
-        };
-        if let Some(labels) = column_labels {
-            builder = builder.readers_as_columns().expect_column_labels(labels);
-        }
-        builder.options(options).run()
-    })?;
-    config.scale_tracks(store, &names)?;
-    Ok(report)
+    let mut axes = match mode {
+        ImportMode::Depth => Axes::default(),
+        ImportMode::Composition => Axes::default().fields_as_tracks(),
+    };
+    if let Some(labels) = column_labels {
+        axes = axes.readers_as_columns(labels);
+    }
+    target.into().import(specs, readers, axes, options, &config)
 }
 
 /// The genome shared by every source, taken from the first and required to

@@ -3,9 +3,8 @@
 use log::{debug, info};
 use pbzarr::Genome;
 use pbzarr::PbzError;
-use pbzarr::PbzStore;
 use pbzarr::Result;
-use pbzarr::import::{Config, Import, PipelineOptions, Report, Source};
+use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
 use pbzarr::io::Dtype;
 use pbzarr::io::ValueReader as _;
 
@@ -18,8 +17,8 @@ use super::reader::D4Reader;
 /// yields a scalar track; otherwise the sources form a 2D track whose labels
 /// come from each source's `column_label` (falling back to its file stem).
 /// All sources must share a genome (checked by checksum).
-pub fn from_d4(
-    store: &mut PbzStore,
+pub fn from_d4<'t>(
+    target: impl Into<Target<'t>>,
     track_name: &str,
     sources: &[Source],
     config: Config,
@@ -54,20 +53,17 @@ pub fn from_d4(
         handle_budget: config.handle_budget,
         progress: config.progress.clone(),
     };
-    let report = store.create_tracks_with(
+    let mut axes = Axes::default();
+    if let Some(labels) = labels {
+        axes = axes.readers_as_columns(labels);
+    }
+    target.into().import(
         vec![(track_name.to_owned(), genome, track_config)],
-        move |tracks| {
-            let mut builder = Import::from_readers(readers)?
-                .into_track(tracks[0])
-                .options(options);
-            if let Some(labels) = labels {
-                builder = builder.readers_as_columns().expect_column_labels(labels);
-            }
-            builder.run()
-        },
-    )?;
-    config.scale_tracks(store, &[track_name.to_owned()])?;
-    Ok(report)
+        readers,
+        axes,
+        options,
+        &config,
+    )
 }
 
 /// The genome shared by every source, taken from the first and required to

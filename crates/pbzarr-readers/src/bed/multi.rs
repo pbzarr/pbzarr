@@ -15,13 +15,11 @@ use noodles_bgzf as bgzf;
 use noodles_csi::BinningIndex;
 
 use pbzarr::genome::Genome;
-use pbzarr::import::{Config, Import, PipelineOptions, Report, Source};
+use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
 use pbzarr::io::{
     ColumnSinkMut, Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, ValueReader,
 };
-use pbzarr::{
-    PbzError, PbzStore, Result, TrackConfig, validate_column_dimension_name, validate_node_name,
-};
+use pbzarr::{PbzError, Result, TrackConfig, validate_column_dimension_name, validate_node_name};
 
 use crate::coords::noodles_query_interval;
 
@@ -594,8 +592,8 @@ impl ValueReader for BedMultiReader {
 /// Execute a plan returned by [`plan_bed_schema`]. Schema resolution is not
 /// repeated. The executor rejects a column dimension that differs from the
 /// planned value before it accesses the store.
-pub fn execute_bed_schema_plan(
-    store: &mut PbzStore,
+pub fn execute_bed_schema_plan<'t>(
+    target: impl Into<Target<'t>>,
     plan: BedSchemaPlan,
     genome: Genome,
     config: Config,
@@ -618,6 +616,7 @@ pub fn execute_bed_schema_plan(
             } => format!("track {track_name:?} with {} BED column(s)", columns.len()),
         }
     );
+    let target = target.into();
     match plan.layout {
         SchemaLayout::PerColumn(resolved) => {
             let scalar = plan.sources.len() == 1 && config.column_dim.is_none();
@@ -650,7 +649,7 @@ pub fn execute_bed_schema_plan(
                 .collect::<Vec<_>>();
             let readers = open_readers(&plan.sources, &reader_columns, &genome)?;
             let column_labels = (!scalar).then_some(source_labels);
-            run_field_tracks(store, specs, readers, column_labels, &config)
+            run_field_tracks(target, specs, readers, column_labels, &config)
         }
         SchemaLayout::BedColumnAxis {
             track_name,
@@ -679,20 +678,13 @@ pub fn execute_bed_schema_plan(
                     PbzError::Store(format!("open {}: {error}", source.path.display()))
                 })?;
             let options = pipeline_options(&config);
-            let names = vec![track_name.clone()];
-            let report = store.create_tracks_with(
+            target.import(
                 vec![(track_name, genome, track_config)],
-                move |tracks| {
-                    Import::from_readers(vec![reader])?
-                        .into_track(tracks[0])
-                        .fields_as_columns()
-                        .expect_column_labels(column_labels)
-                        .options(options)
-                        .run()
-                },
-            )?;
-            config.scale_tracks(store, &names)?;
-            Ok(report)
+                vec![reader],
+                Axes::default().fields_as_columns(column_labels),
+                options,
+                &config,
+            )
         }
     }
 }
@@ -702,8 +694,8 @@ pub fn execute_bed_schema_plan(
 /// own tracks (2D over sources when there are several), and a single
 /// multi-field source one wide 2D track whose columns are the fields. Any 2D
 /// output requires `Config::column_dim`.
-pub fn from_bed_matrix(
-    store: &mut PbzStore,
+pub fn from_bed_matrix<'t>(
+    target: impl Into<Target<'t>>,
     sources: &[pbzarr::import::Source],
     genome: Genome,
     options: &BedImportOptions,
@@ -726,6 +718,7 @@ pub fn from_bed_matrix(
         ));
     }
 
+    let target = target.into();
     match resolved {
         ResolvedImport::SingleTrack {
             track,
@@ -746,7 +739,7 @@ pub fn from_bed_matrix(
             );
             let readers = open_readers(sources, &[(column, dtype, None)], &genome)?;
             run_field_tracks(
-                store,
+                target,
                 vec![(track, genome, cfg)],
                 readers,
                 column_labels,
@@ -775,17 +768,13 @@ pub fn from_bed_matrix(
             let reader = BedMultiReader::open(&sources[0].path, reader_columns, genome.clone())
                 .map_err(|e| PbzError::Store(format!("open {}: {e}", sources[0].path.display())))?;
             let options = pipeline_options(&config);
-            let names = vec![track.clone()];
-            let report = store.create_tracks_with(vec![(track, genome, cfg)], move |tracks| {
-                Import::from_readers(vec![reader])?
-                    .into_track(tracks[0])
-                    .fields_as_columns()
-                    .expect_column_labels(column_labels)
-                    .options(options)
-                    .run()
-            })?;
-            config.scale_tracks(store, &names)?;
-            Ok(report)
+            target.import(
+                vec![(track, genome, cfg)],
+                vec![reader],
+                Axes::default().fields_as_columns(column_labels),
+                options,
+                &config,
+            )
         }
         ResolvedImport::PerField {
             fields,
@@ -813,7 +802,7 @@ pub fn from_bed_matrix(
                 .collect();
             let readers = open_readers(sources, &reader_columns, &genome)?;
             let column_labels = (!scalar).then_some(labels);
-            run_field_tracks(store, specs, readers, column_labels, &config)
+            run_field_tracks(target, specs, readers, column_labels, &config)
         }
     }
 }
@@ -843,7 +832,7 @@ fn pipeline_options(config: &Config) -> PipelineOptions {
 }
 
 fn run_field_tracks(
-    store: &mut PbzStore,
+    target: Target<'_>,
     specs: Vec<(String, Genome, TrackConfig)>,
     readers: Vec<BedMultiReader>,
     // `Some` labels put the sources on the column axis; `None` keeps the
@@ -854,16 +843,9 @@ fn run_field_tracks(
     config: &Config,
 ) -> Result<Report> {
     let options = pipeline_options(config);
-    let names: Vec<String> = specs.iter().map(|(name, _, _)| name.clone()).collect();
-    let report = store.create_tracks_with(specs, move |tracks| {
-        let mut builder = Import::from_readers(readers)?
-            .into_tracks(tracks)
-            .fields_as_tracks();
-        if let Some(labels) = column_labels {
-            builder = builder.readers_as_columns().expect_column_labels(labels);
-        }
-        builder.options(options).run()
-    })?;
-    config.scale_tracks(store, &names)?;
-    Ok(report)
+    let mut axes = Axes::default().fields_as_tracks();
+    if let Some(labels) = column_labels {
+        axes = axes.readers_as_columns(labels);
+    }
+    target.import(specs, readers, axes, options, config)
 }
