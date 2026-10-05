@@ -1,8 +1,8 @@
 # PBZ core conformance draft
 
 Updated: 2026-09-30. This defines example stores and expected validation results
-for the [core proposal](README.md). The additive Rust draft reader and `pixi run validate-core-dataset` now make
-these expectations executable; see the validation record for actual runs. The examples use `core-draft-1` until
+for the [core proposal](README.md). The additive Rust draft reader and `pixi run validate-dataset` now make
+these expectations executable; see the validation record for actual runs. The examples use `0.5` until
 a release format version is assigned. No conversion is included.
 
 ## Run and inspect the examples
@@ -10,7 +10,7 @@ a release format version is assigned. No conversion is included.
 From the repository root, using the existing project environment:
 
 ```sh
-pixi run python docs/proposals/pbz-core-draft/examples.py
+pixi run python docs/proposals/format-05/examples.py
 ```
 
 The command creates temporary Zarr v3 stores and verifies the valid examples

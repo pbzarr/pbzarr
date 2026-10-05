@@ -1,7 +1,7 @@
 # Dataset / Track API prototype
 
 **Throwaway experiment, not the production pbzarr API.** This explores the
-[proposed core convention](../../../docs/proposals/pbz-core-draft/README.md).
+[proposed core convention](../../../docs/proposals/format-05/README.md).
 It does not read or migrate production format 0.4, and does not change its
 implementation or release scope.
 

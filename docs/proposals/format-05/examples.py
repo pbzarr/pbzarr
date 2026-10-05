@@ -1,10 +1,10 @@
 """Native Zarr examples for the PBZ core draft; not a production PBZ validator.
 
 Run from the repository root with:
-    pixi run python docs/proposals/pbz-core-draft/examples.py
+    pixi run python docs/proposals/format-05/examples.py
 
 By default stores are temporary. --output NEW_DIRECTORY keeps them for review.
-Run pixi run validate-core-dataset to check the generated corpus with Rust.
+Run pixi run validate-dataset to check the generated corpus with Rust.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def root_attrs():
         "zarr_conventions": [{
             "uuid": "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c", "name": "pbz",
         }],
-        "pbz:version": "core-draft-1",
+        "pbz:version": "0.5",
         "pbz:reference": {"names": "contig", "lengths": "contig_length"},
     }
 
@@ -78,7 +78,7 @@ def generate(destination):
     invalid_dir = destination / "invalid"
     valid_dir.mkdir()
     invalid_dir.mkdir()
-    manifest = {"format": "core-draft-1", "valid": [], "invalid": [], "unsupported": []}
+    manifest = {"format": "0.5", "valid": [], "invalid": [], "unsupported": []}
 
     tasks = []
     with Callback(pretask=lambda key, *args: tasks.append(key)):
@@ -224,7 +224,7 @@ def main():
     parser.add_argument("--output", type=Path, help="new directory in which to retain the example stores")
     args = parser.parse_args()
     if args.output is None:
-        with TemporaryDirectory(prefix="pbz-core-examples-") as directory:
+        with TemporaryDirectory(prefix="pbz-examples-") as directory:
             generate(Path(directory))
         print("Temporary stores removed.")
     else:

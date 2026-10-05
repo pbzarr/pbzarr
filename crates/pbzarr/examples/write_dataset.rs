@@ -89,7 +89,7 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args_os().skip(1);
     let path = args
         .next()
-        .ok_or_else(|| anyhow::anyhow!("usage: write_core_dataset STORE [add]"))?;
+        .ok_or_else(|| anyhow::anyhow!("usage: write_dataset STORE [add]"))?;
     let mode = args.next();
     anyhow::ensure!(args.next().is_none(), "too many arguments");
     if let Some(mode) = mode {

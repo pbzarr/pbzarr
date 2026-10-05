@@ -9,7 +9,7 @@ Executed checks:
 
 * `pixi run check` passed formatting, workspace Clippy, and 256 Rust tests
   (one doctest ignored). Strict Clippy for all core targets also passed.
-* `pixi run validate-core-dataset` passed the Rust-created fixture through native
+* `pixi run validate-dataset` passed the Rust-created fixture through native
   Xarray, then all seven valid, sixteen invalid, and one unknown-version reader
   cases. The new fixture checked shared reference/sample coordinates, ordinary
   zero/false values, all-fill chunk omission, explicit Zstd settings, and shards
@@ -49,7 +49,7 @@ append, replacement, and arbitrary-rank Rust authoring remain outside this step.
 
 ## Rust reader milestone — 2026-09-30
 
-The additive `pbzarr::dataset::Dataset` uses `core-draft-1`.
+The additive `pbzarr::dataset::Dataset` uses `0.5`.
 Rust verification passed after independent review and fixes:
 
 * `pixi run check`: formatting, workspace Clippy, and 243 Rust tests passed
@@ -74,7 +74,7 @@ run, not a test dependency.
 
 **Complete:** after approval, added `dask-core>=2024.12` to the Pixi
 validation feature and installed the locked dependencies in an independent
-worktree environment. `pixi run validate-core-dataset` generated fresh stores
+worktree environment. `pixi run validate-dataset` generated fresh stores
 and passed all seven valid, sixteen invalid, and one unsupported-version case.
 It compared values, Boolean masks, dimensions, coordinate roles, references,
 bins, and selections; expression construction executed zero Dask tasks.
@@ -110,7 +110,7 @@ cached; this is not a concurrent snapshot guarantee.
 Ran [examples.py](examples.py) with the existing project interpreter:
 
 ```sh
-.pixi/envs/default/bin/python docs/proposals/pbz-core-draft/examples.py --output /private/tmp/pbz-core-examples-20260930-9305
+.pixi/envs/default/bin/python docs/proposals/format-05/examples.py --output /private/tmp/pbz-core-examples-20260930-9305
 ```
 
 Environment: Python 3.12.13, NumPy 2.4.6, Xarray 2025.12.0, Dask 2026.8.0,

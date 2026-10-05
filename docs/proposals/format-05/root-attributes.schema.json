@@ -18,7 +18,7 @@
       "minContains": 1,
       "maxContains": 1
     },
-    "pbz:version": {"const": "core-draft-1"},
+    "pbz:version": {"const": "0.5"},
     "pbz:reference": {
       "type": "object",
       "required": ["names", "lengths"],

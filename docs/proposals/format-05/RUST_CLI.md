@@ -8,7 +8,7 @@ The [conformance cases](CONFORMANCE.md) supply concrete examples and validation 
 ## Format transition
 
 The root Dataset design requires a new format version. The token
-`core-draft-1` remains provisional. This proposal assigns no numeric release
+`0.5` remains provisional. This proposal assigns no numeric release
 version, and package versions remain separate from format versions.
 
 Conversion from format 0.4 is outside the initial work. This decision does not
@@ -22,7 +22,7 @@ validation, and typed positional reads; see the [validation record](VALIDATION.m
 Milestone B adds `Dataset::create` / `create_with_storage` and the existing
 Import builder's `into_dataset` target, reusing TrackConfig for 1D/2D source
 imports. See the [creation/import example and limits](WRITING.md) and
-[implementation plan](../../superpowers/plans/2026-10-01-pbz-core-writer.md).
+[implementation plan](../../STORE_SPEC.md).
 CLI integration remains milestone C. No separate writer object or arbitrary-rank
 Rust authoring interface was added. Broader valid arrays remain readable through
 Dataset and writable through native Xarray/Zarr.

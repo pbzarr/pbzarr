@@ -113,7 +113,7 @@ fn check(path: &std::path::Path) -> anyhow::Result<Value> {
 fn main() -> anyhow::Result<()> {
     let path = std::env::args_os()
         .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("usage: check_core_dataset STORE"))?;
+        .ok_or_else(|| anyhow::anyhow!("usage: check_dataset STORE"))?;
     println!(
         "{}",
         serde_json::to_string(&check(std::path::Path::new(&path))?)?

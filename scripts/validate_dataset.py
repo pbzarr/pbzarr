@@ -74,17 +74,17 @@ def check_rust_imports(writer, probe, destination):
 
 def main():
     module_spec = importlib.util.spec_from_file_location(
-        "core_examples", ROOT / "docs/proposals/pbz-core-draft/examples.py"
+        "core_examples", ROOT / "docs/proposals/format-05/examples.py"
     )
     examples = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(examples)
-    subprocess.run(["cargo", "build", "-p", "pbzarr", "--example", "check_core_dataset", "--example", "write_core_dataset"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "build", "-p", "pbzarr", "--example", "check_dataset", "--example", "write_dataset"], cwd=ROOT, check=True)
     cargo = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=ROOT, text=True
     ))
-    probe = Path(cargo["target_directory"]) / "debug/examples/check_core_dataset"
-    writer = Path(cargo["target_directory"]) / "debug/examples/write_core_dataset"
-    with TemporaryDirectory(prefix="pbz-core-conformance-") as tmp:
+    probe = Path(cargo["target_directory"]) / "debug/examples/check_dataset"
+    writer = Path(cargo["target_directory"]) / "debug/examples/write_dataset"
+    with TemporaryDirectory(prefix="pbz-conformance-") as tmp:
         destination = Path(tmp)
         check_rust_imports(writer, probe, destination)
         examples.generate(destination)

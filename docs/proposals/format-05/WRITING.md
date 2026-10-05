@@ -1,7 +1,7 @@
 # Rust imports for the PBZ core draft
 
 Status: implemented additive Rust import path, 2026-10-01. This page concerns
-`core-draft-1`; format 0.4 remains the current default. The
+`0.5`; format 0.4 remains the current default. The
 [core convention](README.md) owns the schema.
 
 ## Objective
@@ -36,7 +36,7 @@ Import::from_readers(readers)?
 `Dataset::create_with_storage` accepts an existing Zarr storage handle.
 `into_dataset` only configures the operation. `estimate()` is read-only;
 a successful `run()` refreshes the supplied Dataset's catalog and caches.
-The [executable fixture](../../../crates/pbzarr/examples/write_core_dataset.rs)
+The [executable fixture](../../../crates/pbzarr/examples/write_dataset.rs)
 shows creation, sharding, explicit codecs, metadata notes, and later additions.
 
 ## Required format changes
@@ -87,5 +87,5 @@ The broader failure policy remains design intent, not an implemented guarantee.
 
 Concurrent writers/readers, append, replacement, pyramids, automatic provenance,
 new source dtypes, and arbitrary-rank Rust authoring are outside this step.
-The [implementation plan](../../superpowers/plans/2026-10-01-pbz-core-writer.md)
+The [implementation plan](../../STORE_SPEC.md)
 covers these minimal changes and their checks.
