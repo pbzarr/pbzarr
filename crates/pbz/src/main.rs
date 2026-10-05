@@ -9,12 +9,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use indicatif_log_bridge::LogWrapper;
 use log::{LevelFilter, debug, info, warn};
+use pbzarr::dataset::{Dataset, Reference};
+use pbzarr::import::Target;
 use pbzarr::import::progress::{self, make_sink};
 use pbzarr::import::{
     Config, GenomeGeometry, LayoutEstimate, LayoutKnobs, TrackShape, auto_in_flight_spans,
 };
 use pbzarr::io::{Dtype, ValueReader as _};
-use pbzarr::{ExplicitArraySpec, Genome, PbzStore, ScaleConfig};
+use pbzarr::{Contig, ExplicitArraySpec, Genome, PbzStore, ScaleConfig};
 use pbzarr_readers::{
     BamReader, BedColumnSpec, BedImportOptions, BedSchema, BigWigReader, ColumnSelector, D4Reader,
     DepthFilter, ImportMode, InferRows, OverlapMode, column_index_by_name, execute_bed_schema_plan,
@@ -261,6 +263,11 @@ struct ImportOptions {
     /// after the base import.
     #[arg(long, value_name = "LIST")]
     scales: Option<String>,
+    /// Output store format. `0.4` writes one Zarr group per track. `0.5`
+    /// writes one root Zarr group that opens as a single Xarray dataset,
+    /// with the tracks as root variables over shared root coordinates.
+    #[arg(long, value_enum, default_value_t = FormatArg::V04)]
+    format: FormatArg,
     /// Show import progress on stderr. This is the default; the flag is
     /// accepted so scripts can be explicit.
     #[arg(long)]
@@ -279,6 +286,11 @@ impl ImportOptions {
     /// `--no-progress` turned it off. The pipeline sizes the sink itself, so
     /// the label is all it needs here.
     fn config(&self, label: &str) -> Result<Config> {
+        if self.format == FormatArg::V05 && self.scales.is_some() {
+            bail!(
+                "--scales is not supported by format 0.5: a multiscale pyramid under one root Dataset is not defined"
+            );
+        }
         Ok(Config {
             workers: self.threads,
             in_flight_spans: self.in_flight.unwrap_or(0),
@@ -519,6 +531,15 @@ enum ImportModeArg {
     Composition,
 }
 
+/// Output store format selected by `--format`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum FormatArg {
+    #[value(name = "0.4")]
+    V04,
+    #[value(name = "0.5")]
+    V05,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OverlapModeArg {
     Proper,
@@ -732,8 +753,11 @@ fn import_bed(args: BedArgs) -> Result<()> {
             print_dry_run(&output, &genome, &tracks, &config, sources.len());
             return Ok(());
         }
-        let mut store = open_or_create(&output)?;
-        execute_bed_schema_plan(&mut store, plan, genome, config).context("import BED schema")?;
+        let mut destination = open_or_create(&output, args.import.format, || {
+            Ok(genome.contigs().to_vec())
+        })?;
+        execute_bed_schema_plan(destination.target(), plan, genome, config)
+            .context("import BED schema")?;
     } else {
         let options = BedImportOptions {
             fields: (!args.bed.fields.is_empty()).then_some(args.bed.fields),
@@ -753,8 +777,10 @@ fn import_bed(args: BedArgs) -> Result<()> {
             print_dry_run(&output, &genome, &tracks, &config, sources.len());
             return Ok(());
         }
-        let mut store = open_or_create(&output)?;
-        from_bed_matrix(&mut store, &sources, genome, &options, config)
+        let mut destination = open_or_create(&output, args.import.format, || {
+            Ok(genome.contigs().to_vec())
+        })?;
+        from_bed_matrix(destination.target(), &sources, genome, &options, config)
             .context("import BED columns")?;
     }
     info!("wrote {}", output.display());
@@ -1061,19 +1087,58 @@ fn join_dtypes(a: Dtype, b: Dtype) -> Result<Dtype> {
     }
 }
 
-/// Open `path` as a store, creating it when it does not exist yet. Importing
+/// An opened import destination, holding whichever store the chosen format
+/// writes. `target` hands it to the format entry points.
+enum Output {
+    Store(PbzStore),
+    Dataset(Dataset),
+}
+
+impl Output {
+    fn target(&mut self) -> Target<'_> {
+        match self {
+            Self::Store(store) => Target::Store(store),
+            Self::Dataset(dataset) => Target::Dataset(dataset),
+        }
+    }
+}
+
+/// Open `path` in `format`, creating it when it does not exist yet. Importing
 /// into an existing store adds tracks to it, which is easy to do by accident
-/// with a stale path, so say which of the two happened.
-fn open_or_create(path: &Path) -> Result<PbzStore> {
+/// with a stale path, so say which of the two happened. `reference` supplies
+/// the ordered contigs a new format-0.5 Dataset fixes at creation; it is only
+/// called when such a Dataset is created.
+fn open_or_create(
+    path: &Path,
+    format: FormatArg,
+    reference: impl FnOnce() -> Result<Vec<Contig>>,
+) -> Result<Output> {
     if path.exists() {
         warn!(
             "{} exists; adding track(s) to the existing store",
             path.display()
         );
-        PbzStore::open(path).with_context(|| format!("open output store {}", path.display()))
+        match format {
+            FormatArg::V04 => PbzStore::open(path)
+                .map(Output::Store)
+                .with_context(|| format!("open output store {}", path.display())),
+            FormatArg::V05 => Dataset::open(path)
+                .map(Output::Dataset)
+                .with_context(|| format!("open output dataset {}", path.display())),
+        }
     } else {
         debug!("creating store {}", path.display());
-        PbzStore::create(path).with_context(|| format!("create output store {}", path.display()))
+        match format {
+            FormatArg::V04 => PbzStore::create(path)
+                .map(Output::Store)
+                .with_context(|| format!("create output store {}", path.display())),
+            FormatArg::V05 => {
+                let reference = Reference::new(reference()?)?;
+                Dataset::create(path, reference)
+                    .map(Output::Dataset)
+                    .with_context(|| format!("create output dataset {}", path.display()))
+            }
+        }
     }
 }
 
@@ -1146,10 +1211,15 @@ fn import_bam(args: BamArgs) -> Result<()> {
         print_dry_run(&output, reader.contigs(), &tracks, &config, n_sources);
         return Ok(());
     }
-    let mut store = open_or_create(&output)?;
+    let mut destination = open_or_create(&output, args.import.format, || {
+        let source = &sources[0];
+        let reader = BamReader::open(&source.path, args.bam.reference.as_deref(), mode, filter)
+            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
+        Ok(reader.contigs().contigs().to_vec())
+    })?;
 
     let report = from_bam(
-        &mut store,
+        destination.target(),
         &args.bam.track,
         &sources,
         mode,
@@ -1214,9 +1284,15 @@ fn import_d4(args: D4Args) -> Result<()> {
         print_dry_run(&output, reader.contigs(), &tracks, &config, n_sources);
         return Ok(());
     }
-    let mut store = open_or_create(&output)?;
+    let mut destination = open_or_create(&output, args.import.format, || {
+        let source = &sources[0];
+        let reader = D4Reader::open(&source.path)
+            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
+        Ok(reader.contigs().contigs().to_vec())
+    })?;
 
-    let report = from_d4(&mut store, &args.d4.track, &sources, config).context("import d4")?;
+    let report =
+        from_d4(destination.target(), &args.d4.track, &sources, config).context("import d4")?;
 
     debug!(
         "d4 import wrote {} bytes across {} contig(s)",
@@ -1273,10 +1349,15 @@ fn import_bigwig(args: BigWigArgs) -> Result<()> {
         print_dry_run(&output, reader.contigs(), &tracks, &config, n_sources);
         return Ok(());
     }
-    let mut store = open_or_create(&output)?;
+    let mut destination = open_or_create(&output, args.import.format, || {
+        let source = &sources[0];
+        let reader = BigWigReader::open(&source.path)
+            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
+        Ok(reader.contigs().contigs().to_vec())
+    })?;
 
-    let report =
-        from_bigwig(&mut store, &args.bigwig.track, &sources, config).context("import bigWig")?;
+    let report = from_bigwig(destination.target(), &args.bigwig.track, &sources, config)
+        .context("import bigWig")?;
 
     debug!(
         "bigWig import wrote {} bytes across {} contig(s)",
