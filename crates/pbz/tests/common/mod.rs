@@ -120,3 +120,129 @@ pub fn stdout_of(output: &Output) -> String {
     );
     String::from_utf8(output.stdout.clone()).unwrap()
 }
+
+use ndarray::ArrayView1;
+use pbzarr::dataset::{Dataset, Reference};
+use pbzarr::import::Import;
+use pbzarr::io::{OutputSchema, OutputSinkMut, ValueReader};
+
+#[derive(Clone)]
+enum Column {
+    Ints(Vec<Vec<i32>>),
+    Floats(Vec<Vec<f32>>),
+}
+
+/// Serves one pre-built value per position, per contig in genome order.
+#[derive(Clone)]
+struct ColumnReader {
+    genome: Genome,
+    schema: OutputSchema,
+    column: Column,
+}
+
+impl ColumnReader {
+    fn new(column: Column) -> Self {
+        let dtype = match &column {
+            Column::Ints(_) => Dtype::I32,
+            Column::Floats(_) => Dtype::F32,
+        };
+        Self {
+            genome: genome(),
+            schema: OutputSchema::single("value", dtype),
+            column,
+        }
+    }
+}
+
+impl ValueReader for ColumnReader {
+    fn contigs(&self) -> &Genome {
+        &self.genome
+    }
+    fn output_schema(&self) -> &OutputSchema {
+        &self.schema
+    }
+    fn fork(&self) -> pbzarr::io::Result<Self> {
+        Ok(self.clone())
+    }
+    fn read_into(
+        &mut self,
+        contig: &str,
+        start: u64,
+        end: u64,
+        outputs: &mut [OutputSinkMut<'_>],
+    ) -> pbzarr::io::Result<()> {
+        let index = self.genome.id(contig).expect("fixture contig").as_usize();
+        let span = start as usize..end as usize;
+        match &self.column {
+            Column::Ints(per_contig) => outputs[0]
+                .as_i32_mut()?
+                .assign(&ArrayView1::from(&per_contig[index][span])),
+            Column::Floats(per_contig) => outputs[0]
+                .as_f32_mut()?
+                .assign(&ArrayView1::from(&per_contig[index][span])),
+        }
+        Ok(())
+    }
+}
+
+/// A format-0.5 root Dataset holding the same values as [`build_store`].
+#[allow(dead_code)]
+pub fn build_root_store(dir: &Path) -> PathBuf {
+    let path = dir.join("root.pbz");
+    let reference = Reference::new(genome().contigs().to_vec()).unwrap();
+    let mut dataset = Dataset::create(&path, reference).unwrap();
+    let depth = Column::Ints(vec![vec![5, 5, 5, 7, 7, 0, 0, 0, 0, 0], vec![0; 6]]);
+    Import::from_readers(vec![ColumnReader::new(depth)])
+        .unwrap()
+        .into_dataset(
+            &mut dataset,
+            vec![("depth".into(), TrackConfig::new(Dtype::I32).chunk_size(4))],
+        )
+        .run()
+        .unwrap();
+    let n = f32::NAN;
+    let s1 = Column::Floats(vec![
+        vec![n, n, 0.5, 0.5, 0.25, 0.25, n, n, n, n],
+        vec![n; 6],
+    ]);
+    let s2 = Column::Floats(vec![vec![n, n, 1.0, 1.0, 1.0, 1.0, n, n, n, n], vec![n; 6]]);
+    Import::from_readers(vec![ColumnReader::new(s1), ColumnReader::new(s2)])
+        .unwrap()
+        .into_dataset(
+            &mut dataset,
+            vec![(
+                "af".into(),
+                TrackConfig::new(Dtype::F32)
+                    .columns(vec!["s1".into(), "s2".into()])
+                    .column_dim("sample")
+                    .chunk_size(4),
+            )],
+        )
+        .readers_as_columns()
+        .run()
+        .unwrap();
+    path
+}
+
+/// Hand-written metadata for a shape no importer produces.
+#[allow(dead_code)]
+pub fn add_rank_three_variable(store: &Path, name: &str) {
+    let dir = store.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("zarr.json"),
+        r#"{
+          "zarr_format": 3,
+          "node_type": "array",
+          "shape": [16, 2, 2],
+          "data_type": "uint8",
+          "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [16, 2, 2]}},
+          "chunk_key_encoding": {"name": "default"},
+          "fill_value": 0,
+          "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+          "attributes": {},
+          "dimension_names": ["position", "sample", "threshold"]
+        }"#,
+    )
+    .unwrap();
+}

@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use noodles_bgzf as bgzf;
@@ -96,7 +96,7 @@ pub(crate) enum Store {
 }
 
 /// Open by format: a 0.5 root Dataset, else the 0.4 per-track group layout.
-pub(crate) fn open_store(path: &std::path::Path) -> Result<Store> {
+pub(crate) fn open_store(path: &Path) -> Result<Store> {
     match Dataset::open(path) {
         Ok(dataset) => Ok(Store::Root(dataset)),
         Err(PbzError::UnsupportedFormat(format)) => PbzStore::open(path)
