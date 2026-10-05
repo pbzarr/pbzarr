@@ -27,6 +27,9 @@ use super::{DepthFilter, OverlapMode};
 /// column dimension yields scalar tracks; otherwise the sources become the
 /// columns of cohort tracks, whose dimension name comes from
 /// `config.column_dim` and defaults to `"sample"`.
+///
+/// A format-0.4 store creates the track(s) from the sources' genome; a
+/// format-0.5 Dataset keeps its own reference, which the sources must match.
 pub fn from_bam<'t>(
     target: impl Into<Target<'t>>,
     track_name: &str,

@@ -591,7 +591,8 @@ impl ValueReader for BedMultiReader {
 
 /// Execute a plan returned by [`plan_bed_schema`]. Schema resolution is not
 /// repeated. The executor rejects a column dimension that differs from the
-/// planned value before it accesses the store.
+/// planned value before it accesses the store. A format-0.5 Dataset
+/// destination keeps its own reference, which `genome` must match.
 pub fn execute_bed_schema_plan<'t>(
     target: impl Into<Target<'t>>,
     plan: BedSchemaPlan,
@@ -693,7 +694,8 @@ pub fn execute_bed_schema_plan<'t>(
 /// presence track, headerless BED4 a single value track, headered fields their
 /// own tracks (2D over sources when there are several), and a single
 /// multi-field source one wide 2D track whose columns are the fields. Any 2D
-/// output requires `Config::column_dim`.
+/// output requires `Config::column_dim`. A format-0.5 Dataset destination
+/// keeps its own reference, which `genome` must match.
 pub fn from_bed_matrix<'t>(
     target: impl Into<Target<'t>>,
     sources: &[pbzarr::import::Source],

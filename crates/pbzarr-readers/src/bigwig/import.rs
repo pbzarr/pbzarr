@@ -18,6 +18,9 @@ use super::reader::BigWigReader;
 /// each source's `column_label` (falling back to its file stem). All sources
 /// must share a genome (checked by checksum).
 ///
+/// A format-0.4 store creates the track(s) from the sources' genome; a
+/// format-0.5 Dataset keeps its own reference, which the sources must match.
+///
 /// A bigWig has no value at an uncovered base, so the track takes the `float32`
 /// default fill of `NaN`: gaps read back as missing data, not as zero.
 pub fn from_bigwig<'t>(

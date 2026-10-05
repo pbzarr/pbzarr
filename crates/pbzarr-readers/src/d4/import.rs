@@ -17,6 +17,9 @@ use super::reader::D4Reader;
 /// yields a scalar track; otherwise the sources form a 2D track whose labels
 /// come from each source's `column_label` (falling back to its file stem).
 /// All sources must share a genome (checked by checksum).
+///
+/// A format-0.4 store creates the track(s) from the sources' genome; a
+/// format-0.5 Dataset keeps its own reference, which the sources must match.
 pub fn from_d4<'t>(
     target: impl Into<Target<'t>>,
     track_name: &str,
