@@ -104,10 +104,10 @@ pub(crate) fn run_stat(spec: &StatSpec) -> Result<()> {
             .context("configure worker thread pool")?;
     }
     let store = crate::view::open_store(&spec.store)?;
-    let source = crate::view::resolve_source(&store, spec.track.as_deref())?;
+    let measurement = crate::view::resolve_measurement(&store, spec.track.as_deref())?;
     let named = match &spec.region {
-        Some(path) => load_bed_regions(path, source.genome())?,
-        None => source
+        Some(path) => load_bed_regions(path, measurement.genome())?,
+        None => measurement
             .genome()
             .iter()
             .map(|(id, contig)| NamedRegion {
@@ -124,7 +124,7 @@ pub(crate) fn run_stat(spec: &StatSpec) -> Result<()> {
     let options = StatOptions {
         columns: (!spec.columns.is_empty()).then(|| spec.columns.clone()),
     };
-    let result = pbzarr::stat::run(&source, &regions, kind, &options)?;
+    let result = pbzarr::stat::run(&measurement, &regions, kind, &options)?;
     let precision = usize::from(spec.precision);
     match spec.output.as_deref() {
         None => {

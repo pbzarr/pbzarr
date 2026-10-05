@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use crate::error::{PbzError, Result};
 use crate::genome::Region;
 use crate::io::{Dtype, Numeric};
-use crate::source::Source;
+use crate::measurement::Measurement;
 
 /// The statistic one `stat` run computes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,13 +370,13 @@ pub struct StatOutput {
 const BATCH_TARGET_BYTES: u64 = 64 << 20;
 
 pub fn run(
-    source: &Source,
+    measurement: &Measurement,
     regions: &[Region],
     kind: StatKind,
     options: &StatOptions,
 ) -> Result<StatOutput> {
-    let (selected, samples) = resolve_columns(source, options)?;
-    let offsets = source.genome().offsets();
+    let (selected, samples) = resolve_columns(measurement, options)?;
+    let offsets = measurement.genome().offsets();
     let mut ranges: Vec<FlatRange> = regions
         .iter()
         .enumerate()
@@ -406,39 +406,42 @@ pub fn run(
     } else {
         regions.len()
     };
-    let chunk = source.chunk_size()? as u64;
-    let per_position = source.columns_count()? as u64 * dtype_size(source.dtype()) as u64;
+    let chunk = measurement.chunk_size()? as u64;
+    let per_position = measurement.columns_count()? as u64 * dtype_size(measurement.dtype()) as u64;
     let max_chunks = (BATCH_TARGET_BYTES / (chunk * per_position).max(1)).max(1);
     let batches = plan_batches(&ranges, chunk, max_chunks);
-    let result = dispatch(source, &batches, n_regions, &selected, kind)?;
+    let result = dispatch(measurement, &batches, n_regions, &selected, kind)?;
     Ok(StatOutput { samples, result })
 }
 
 /// Reject shapes whose column handling below would otherwise be wrong.
-fn ensure_supported_shape(source: &Source) -> Result<()> {
-    if source.rank() > 2 {
+fn ensure_supported_shape(measurement: &Measurement) -> Result<()> {
+    if measurement.rank() > 2 {
         return Err(PbzError::UnsupportedEncoding(format!(
             "track {:?} with dimensions ({}): stat reduces position and renders at most one more axis",
-            source.name(),
-            source.dimensions().join(", ")
+            measurement.name(),
+            measurement.dimensions().join(", ")
         )));
     }
     Ok(())
 }
 
 /// Selected column indices (empty for rank-1) plus their labels.
-fn resolve_columns(source: &Source, options: &StatOptions) -> Result<(Vec<usize>, Vec<String>)> {
-    ensure_supported_shape(source)?;
-    if source.rank() == 1 {
+fn resolve_columns(
+    measurement: &Measurement,
+    options: &StatOptions,
+) -> Result<(Vec<usize>, Vec<String>)> {
+    ensure_supported_shape(measurement)?;
+    if measurement.rank() == 1 {
         if options.columns.is_some() {
             return Err(PbzError::Metadata(format!(
                 "track {:?} has no column axis",
-                source.name()
+                measurement.name()
             )));
         }
         return Ok((Vec::new(), Vec::new()));
     }
-    let labels = source.column_labels()?;
+    let labels = measurement.column_labels()?;
     let Some(requested) = &options.columns else {
         return Ok(((0..labels.len()).collect(), labels));
     };
@@ -447,7 +450,7 @@ fn resolve_columns(source: &Source, options: &StatOptions) -> Result<(Vec<usize>
         let index = labels.iter().position(|c| c == label).ok_or_else(|| {
             PbzError::Metadata(format!(
                 "column {label:?} is not a column of track {:?} (available: {})",
-                source.name(),
+                measurement.name(),
                 labels.join(", ")
             ))
         })?;
@@ -466,7 +469,7 @@ fn dtype_size(dtype: Dtype) -> usize {
 }
 
 fn dispatch(
-    source: &Source,
+    measurement: &Measurement,
     batches: &[Batch],
     n_regions: usize,
     selected: &[usize],
@@ -474,31 +477,47 @@ fn dispatch(
 ) -> Result<StatResult> {
     match kind {
         StatKind::Mean | StatKind::Min | StatKind::Max => {
-            let rows = match source.dtype() {
+            let rows = match measurement.dtype() {
                 Dtype::U8 => {
-                    float_rows::<u8>(source, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<u8>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
                 Dtype::U16 => {
-                    float_rows::<u16>(source, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<u16>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
                 Dtype::U32 => {
-                    float_rows::<u32>(source, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<u32>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
                 Dtype::I8 => {
-                    float_rows::<i8>(source, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<i8>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
                 Dtype::I16 => {
-                    float_rows::<i16>(source, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<i16>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
                 Dtype::I32 => {
-                    float_rows::<i32>(source, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<i32>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
                 Dtype::F32 => {
-                    float_rows::<f32>(source, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<f32>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
-                Dtype::F64 => float_rows::<f64>(source, batches, n_regions, selected, kind, |v| v),
+                Dtype::F64 => {
+                    float_rows::<f64>(measurement, batches, n_regions, selected, kind, |v| v)
+                }
                 Dtype::Bool => {
-                    float_rows::<bool>(source, batches, n_regions, selected, kind, |v| {
+                    float_rows::<bool>(measurement, batches, n_regions, selected, kind, |v| {
                         if v { 1.0 } else { 0.0 }
                     })
                 }
@@ -506,9 +525,9 @@ fn dispatch(
             Ok(StatResult::PerRegion(rows))
         }
         StatKind::Median | StatKind::Hist => {
-            let accs = match source.dtype() {
+            let accs = match measurement.dtype() {
                 Dtype::U8 => count_accs::<u8>(
-                    source,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -516,7 +535,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::I8 => count_accs::<i8>(
-                    source,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -524,7 +543,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::U16 => count_accs::<u16>(
-                    source,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -538,7 +557,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::I16 => count_accs::<i16>(
-                    source,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -552,7 +571,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::U32 => count_accs::<u32>(
-                    source,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -566,7 +585,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::I32 => count_accs::<i32>(
-                    source,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -580,7 +599,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::Bool => count_accs::<bool>(
-                    source,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -591,14 +610,14 @@ fn dispatch(
                     dtype: format!(
                         "{} needs an integer or bool track, but track {:?} is f32",
                         kind.name(),
-                        source.name(),
+                        measurement.name(),
                     ),
                 }),
                 Dtype::F64 => Err(PbzError::InvalidDtype {
                     dtype: format!(
                         "{} needs an integer or bool track, but track {:?} is f64",
                         kind.name(),
-                        source.name(),
+                        measurement.name(),
                     ),
                 }),
             }?;
@@ -621,14 +640,14 @@ fn dispatch(
 }
 
 fn float_rows<T: Numeric>(
-    source: &Source,
+    measurement: &Measurement,
     batches: &[Batch],
     n_regions: usize,
     selected: &[usize],
     kind: StatKind,
     convert: fn(T) -> f64,
 ) -> Result<Vec<Vec<StatValue>>> {
-    let integer = !matches!(source.dtype(), Dtype::F32 | Dtype::F64);
+    let integer = !matches!(measurement.dtype(), Dtype::F32 | Dtype::F64);
     let extreme = |v: f64| {
         if integer && v.is_finite() {
             StatValue::Int(v as i64)
@@ -639,7 +658,7 @@ fn float_rows<T: Numeric>(
     let rows = match kind {
         StatKind::Mean => finalize_rows(
             accumulate::<T, MeanAcc, _, _>(
-                source,
+                measurement,
                 batches,
                 n_regions,
                 selected,
@@ -650,7 +669,7 @@ fn float_rows<T: Numeric>(
         ),
         StatKind::Min => finalize_rows(
             accumulate::<T, MinAcc, _, _>(
-                source,
+                measurement,
                 batches,
                 n_regions,
                 selected,
@@ -661,7 +680,7 @@ fn float_rows<T: Numeric>(
         ),
         StatKind::Max => finalize_rows(
             accumulate::<T, MaxAcc, _, _>(
-                source,
+                measurement,
                 batches,
                 n_regions,
                 selected,
@@ -685,14 +704,14 @@ fn finalize_rows<A: Accumulator<Output = f64>>(
 }
 
 fn count_accs<T: Numeric>(
-    source: &Source,
+    measurement: &Measurement,
     batches: &[Batch],
     n_regions: usize,
     selected: &[usize],
     init: impl Fn() -> CountAcc + Sync,
     convert: fn(T) -> i64,
 ) -> Result<Vec<Vec<CountAcc>>> {
-    accumulate::<T, CountAcc, _, _>(source, batches, n_regions, selected, init, convert)
+    accumulate::<T, CountAcc, _, _>(measurement, batches, n_regions, selected, init, convert)
 }
 
 fn hist_table(accs: Vec<Vec<CountAcc>>) -> HistTable {
@@ -724,7 +743,7 @@ type RegionAccs<A> = Vec<(usize, Vec<A>)>;
 
 /// One partial accumulator row per region per batch, merged in region order.
 fn accumulate<T, A, I, C>(
-    source: &Source,
+    measurement: &Measurement,
     batches: &[Batch],
     n_regions: usize,
     selected: &[usize],
@@ -737,9 +756,9 @@ where
     I: Fn() -> A + Sync,
     C: Fn(T) -> A::Value + Sync,
 {
-    let rank1 = source.rank() == 1;
+    let rank1 = measurement.rank() == 1;
     let n_out = if rank1 { 1 } else { selected.len() };
-    let n_cols = source.columns_count()?;
+    let n_cols = measurement.columns_count()?;
     let window = rayon::current_num_threads().saturating_mul(2).max(1);
     let mut out: Vec<Vec<A>> = (0..n_regions)
         .map(|_| (0..n_out).map(|_| init()).collect())
@@ -748,7 +767,7 @@ where
         let partials: Vec<Result<RegionAccs<A>>> = group
             .par_iter()
             .map(|batch| {
-                let raw = source
+                let raw = measurement
                     .read_flat::<T>(batch.span.clone())?
                     .into_raw_vec_and_offset()
                     .0;
@@ -1024,8 +1043,8 @@ mod tests {
         store
     }
 
-    fn whole(source: &Source) -> Vec<Region> {
-        source
+    fn whole(measurement: &Measurement) -> Vec<Region> {
+        measurement
             .genome()
             .iter()
             .map(|(id, c)| Region {
@@ -1040,10 +1059,16 @@ mod tests {
     fn run_mean_median_on_integer_track() {
         let dir = tempfile::TempDir::new().unwrap();
         let store = fixture(dir.path());
-        let source = Source::legacy(store.track("depth").unwrap());
-        let regions = whole(&source);
+        let measurement = Measurement::legacy(store.track("depth").unwrap());
+        let regions = whole(&measurement);
 
-        let mean = run(&source, &regions, StatKind::Mean, &StatOptions::default()).unwrap();
+        let mean = run(
+            &measurement,
+            &regions,
+            StatKind::Mean,
+            &StatOptions::default(),
+        )
+        .unwrap();
         assert!(mean.samples.is_empty());
         let StatResult::PerRegion(rows) = mean.result else {
             panic!("expected rows")
@@ -1058,7 +1083,13 @@ mod tests {
             start: 0,
             end: 5,
         };
-        let median = run(&source, &[head], StatKind::Median, &StatOptions::default()).unwrap();
+        let median = run(
+            &measurement,
+            &[head],
+            StatKind::Median,
+            &StatOptions::default(),
+        )
+        .unwrap();
         let StatResult::PerRegion(rows) = median.result else {
             panic!("expected rows")
         };
@@ -1069,11 +1100,11 @@ mod tests {
     fn dispatch_merges_region_partials_across_batches() {
         let dir = tempfile::TempDir::new().unwrap();
         let store = fixture(dir.path());
-        let source = Source::legacy(store.track("depth").unwrap());
+        let measurement = Measurement::legacy(store.track("depth").unwrap());
         let batches = plan_batches(&[range(0, 0, 10), range(1, 10, 16)], 4, 1);
         assert!(batches.len() > 1);
         let StatResult::PerRegion(rows) =
-            dispatch(&source, &batches, 2, &[], StatKind::Mean).unwrap()
+            dispatch(&measurement, &batches, 2, &[], StatKind::Mean).unwrap()
         else {
             panic!("expected rows")
         };
@@ -1083,7 +1114,7 @@ mod tests {
         );
         let batches = plan_batches(&[range(0, 0, 5)], 4, 1);
         let StatResult::PerRegion(rows) =
-            dispatch(&source, &batches, 1, &[], StatKind::Median).unwrap()
+            dispatch(&measurement, &batches, 1, &[], StatKind::Median).unwrap()
         else {
             panic!("expected rows")
         };
@@ -1094,8 +1125,8 @@ mod tests {
     fn run_hist_unions_overlapping_regions() {
         let dir = tempfile::TempDir::new().unwrap();
         let store = fixture(dir.path());
-        let source = Source::legacy(store.track("depth").unwrap());
-        let contig = whole(&source)[0].contig;
+        let measurement = Measurement::legacy(store.track("depth").unwrap());
+        let contig = whole(&measurement)[0].contig;
         let overlapping = [
             Region {
                 contig,
@@ -1109,7 +1140,7 @@ mod tests {
             },
         ];
         let out = run(
-            &source,
+            &measurement,
             &overlapping,
             StatKind::Hist,
             &StatOptions::default(),
@@ -1127,12 +1158,12 @@ mod tests {
     fn run_mean_skips_nan_and_subsets_columns() {
         let dir = tempfile::TempDir::new().unwrap();
         let store = fixture(dir.path());
-        let source = Source::legacy(store.track("af").unwrap());
-        let regions = whole(&source);
+        let measurement = Measurement::legacy(store.track("af").unwrap());
+        let regions = whole(&measurement);
         let options = StatOptions {
             columns: Some(vec!["s2".into(), "s1".into()]),
         };
-        let out = run(&source, &regions, StatKind::Mean, &options).unwrap();
+        let out = run(&measurement, &regions, StatKind::Mean, &options).unwrap();
         assert_eq!(out.samples, vec!["s2".to_string(), "s1".to_string()]);
         let StatResult::PerRegion(rows) = out.result else {
             panic!("expected rows")
@@ -1151,7 +1182,7 @@ mod tests {
     fn run_rejects_median_on_float_and_bad_columns() {
         let dir = tempfile::TempDir::new().unwrap();
         let store = fixture(dir.path());
-        let af = Source::legacy(store.track("af").unwrap());
+        let af = Measurement::legacy(store.track("af").unwrap());
         let regions = whole(&af);
         let err = run(&af, &regions, StatKind::Median, &StatOptions::default()).unwrap_err();
         assert!(err.to_string().contains("median"), "{err}");
@@ -1163,7 +1194,7 @@ mod tests {
         let err = run(&af, &regions, StatKind::Mean, &options).unwrap_err();
         assert!(err.to_string().contains("s1"), "{err}");
 
-        let depth = Source::legacy(store.track("depth").unwrap());
+        let depth = Measurement::legacy(store.track("depth").unwrap());
         let options = StatOptions {
             columns: Some(vec!["s1".into()]),
         };
@@ -1174,12 +1205,18 @@ mod tests {
     fn run_hist_on_rank2_track_counts_per_sample() {
         let dir = tempfile::TempDir::new().unwrap();
         let store = fixture(dir.path());
-        let source = Source::legacy(store.track("cov").unwrap());
-        let region = source
+        let measurement = Measurement::legacy(store.track("cov").unwrap());
+        let region = measurement
             .genome()
             .resolve(&"chr1:0-4".parse().unwrap())
             .unwrap();
-        let out = run(&source, &[region], StatKind::Hist, &StatOptions::default()).unwrap();
+        let out = run(
+            &measurement,
+            &[region],
+            StatKind::Hist,
+            &StatOptions::default(),
+        )
+        .unwrap();
         assert_eq!(out.samples, vec!["s1".to_string(), "s2".to_string()]);
         let StatResult::Hist(table) = out.result else {
             panic!("expected hist")

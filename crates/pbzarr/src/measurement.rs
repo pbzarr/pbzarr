@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 /// One readable track: a format-0.4 track group, or a format-0.5 root data
 /// variable on the base-resolution `position` axis.
-pub enum Source<'a> {
+pub enum Measurement<'a> {
     Legacy(&'a Track),
     /// Metadata resolved once at open, plus the Dataset that decodes values.
     Root {
@@ -31,7 +31,7 @@ fn unsupported(info: &VariableInfo, reason: &str) -> PbzError {
     ))
 }
 
-impl<'a> Source<'a> {
+impl<'a> Measurement<'a> {
     pub fn legacy(track: &'a Track) -> Self {
         Self::Legacy(track)
     }
