@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 mod common;
-use common::{build_store, run_pbz, stdout_of};
+use common::{build_root_store, build_store, run_pbz, stdout_of};
 
 fn write_bed(dir: &Path, text: &str) -> PathBuf {
     let path = dir.join("regions.bed");
@@ -111,4 +111,43 @@ fn median_min_max_report_integers() {
     assert!(!float_track.status.success());
     let stderr = String::from_utf8_lossy(&float_track.stderr);
     assert!(stderr.contains("median"), "{stderr}");
+}
+
+#[test]
+fn root_dataset_reduces_the_same_values_as_a_track_store() {
+    let dir = TempDir::new().unwrap();
+    let store = build_root_store(dir.path());
+    let cases: [(&[&str], &str, &str); 3] = [
+        (
+            &[],
+            "depth",
+            "#chrom\tstart\tend\tmean\n\
+             chr1\t0\t10\t2.9\n\
+             chr2\t0\t6\t0\n",
+        ),
+        (
+            &[],
+            "af",
+            "#chrom\tstart\tend\ts1\ts2\n\
+             chr1\t0\t10\t0.375\t1\n\
+             chr2\t0\t6\tNaN\tNaN\n",
+        ),
+        (
+            &["-s", "hist"],
+            "depth",
+            "#value\tcount\n0\t11\n5\t3\n7\t2\n",
+        ),
+    ];
+    for (flags, track, expected) in cases {
+        let mut args = vec!["stat".into()];
+        args.extend(flags.iter().map(|f| (*f).into()));
+        args.push(store.as_os_str().to_owned());
+        args.push(track.into());
+        let output = run_pbz(args);
+        assert_eq!(
+            stdout_of(&output),
+            expected,
+            "flags {flags:?} track {track}"
+        );
+    }
 }

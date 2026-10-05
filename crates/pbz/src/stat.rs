@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use noodles_bgzf as bgzf;
 use pbzarr::stat::{StatKind, StatOptions, StatOutput, StatResult, StatValue};
-use pbzarr::{Genome, PbzStore, Region, RegionQuery};
+use pbzarr::{Genome, Region, RegionQuery};
 
 use crate::fmt::write_g;
 
@@ -103,12 +103,11 @@ pub(crate) fn run_stat(spec: &StatSpec) -> Result<()> {
             .build_global()
             .context("configure worker thread pool")?;
     }
-    let store = PbzStore::open(&spec.store)
-        .with_context(|| format!("open store {}", spec.store.display()))?;
-    let track = crate::view::resolve_track(&store, spec.track.as_deref())?;
+    let store = crate::view::open_store(&spec.store)?;
+    let source = crate::view::resolve_source(&store, spec.track.as_deref())?;
     let named = match &spec.region {
-        Some(path) => load_bed_regions(path, track.genome())?,
-        None => track
+        Some(path) => load_bed_regions(path, source.genome())?,
+        None => source
             .genome()
             .iter()
             .map(|(id, contig)| NamedRegion {
@@ -125,7 +124,7 @@ pub(crate) fn run_stat(spec: &StatSpec) -> Result<()> {
     let options = StatOptions {
         columns: (!spec.columns.is_empty()).then(|| spec.columns.clone()),
     };
-    let result = pbzarr::stat::run(track, &regions, kind, &options)?;
+    let result = pbzarr::stat::run(&source, &regions, kind, &options)?;
     let precision = usize::from(spec.precision);
     match spec.output.as_deref() {
         None => {

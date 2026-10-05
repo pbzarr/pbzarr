@@ -3,12 +3,13 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use noodles_bgzf as bgzf;
+use pbzarr::dataset::{Dataset, Role};
 use pbzarr::io::{Dtype, Numeric};
-use pbzarr::{PbzStore, Region, Track};
+use pbzarr::{PbzError, PbzStore, Source};
 
 /// Target bytes fetched per batch (full stored width).
 const BATCH_TARGET_BYTES: usize = 64 << 20;
@@ -34,15 +35,21 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
             .build_global()
             .context("configure worker thread pool")?;
     }
-    let store = PbzStore::open(&spec.store)
-        .with_context(|| format!("open store {}", spec.store.display()))?;
-    let track = resolve_track(&store, spec.track.as_deref())?;
-    let (columns, names) = resolve_columns(track, &spec.columns)?;
+    let store = open_store(&spec.store)?;
+    let source = resolve_source(&store, spec.track.as_deref())?;
+    let (columns, names) = resolve_columns(&source, &spec.columns)?;
     let precision = usize::from(spec.precision);
     match spec.output.as_deref() {
         None => {
             let mut out = BufWriter::new(io::stdout());
-            stream(track, &columns, &names, spec.no_header, precision, &mut out)?;
+            stream(
+                &source,
+                &columns,
+                &names,
+                spec.no_header,
+                precision,
+                &mut out,
+            )?;
             out.flush()?;
         }
         Some(path)
@@ -54,33 +61,93 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
                 File::create(path).with_context(|| format!("create output {}", path.display()))?;
             // Deflate dominates the export cost; compress blocks on a pool.
             let mut out = bgzf::io::MultithreadedWriter::new(file);
-            stream(track, &columns, &names, spec.no_header, precision, &mut out)?;
+            stream(
+                &source,
+                &columns,
+                &names,
+                spec.no_header,
+                precision,
+                &mut out,
+            )?;
             out.finish()?;
         }
         Some(path) => {
             let file =
                 File::create(path).with_context(|| format!("create output {}", path.display()))?;
             let mut out = BufWriter::new(file);
-            stream(track, &columns, &names, spec.no_header, precision, &mut out)?;
+            stream(
+                &source,
+                &columns,
+                &names,
+                spec.no_header,
+                precision,
+                &mut out,
+            )?;
             out.flush()?;
         }
     }
     Ok(())
 }
 
-pub(crate) fn resolve_track<'s>(store: &'s PbzStore, requested: Option<&str>) -> Result<&'s Track> {
-    let mut available: Vec<&str> = store.track_names().collect();
-    available.sort_unstable();
+/// An opened store in whichever layout its root declares.
+pub(crate) enum Store {
+    Legacy(PbzStore),
+    Root(Dataset),
+}
+
+/// Open by format: a 0.5 root Dataset, else the 0.4 per-track group layout.
+pub(crate) fn open_store(path: &Path) -> Result<Store> {
+    match Dataset::open(path) {
+        Ok(dataset) => Ok(Store::Root(dataset)),
+        Err(PbzError::UnsupportedFormat(format)) => PbzStore::open(path)
+            .map(Store::Legacy)
+            .with_context(|| format!("open store {} (format {format})", path.display())),
+        Err(error) => Err(error).with_context(|| format!("open store {}", path.display())),
+    }
+}
+
+impl Store {
+    /// Track names in sorted order.
+    fn track_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = match self {
+            Store::Legacy(store) => store.track_names().collect(),
+            Store::Root(dataset) => dataset
+                .variables()
+                .values()
+                .filter(|v| v.role == Role::Measurement)
+                .map(|v| v.name.as_str())
+                .collect(),
+        };
+        names.sort_unstable();
+        names
+    }
+
+    fn source(&self, name: &str) -> Result<Source<'_>> {
+        match self {
+            Store::Legacy(store) => store
+                .track(name)
+                .map(Source::legacy)
+                .context("listed track is missing"),
+            Store::Root(dataset) => Source::root(dataset, name).map_err(Into::into),
+        }
+    }
+}
+
+pub(crate) fn resolve_source<'s>(store: &'s Store, requested: Option<&str>) -> Result<Source<'s>> {
+    let available = store.track_names();
     match requested {
-        Some(name) => store.track(name).with_context(|| {
-            format!(
-                "track {name:?} is not in the store (available: {})",
-                available.join(", ")
-            )
-        }),
+        Some(name) => {
+            if !available.contains(&name) {
+                bail!(
+                    "track {name:?} is not in the store (available: {})",
+                    available.join(", ")
+                );
+            }
+            store.source(name)
+        }
         None => match available.as_slice() {
             [] => bail!("store has no tracks"),
-            [only] => Ok(store.track(only).expect("listed track exists")),
+            [only] => store.source(only),
             _ => bail!(
                 "store has {} tracks; name one (available: {})",
                 available.len(),
@@ -91,17 +158,24 @@ pub(crate) fn resolve_track<'s>(store: &'s PbzStore, requested: Option<&str>) ->
 }
 
 /// Column indices to emit (empty for rank-1) and the header names.
-fn resolve_columns(track: &Track, requested: &[String]) -> Result<(Vec<usize>, Vec<String>)> {
-    if track.rank() == 1 {
+fn resolve_columns(source: &Source, requested: &[String]) -> Result<(Vec<usize>, Vec<String>)> {
+    if source.rank() > 2 {
+        bail!(
+            "track {:?} with dimensions ({}): view renders a position axis and at most one more",
+            source.name(),
+            source.dimensions().join(", ")
+        );
+    }
+    if source.rank() == 1 {
         if !requested.is_empty() {
             bail!(
                 "--columns was given but track {:?} has no column axis",
-                track.name()
+                source.name()
             );
         }
-        return Ok((Vec::new(), vec![track.name().to_owned()]));
+        return Ok((Vec::new(), vec![source.name().to_owned()]));
     }
-    let labels = track.column_labels()?;
+    let labels = source.column_labels()?;
     if requested.is_empty() {
         return Ok(((0..labels.len()).collect(), labels));
     }
@@ -113,7 +187,7 @@ fn resolve_columns(track: &Track, requested: &[String]) -> Result<(Vec<usize>, V
             .with_context(|| {
                 format!(
                     "column {label:?} is not a column of track {:?}",
-                    track.name()
+                    source.name()
                 )
             })?;
         indices.push(index);
@@ -122,7 +196,7 @@ fn resolve_columns(track: &Track, requested: &[String]) -> Result<(Vec<usize>, V
 }
 
 fn stream<W: Write>(
-    track: &Track,
+    source: &Source,
     columns: &[usize],
     names: &[String],
     no_header: bool,
@@ -136,16 +210,16 @@ fn stream<W: Write>(
         }
         writeln!(out)?;
     }
-    match track.dtype() {
-        Dtype::U8 => export::<u8, _>(track, columns, precision, out),
-        Dtype::U16 => export::<u16, _>(track, columns, precision, out),
-        Dtype::U32 => export::<u32, _>(track, columns, precision, out),
-        Dtype::I8 => export::<i8, _>(track, columns, precision, out),
-        Dtype::I16 => export::<i16, _>(track, columns, precision, out),
-        Dtype::I32 => export::<i32, _>(track, columns, precision, out),
-        Dtype::F32 => export::<f32, _>(track, columns, precision, out),
-        Dtype::F64 => export::<f64, _>(track, columns, precision, out),
-        Dtype::Bool => export::<bool, _>(track, columns, precision, out),
+    match source.dtype() {
+        Dtype::U8 => export::<u8, _>(source, columns, precision, out),
+        Dtype::U16 => export::<u16, _>(source, columns, precision, out),
+        Dtype::U32 => export::<u32, _>(source, columns, precision, out),
+        Dtype::I8 => export::<i8, _>(source, columns, precision, out),
+        Dtype::I16 => export::<i16, _>(source, columns, precision, out),
+        Dtype::I32 => export::<i32, _>(source, columns, precision, out),
+        Dtype::F32 => export::<f32, _>(source, columns, precision, out),
+        Dtype::F64 => export::<f64, _>(source, columns, precision, out),
+        Dtype::Bool => export::<bool, _>(source, columns, precision, out),
     }
 }
 
@@ -228,17 +302,17 @@ fn dtype_size(dtype: Dtype) -> usize {
 }
 
 /// Read one batch as per-output-column vectors, quantized to the output
-/// precision. `columns` is empty for rank-1 tracks. `read_region` returns a
+/// precision. `columns` is empty for rank-1 tracks. `read_flat` returns a
 /// standard-layout (row-major) array, so `raw[row * n_cols + col]` addresses
 /// `(row, col)`.
 fn read_columns<T: Cell>(
-    track: &Track,
-    region: &Region,
+    source: &Source,
+    positions: std::ops::Range<u64>,
     columns: &[usize],
     precision: usize,
 ) -> Result<Vec<Vec<T>>> {
-    let array = track.read_region::<T>(region)?;
-    if track.rank() == 1 {
+    let array = source.read_flat::<T>(positions)?;
+    if source.rank() == 1 {
         let raw = array.into_raw_vec_and_offset().0;
         return Ok(vec![
             raw.into_iter().map(|v| v.quantize(precision)).collect(),
@@ -258,27 +332,24 @@ fn read_columns<T: Cell>(
 }
 
 /// Stream the whole track in genome order, collapsing equal-value runs.
-/// One `read_region` per batch; zarrs decodes its chunks concurrently.
+/// One `read_flat` per batch; zarrs decodes its chunks concurrently.
 fn export<T: Cell, W: Write>(
-    track: &Track,
+    source: &Source,
     columns: &[usize],
     precision: usize,
     out: &mut W,
 ) -> Result<()> {
-    let per_row = track.columns_count()? * dtype_size(track.dtype());
+    let per_row = source.columns_count()? * dtype_size(source.dtype());
     let batch_rows = (BATCH_TARGET_BYTES / per_row.max(1)).clamp(1, 4 << 20) as u64;
-    for (id, contig) in track.genome().iter() {
+    let offsets = source.genome().offsets();
+    for (id, contig) in source.genome().iter() {
+        let base = offsets[id.as_usize()] as u64;
         // Open run on this contig: (start, end, values).
         let mut run: Option<(u64, u64, Vec<T>)> = None;
         let mut start = 0u64;
         while start < contig.length {
             let end = (start + batch_rows).min(contig.length);
-            let region = Region {
-                contig: id,
-                start,
-                end,
-            };
-            let batch = read_columns::<T>(track, &region, columns, precision)?;
+            let batch = read_columns::<T>(source, base + start..base + end, columns, precision)?;
             let rows = batch.first().map_or(0, Vec::len);
             for row in 0..rows {
                 let pos = start + row as u64;
