@@ -62,7 +62,7 @@ def test_format_05_create_and_import_opens_as_one_xarray_dataset(
     tmp_path, cohort_fixtures
 ):
     destination = tmp_path / "cohort.pbz"
-    pbzarr.create_store(destination, format="0.5", contigs={"chr1": 10000})
+    pbzarr.create_store(destination, format="0.5", reference={"chr1": 10000})
 
     report = pbzarr.import_d4(
         destination,
@@ -86,7 +86,7 @@ def test_format_05_create_and_import_opens_as_one_xarray_dataset(
 
 def test_format_05_rejects_scales_before_writing(tmp_path, cohort_fixtures):
     destination = tmp_path / "scaled.pbz"
-    pbzarr.create_store(destination, format="0.5", contigs={"chr1": 10000})
+    pbzarr.create_store(destination, format="0.5", reference={"chr1": 10000})
 
     with pytest.raises(ValueError, match="not supported by format"):
         pbzarr.import_d4(

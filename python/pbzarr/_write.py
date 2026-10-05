@@ -141,29 +141,29 @@ def _format(value: str, scales: Sequence[int] | None = None) -> str:
 
 
 def _contigs(
-    contigs: Mapping[str, int] | None, store_format: str
+    reference: Mapping[str, int] | None, store_format: str
 ) -> list[tuple[str, int]] | None:
-    if contigs is None:
+    if reference is None:
         if store_format == "0.5":
             raise ValueError(
-                'format "0.5" needs contigs=: an ordered mapping of contig'
+                'format "0.5" needs reference=: an ordered mapping of contig'
                 " name to length"
             )
         return None
     if store_format != "0.5":
-        raise ValueError('contigs= applies to format "0.5" only')
-    if not isinstance(contigs, Mapping):
-        raise TypeError("contigs must be a mapping of contig name to length")
-    if not contigs:
-        raise ValueError("contigs must not be empty")
-    ordered: list[tuple[str, int]] = []
-    for name, length in contigs.items():
+        raise ValueError('reference= applies to format "0.5" only')
+    if not isinstance(reference, Mapping):
+        raise TypeError("reference must be a mapping of contig name to length")
+    if not reference:
+        raise ValueError("reference must not be empty")
+    contigs: list[tuple[str, int]] = []
+    for name, length in reference.items():
         if not isinstance(name, str) or not name:
             raise ValueError("contig names must be nonempty strings")
         if isinstance(length, bool) or not isinstance(length, int) or length < 0:
             raise ValueError(f"contig length for {name!r} must be a nonnegative integer")
-        ordered.append((name, length))
-    return ordered
+        contigs.append((name, length))
+    return contigs
 
 
 def create_store(
@@ -171,21 +171,21 @@ def create_store(
     /,
     *,
     format: str = "0.4",
-    contigs: Mapping[str, int] | None = None,
+    reference: Mapping[str, int] | None = None,
 ) -> None:
     """Create an empty PBZ store at an absent filesystem destination.
 
     Format `"0.4"` creates a collection of per-track groups and takes its
     contigs from each import's sources. Format `"0.5"` creates one root
-    dataset over shared root coordinates; `contigs=` gives the ordered
-    contig names and lengths every track shares, fixed here for the
-    lifetime of the store.
+    dataset over shared root coordinates; `reference=` gives the ordered
+    mapping of contig name to length that every track shares, fixed here
+    for the lifetime of the store.
     """
     destination_path = _path(destination, "destination")
     store_format = _format(format)
-    reference = _contigs(contigs, store_format)
+    contigs = _contigs(reference, store_format)
     _require_absent(destination_path)
-    return _native.create_store(destination_path, store_format, reference)
+    return _native.create_store(destination_path, store_format, contigs)
 
 
 def _scales(scales: Sequence[int] | None) -> list[int] | None:
