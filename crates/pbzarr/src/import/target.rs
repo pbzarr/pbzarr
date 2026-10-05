@@ -110,6 +110,9 @@ impl Target<'_> {
                         "format 0.5 import: scales are not supported; a multiscale pyramid under one root Dataset is not defined".into(),
                     ));
                 }
+                // A Dataset fixes its reference at creation, so the per-spec
+                // genome is dropped here; routing checks every reader against
+                // the reference before the run writes anything.
                 let specs = specs
                     .into_iter()
                     .map(|(name, _, cfg)| (name, cfg))
