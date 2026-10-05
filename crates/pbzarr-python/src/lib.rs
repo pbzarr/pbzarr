@@ -9,11 +9,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use pbzarr::ExplicitArraySpec;
-use pbzarr::Genome;
-use pbzarr::PbzStore;
+use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::progress::make_sink;
-use pbzarr::import::{Config, Report, Source};
+use pbzarr::import::{Config, Report, Source, Target};
 use pbzarr::io::Dtype;
+use pbzarr::{Contig, Genome, PbzStore};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
     OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam as rs_from_bam,
@@ -43,12 +43,55 @@ fn apply_codecs_kwarg(
     Ok(())
 }
 
+/// Output store format selected by the `format` kwarg, mirroring the CLI's
+/// `--format`.
+#[derive(Clone, Copy)]
+enum Format {
+    V04,
+    V05,
+}
+
+impl Format {
+    fn parse(format: &str) -> PyResult<Self> {
+        match format {
+            "0.4" => Ok(Self::V04),
+            "0.5" => Ok(Self::V05),
+            other => Err(PbzError::new_err(format!(
+                "unsupported store format {other:?} (expected \"0.4\" or \"0.5\")"
+            ))),
+        }
+    }
+}
+
+/// An opened import destination. `target` hands it to the format entry points.
+enum Output {
+    Store(PbzStore),
+    Dataset(Dataset),
+}
+
+impl Output {
+    fn open(format: Format, path: &str) -> PyResult<Self> {
+        match format {
+            Format::V04 => PbzStore::open(path).map(Self::Store),
+            Format::V05 => Dataset::open(path).map(Self::Dataset),
+        }
+        .map_err(|e| PbzError::new_err(format!("{e}")))
+    }
+
+    fn target(&mut self) -> Target<'_> {
+        match self {
+            Self::Store(store) => Target::Store(store),
+            Self::Dataset(dataset) => Target::Dataset(dataset),
+        }
+    }
+}
+
 /// Bulk-import one or more d4 files into a new `int32` track.
 ///
 /// The track is created from the source headers; it must NOT already exist.
 /// d4 stores depths as `int32` natively, so import is zero-conversion.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None))]
+#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None, format="0.4".to_string()))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_d4(
     py: Python<'_>,
@@ -66,10 +109,11 @@ fn import_d4(
     scales: Option<Vec<u64>>,
     in_flight: Option<usize>,
     decode_chunks: Option<usize>,
+    format: String,
 ) -> PyResult<Py<PyAny>> {
+    let format = Format::parse(&format)?;
     let report = py.allow_threads(|| {
-        let mut store =
-            PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let mut output = Output::open(format, &store_path)?;
         let d4_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -116,7 +160,7 @@ fn import_d4(
                 ("shard_column_size", shard_column_size.is_some()),
             ],
         )?;
-        rs_from_d4(&mut store, &track, &d4_sources, config)
+        rs_from_d4(output.target(), &track, &d4_sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))
     })?;
     report_to_dict(py, &report)
@@ -129,7 +173,7 @@ fn import_d4(
 /// uncovered base, so uncovered positions read back as `NaN` and reductions
 /// skip them.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None))]
+#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None, format="0.4".to_string()))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bigwig(
     py: Python<'_>,
@@ -147,10 +191,11 @@ fn import_bigwig(
     scales: Option<Vec<u64>>,
     in_flight: Option<usize>,
     decode_chunks: Option<usize>,
+    format: String,
 ) -> PyResult<Py<PyAny>> {
+    let format = Format::parse(&format)?;
     let report = py.allow_threads(|| {
-        let mut store =
-            PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let mut output = Output::open(format, &store_path)?;
         let bw_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -197,7 +242,7 @@ fn import_bigwig(
                 ("shard_column_size", shard_column_size.is_some()),
             ],
         )?;
-        rs_from_bigwig(&mut store, &track, &bw_sources, config)
+        rs_from_bigwig(output.target(), &track, &bw_sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))
     })?;
     report_to_dict(py, &report)
@@ -315,7 +360,7 @@ fn build_bed_schema(
 /// Any 2D output (several sources, or a wide track) requires `column_dim`.
 /// Returns the import report dict.
 #[pyfunction]
-#[pyo3(signature = (store_path, sources, genome, schema=None, track=None, column=None, dtype=None, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None))]
+#[pyo3(signature = (store_path, sources, genome, schema=None, track=None, column=None, dtype=None, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None, format="0.4".to_string()))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bed(
     py: Python<'_>,
@@ -337,7 +382,9 @@ fn import_bed(
     scales: Option<Vec<u64>>,
     in_flight: Option<usize>,
     decode_chunks: Option<usize>,
+    format: String,
 ) -> PyResult<Py<PyAny>> {
+    let format = Format::parse(&format)?;
     let report = py.allow_threads(|| {
         let bed_sources: Vec<Source> = sources
             .iter()
@@ -390,8 +437,7 @@ fn import_bed(
                 ("shard_column_size", shard_column_size.is_some()),
             ],
         )?;
-        let mut store =
-            PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let mut output = Output::open(format, &store_path)?;
 
         let entries = match (schema, &column) {
             (Some(_), Some(_)) => {
@@ -420,7 +466,7 @@ fn import_bed(
                 let bed_schema = build_bed_schema(&bed_sources, &entries, track_override)?;
                 let plan = plan_bed_schema(&bed_sources, &bed_schema, &config)
                     .map_err(|e| PbzError::new_err(format!("{e}")))?;
-                execute_bed_schema_plan(&mut store, plan, genome, config)
+                execute_bed_schema_plan(output.target(), plan, genome, config)
                     .map_err(|e| PbzError::new_err(format!("{e}")))
             }
             None => {
@@ -433,7 +479,7 @@ fn import_bed(
                         .map_err(|e| PbzError::new_err(format!("{e}")))?,
                     ..BedImportOptions::default()
                 };
-                rs_from_bed_matrix(&mut store, &bed_sources, genome, &options, config)
+                rs_from_bed_matrix(output.target(), &bed_sources, genome, &options, config)
                     .map_err(|e| PbzError::new_err(format!("{e}")))
             }
         }
@@ -470,7 +516,7 @@ fn report_to_dict(py: Python<'_>, report: &Report) -> PyResult<Py<PyAny>> {
 /// overlapping mates are deduped), `"all"` (riker/samtools-mpileup-style
 /// unconditional dedup), or `"none"` (dedup disabled).
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), reference=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None))]
+#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), reference=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, scales=None, in_flight=None, decode_chunks=None, format="0.4".to_string()))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bam(
     py: Python<'_>,
@@ -495,6 +541,7 @@ fn import_bam(
     scales: Option<Vec<u64>>,
     in_flight: Option<usize>,
     decode_chunks: Option<usize>,
+    format: String,
 ) -> PyResult<Py<PyAny>> {
     let mode = match mode.as_str() {
         "depth" => ImportMode::Depth,
@@ -522,9 +569,9 @@ fn import_bam(
         overlap,
         count_deletions,
     };
+    let format = Format::parse(&format)?;
     let report = py.allow_threads(|| {
-        let mut store =
-            PbzStore::open(&store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let mut output = Output::open(format, &store_path)?;
         let bam_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -572,7 +619,7 @@ fn import_bam(
             ],
         )?;
         rs_from_bam(
-            &mut store,
+            output.target(),
             &track,
             &bam_sources,
             mode,
@@ -585,11 +632,43 @@ fn import_bam(
     report_to_dict(py, &report)
 }
 
-/// Create a new empty flat pbz store (a bare `zarr_conventions` marker root).
-/// The imports open this store and add tracks to it.
+/// Create a new empty pbz store for `format`.
+///
+/// Format `0.4` writes a bare `zarr_conventions` marker root and takes its
+/// contigs from each import's sources. Format `0.5` writes one root Dataset
+/// whose `reference`, ordered `(contig, length)` pairs, is fixed here and
+/// shared by every track it later holds.
 #[pyfunction]
-fn create_store(store_path: String) -> PyResult<()> {
-    PbzStore::create(&store_path)
+#[pyo3(signature = (store_path, format="0.4".to_string(), reference=None))]
+fn create_store(
+    store_path: String,
+    format: String,
+    reference: Option<Vec<(String, u64)>>,
+) -> PyResult<()> {
+    let contigs = match (Format::parse(&format)?, reference) {
+        (Format::V04, None) => {
+            return PbzStore::create(&store_path)
+                .map(|_| ())
+                .map_err(|e| PbzError::new_err(format!("{e}")));
+        }
+        (Format::V04, Some(_)) => {
+            return Err(PbzError::new_err(
+                "reference applies to format 0.5 only; a format 0.4 store takes its contigs from each import's sources",
+            ));
+        }
+        (Format::V05, None) => {
+            return Err(PbzError::new_err(
+                "format 0.5 requires reference: the ordered contig names and lengths every track shares",
+            ));
+        }
+        (Format::V05, Some(contigs)) => contigs,
+    };
+    let contigs = contigs
+        .into_iter()
+        .map(|(name, length)| Contig { name, length })
+        .collect();
+    Reference::new(contigs)
+        .and_then(|reference| Dataset::create(&store_path, reference))
         .map(|_| ())
         .map_err(|e| PbzError::new_err(format!("{e}")))
 }
