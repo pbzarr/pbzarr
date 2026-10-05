@@ -122,36 +122,25 @@ def _require_dataset(path: str) -> None:
         raise PbzError(f"destination declares pbz:version {version!r}, not 0.5: {path}")
 
 
-def _require_destination(path: str, store_format: str) -> None:
-    if store_format == "0.5":
+def _require_destination(path: str, scales: Sequence[int] | None = None) -> str:
+    """Check the destination and report which format it already uses."""
+    try:
+        attrs = _read_root_attrs(path, storage_options=None)
+    except Exception:
+        attrs = {}
+    if _has_pbz_marker(attrs):
         _require_dataset(path)
-    else:
-        _require_collection(path)
-
-
-def _format(value: str, scales: Sequence[int] | None = None) -> str:
-    if value not in ("0.4", "0.5"):
-        raise ValueError(f'format must be "0.4" or "0.5"; got {value!r}')
-    if value == "0.5" and scales:
-        raise ValueError(
-            'scales= is not supported by format "0.5": a multiscale pyramid'
-            " under one root Dataset is not defined"
-        )
-    return value
-
-
-def _contigs(
-    reference: Mapping[str, int] | None, store_format: str
-) -> list[tuple[str, int]] | None:
-    if reference is None:
-        if store_format == "0.5":
+        if scales:
             raise ValueError(
-                'format "0.5" needs reference=: an ordered mapping of contig'
-                " name to length"
+                "scales= is not supported by format 0.5: a multiscale pyramid"
+                " under one root Dataset is not defined"
             )
-        return None
-    if store_format != "0.5":
-        raise ValueError('reference= applies to format "0.5" only')
+        return "0.5"
+    _require_collection(path)
+    return "0.4"
+
+
+def _contigs(reference: Mapping[str, int]) -> list[tuple[str, int]]:
     if not isinstance(reference, Mapping):
         raise TypeError("reference must be a mapping of contig name to length")
     if not reference:
@@ -159,10 +148,13 @@ def _contigs(
     contigs: list[tuple[str, int]] = []
     for name, length in reference.items():
         if not isinstance(name, str) or not name:
-            raise ValueError("contig names must be nonempty strings")
+            raise ValueError(f"contig name must be a nonempty string; got {name!r}")
         if isinstance(length, bool) or not isinstance(length, int) or length < 0:
-            raise ValueError(f"contig length for {name!r} must be a nonnegative integer")
-        contigs.append((name, length))
+            raise ValueError(
+                f"length of contig {name!r} must be a nonnegative integer;"
+                f" got {length!r}"
+            )
+        contigs.append((name, int(length)))
     return contigs
 
 
@@ -170,22 +162,18 @@ def create_store(
     destination: PathLike,
     /,
     *,
-    format: str = "0.4",
-    reference: Mapping[str, int] | None = None,
+    reference: Mapping[str, int],
 ) -> None:
     """Create an empty PBZ store at an absent filesystem destination.
 
-    Format `"0.4"` creates a collection of per-track groups and takes its
-    contigs from each import's sources. Format `"0.5"` creates one root
-    dataset over shared root coordinates; `reference=` gives the ordered
-    mapping of contig name to length that every track shares, fixed here
-    for the lifetime of the store.
+    The store is one root dataset over shared root coordinates. `reference=`
+    gives the ordered mapping of contig name to length that every track
+    shares, fixed here for the lifetime of the store.
     """
     destination_path = _path(destination, "destination")
-    store_format = _format(format)
-    contigs = _contigs(reference, store_format)
+    contigs = _contigs(reference)
     _require_absent(destination_path)
-    return _native.create_store(destination_path, store_format, contigs)
+    return _native.create_store(destination_path, contigs)
 
 
 def _scales(scales: Sequence[int] | None) -> list[int] | None:
@@ -199,7 +187,6 @@ def import_d4(
     track: str,
     sources: Source | Iterable[Source],
     *,
-    format: str = "0.4",
     column_dim: str | None = None,
     workers: int | None = None,
     in_flight: int | None = None,
@@ -214,19 +201,18 @@ def import_d4(
 ) -> dict[str, int | float]:
     """Import one or more D4 sources into an existing PBZ store.
 
-    `format=` selects the destination layout: `"0.4"` for a collection of
-    per-track groups, `"0.5"` for one root dataset over shared root
-    coordinates. `scales=` builds a multiscale pyramid on the new track
-    with the given downsampling factors; `None` or empty builds no pyramid,
-    and format `"0.5"` rejects it. `in_flight=` caps the position spans the
+    The destination's existing layout decides the format. `scales=` builds
+    a multiscale pyramid on the new track with the given downsampling
+    factors; `None` or empty builds no pyramid, and a format 0.5 store
+    rejects it. `in_flight=` caps the position spans the
     engine holds open at once (`None` = auto). `decode_chunks=` sets the
     position chunks each reader decodes per pass (default auto). Returns
     the import report dict.
     """
     destination_path = _path(destination, "destination")
-    store_format = _format(format, scales)
+
     normalized_sources = _sources(sources)
-    _require_destination(destination_path, store_format)
+    _require_destination(destination_path, scales)
     return _native.import_d4(
         destination_path,
         track,
@@ -242,7 +228,6 @@ def import_d4(
         scales=_scales(scales),
         in_flight=in_flight,
         decode_chunks=decode_chunks,
-        format=store_format,
     )
 
 
@@ -251,7 +236,6 @@ def import_bigwig(
     track: str,
     sources: Source | Iterable[Source],
     *,
-    format: str = "0.4",
     column_dim: str | None = None,
     workers: int | None = None,
     in_flight: int | None = None,
@@ -266,19 +250,18 @@ def import_bigwig(
 ) -> dict[str, int | float]:
     """Import one or more bigWig sources into an existing PBZ store.
 
-    `format=` selects the destination layout: `"0.4"` for a collection of
-    per-track groups, `"0.5"` for one root dataset over shared root
-    coordinates. `scales=` builds a multiscale pyramid on the new track
-    with the given downsampling factors; `None` or empty builds no pyramid,
-    and format `"0.5"` rejects it. `in_flight=` caps the position spans the
+    The destination's existing layout decides the format. `scales=` builds
+    a multiscale pyramid on the new track with the given downsampling
+    factors; `None` or empty builds no pyramid, and a format 0.5 store
+    rejects it. `in_flight=` caps the position spans the
     engine holds open at once (`None` = auto). `decode_chunks=` sets the
     position chunks each reader decodes per pass (default auto). Returns
     the import report dict.
     """
     destination_path = _path(destination, "destination")
-    store_format = _format(format, scales)
+
     normalized_sources = _sources(sources)
-    _require_destination(destination_path, store_format)
+    _require_destination(destination_path, scales)
     return _native.import_bigwig(
         destination_path,
         track,
@@ -294,7 +277,6 @@ def import_bigwig(
         scales=_scales(scales),
         in_flight=in_flight,
         decode_chunks=decode_chunks,
-        format=store_format,
     )
 
 
@@ -318,7 +300,6 @@ def import_bed(
     sources: Source | Iterable[Source],
     *,
     genome: PathLike,
-    format: str = "0.4",
     schema: Mapping[str | int, str | None] | None = None,
     track: str | None = None,
     column: str | int | None = None,
@@ -353,17 +334,16 @@ def import_bed(
 
     Output is 2D when there are several sources, or when one track holds
     several BED columns. Every 2D output requires `column_dim=`.
-    `format=` selects the destination layout: `"0.4"` for a collection of
-    per-track groups, `"0.5"` for one root dataset over shared root
-    coordinates. `scales=` builds a multiscale pyramid on each new track
-    with the given downsampling factors; `None` or empty builds no pyramid,
-    and format `"0.5"` rejects it. `in_flight=` caps the position spans the
+    The destination's existing layout decides the format. `scales=` builds
+    a multiscale pyramid on each new track with the given downsampling
+    factors; `None` or empty builds no pyramid, and a format 0.5 store
+    rejects it. `in_flight=` caps the position spans the
     engine holds open at once (`None` = auto). `decode_chunks=` sets the
     position chunks each reader decodes per pass (default auto). Returns
     the import report dict.
     """
     destination_path = _path(destination, "destination")
-    store_format = _format(format, scales)
+
     normalized_sources = _sources(sources)
     genome_path = _path(genome, "genome")
     schema_entries = None
@@ -380,7 +360,7 @@ def import_bed(
                 raise TypeError("schema dtypes must be strings or None")
             schema_entries.append((_bed_selector(key), value))
     normalized_column = _bed_selector(column) if column is not None else None
-    _require_destination(destination_path, store_format)
+    _require_destination(destination_path, scales)
     return _native.import_bed(
         destination_path,
         normalized_sources,
@@ -400,7 +380,6 @@ def import_bed(
         scales=_scales(scales),
         in_flight=in_flight,
         decode_chunks=decode_chunks,
-        format=store_format,
     )
 
 
@@ -409,7 +388,6 @@ def import_bam(
     track: str,
     sources: Source | Iterable[Source],
     *,
-    format: str = "0.4",
     mode: str = "depth",
     reference: PathLike | None = None,
     min_mapq: int = 0,
@@ -442,17 +420,16 @@ def import_bam(
     collapsing only PROPER_PAIR-flagged overlapping mates to one count;
     `"all"` matches riker/samtools-mpileup-style unconditional dedup of any
     overlapping mate pair; `"none"` disables dedup, double-counting every
-    overlapping pair's shared span. `format=` selects the destination layout:
-    `"0.4"` for a collection of per-track groups, `"0.5"` for one root
-    dataset over shared root coordinates. `scales=` builds a multiscale
-    pyramid on each new track with the given downsampling factors; `None`
-    or empty builds no pyramid, and format `"0.5"` rejects it. `in_flight=`
+    overlapping pair's shared span. The destination's existing
+    layout decides the format. `scales=` builds a multiscale pyramid on each
+    new track with the given downsampling factors; `None` or empty builds no
+    pyramid, and a format 0.5 store rejects it. `in_flight=`
     caps the position spans the engine holds open at once (`None` = auto).
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
-    store_format = _format(format, scales)
+
     if overlap not in ("proper", "all", "none"):
         raise ValueError('overlap must be "proper", "all", or "none"')
     normalized_sources = _sources(sources)
@@ -469,7 +446,7 @@ def import_bam(
             merged.append((path, label))
         normalized_sources = merged
     reference_path = _path(reference, "reference") if reference is not None else None
-    _require_destination(destination_path, store_format)
+    _require_destination(destination_path, scales)
     return _native.import_bam(
         destination_path,
         track,
@@ -492,5 +469,4 @@ def import_bam(
         scales=_scales(scales),
         in_flight=in_flight,
         decode_chunks=decode_chunks,
-        format=store_format,
     )

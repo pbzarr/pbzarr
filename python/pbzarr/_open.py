@@ -12,6 +12,7 @@ from zarr.errors import GroupNotFoundError
 from ._native import PbzError
 from ._xarray import (
     _NATIVE_CHUNKS,
+    _has_pbz_marker,
     _has_perbase_marker,
     _node_kind,
     _normalize_track_names,
@@ -123,6 +124,34 @@ def _open_all_collection(
         raise
 
 
+def _open_root_dataset(
+    source,
+    names: list[str] | None,
+    *,
+    chunks,
+    storage_options,
+) -> xr.Dataset:
+    """Open a format-0.5 store, which is one ordinary Xarray Dataset."""
+    kwargs = {}
+    if storage_options is not None:
+        kwargs["storage_options"] = dict(storage_options)
+    opened = xr.open_zarr(
+        source,
+        chunks={} if chunks is _NATIVE_CHUNKS else chunks,
+        consolidated=False,
+        **kwargs,
+    )
+    if names is None:
+        return opened
+    unknown = [name for name in names if name not in opened.data_vars]
+    if unknown:
+        opened.close()
+        raise PbzError(f"unknown track {unknown[0]!r}")
+    selected = opened[names]
+    selected.set_close(opened._close)
+    return selected
+
+
 def open(
     source,
     *,
@@ -130,8 +159,19 @@ def open(
     chunks=_NATIVE_CHUNKS,
     storage_options: Mapping[str, object] | None = None,
 ) -> xr.Dataset | xr.DataTree:
-    """Open a PBZ track as a Dataset or a collection as a DataTree."""
+    """Open a PBZ store.
+
+    A format-0.5 store opens as one Dataset whose tracks are data variables.
+    A format-0.4 track opens as a Dataset and a collection as a DataTree.
+    """
     root_attrs = _read_root_attrs(source, storage_options=storage_options)
+    if _has_pbz_marker(root_attrs):
+        return _open_root_dataset(
+            source,
+            None if tracks is None else _normalize_track_names(tracks),
+            chunks=chunks,
+            storage_options=storage_options,
+        )
     kind = _node_kind(root_attrs)
     if kind == "track":
         if tracks is not None:
