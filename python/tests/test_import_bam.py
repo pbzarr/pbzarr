@@ -47,7 +47,7 @@ def test_import_bam_depth_single_source_matches_hand_computed_vector(tmp_path):
         expected[start : start + read_len] += 1
 
     destination = tmp_path / "depth.pbz"
-    pbzarr.create_store(destination)
+    pbzarr.create_store(destination, reference={contig: length})
 
     report = pbzarr.import_bam(destination, "depth", bam, mode="depth")
     assert report["contigs_written"] == 1
@@ -57,12 +57,8 @@ def test_import_bam_depth_single_source_matches_hand_computed_vector(tmp_path):
     assert report["tasks_skipped"] == 0
     assert report["bytes_written"] > 0
 
-    collection = pbzarr.open(destination, chunks=None)
-    try:
-        assert isinstance(collection, xr.DataTree)
-        depth = collection["depth"].to_dataset(inherit=False)
-        assert depth["values"].dims == ("position",)
-        assert depth["values"].dtype == np.dtype("int32")
-        assert depth["values"].values.tolist() == expected.tolist()
-    finally:
-        collection.close()
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert isinstance(dataset, xr.Dataset)
+        assert dataset["depth"].dims == ("position",)
+        assert dataset["depth"].dtype == np.dtype("int32")
+        assert dataset["depth"].values.tolist() == expected.tolist()

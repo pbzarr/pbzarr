@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -8,25 +10,18 @@ import pbzarr
 from _helpers import write_bed_bgzip_tabix, write_sizes
 
 
-def _track(path, name):
-    collection = pbzarr.open(path, chunks=None)
-    assert isinstance(collection, xr.DataTree)
-    return collection, collection[name].to_dataset(inherit=False)
-
-
 def test_create_store_returns_none_and_refuses_an_existing_destination(tmp_path):
     destination = tmp_path / "empty.pbz"
 
-    assert pbzarr.create_store(destination) is None
-    collection = pbzarr.open(destination)
-    try:
-        assert isinstance(collection, xr.DataTree)
-        assert not collection.children
-    finally:
-        collection.close()
+    assert pbzarr.create_store(destination, reference={"chr1": 1000}) is None
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert isinstance(dataset, xr.Dataset)
+        assert not dataset.data_vars
+        np.testing.assert_array_equal(dataset["contig"].values, ["chr1"])
+        np.testing.assert_array_equal(dataset["contig_length"].values, [1000])
 
     with pytest.raises(FileExistsError):
-        pbzarr.create_store(destination)
+        pbzarr.create_store(destination, reference={"chr1": 1000})
 
 
 def test_import_d4_one_labeled_source_with_column_dim_is_two_dimensional(
@@ -37,7 +32,7 @@ def test_import_d4_one_labeled_source_with_column_dim_is_two_dimensional(
     with pytest.raises(pbzarr.PbzError):
         pbzarr.import_d4(tmp_path / "missing.pbz", "depth", d4_fixture)
 
-    pbzarr.create_store(destination)
+    pbzarr.create_store(destination, reference={"chr1": 1000})
     report = pbzarr.import_d4(
         destination,
         "depth",
@@ -46,29 +41,23 @@ def test_import_d4_one_labeled_source_with_column_dim_is_two_dimensional(
     )
     assert report["contigs_written"] == 1
 
-    collection, depth = _track(destination, "depth")
-    try:
-        assert depth["values"].dims == ("position", "replicate")
-        assert depth["values"].sizes["position"] == 1000
-        assert depth["replicate"].values.tolist() == ["depth-a"]
-        assert depth["values"].dtype == np.dtype("int32")
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert dataset["depth"].dims == ("position", "replicate")
+        assert dataset["depth"].sizes["position"] == 1000
+        assert dataset["replicate"].values.tolist() == ["depth-a"]
+        assert dataset["depth"].dtype == np.dtype("int32")
         expected = np.repeat((np.arange(100) % 50) + 1, 10)
-        np.testing.assert_array_equal(depth["values"].values[:, 0], expected)
-    finally:
-        collection.close()
+        np.testing.assert_array_equal(dataset["depth"].values[:, 0], expected)
 
 
-def test_format_05_create_and_import_opens_as_one_xarray_dataset(
-    tmp_path, cohort_fixtures
-):
+def test_import_d4_cohort_opens_as_one_xarray_dataset(tmp_path, cohort_fixtures):
     destination = tmp_path / "cohort.pbz"
-    pbzarr.create_store(destination, format="0.5", reference={"chr1": 10000})
+    pbzarr.create_store(destination, reference={"chr1": 10000})
 
     report = pbzarr.import_d4(
         destination,
         "depth",
         list(zip(cohort_fixtures, ["s0", "s1"])),
-        format="0.5",
     )
     assert report["contigs_written"] == 1
 
@@ -84,16 +73,14 @@ def test_format_05_create_and_import_opens_as_one_xarray_dataset(
         np.testing.assert_array_equal(dataset["depth"].values[:, 1], expected + 100)
 
 
-def test_format_05_rejects_scales_before_writing(tmp_path, cohort_fixtures):
+def test_import_rejects_scales_before_writing(tmp_path, cohort_fixtures):
     destination = tmp_path / "scaled.pbz"
-    pbzarr.create_store(destination, format="0.5", reference={"chr1": 10000})
+    pbzarr.create_store(destination, reference={"chr1": 10000})
 
     with pytest.raises(ValueError, match="not supported by format"):
-        pbzarr.import_d4(
-            destination, "depth", cohort_fixtures[0], format="0.5", scales=[16]
-        )
+        pbzarr.import_d4(destination, "depth", cohort_fixtures[0], scales=[16])
 
-    with xr.open_zarr(destination, consolidated=False) as dataset:
+    with pbzarr.open(destination, chunks=None) as dataset:
         assert not dataset.data_vars
 
 
@@ -101,18 +88,15 @@ def test_import_bigwig_path_list_defaults_to_sample_axis(tmp_path, write_bigwig)
     first = write_bigwig("chr1", 20, "first", base=0.0)
     second = write_bigwig("chr1", 20, "second", base=10.0)
     destination = tmp_path / "bigwig.pbz"
-    pbzarr.create_store(destination)
+    pbzarr.create_store(destination, reference={"chr1": 20})
 
     report = pbzarr.import_bigwig(destination, "signal", [first, second])
     assert report["contigs_written"] == 1
 
-    collection, signal = _track(destination, "signal")
-    try:
-        assert signal["values"].dims == ("position", "sample")
-        assert signal["sample"].values.tolist() == ["first", "second"]
-        assert signal["values"].isel(position=0).values.tolist() == [1.0, 11.0]
-    finally:
-        collection.close()
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert dataset["signal"].dims == ("position", "sample")
+        assert dataset["sample"].values.tolist() == ["first", "second"]
+        assert dataset["signal"].isel(position=0).values.tolist() == [1.0, 11.0]
 
 
 def test_import_bed_single_column_is_scalar(tmp_path):
@@ -124,7 +108,7 @@ def test_import_bed_single_column_is_scalar(tmp_path):
     )
     genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
     destination = tmp_path / "bed.pbz"
-    pbzarr.create_store(destination)
+    pbzarr.create_store(destination, reference={"chr1": 20})
 
     report = pbzarr.import_bed(
         destination,
@@ -133,18 +117,13 @@ def test_import_bed_single_column_is_scalar(tmp_path):
         track="depth",
         column="coverage",
         dtype="int32",
-        scales=[16],
     )
     assert report["contigs_written"] == 1
-    assert (destination / "depth" / "scales" / "16" / "mean" / "zarr.json").exists()
 
-    collection, depth = _track(destination, "depth")
-    try:
-        assert depth["values"].dims == ("position",)
-        assert depth["values"].dtype == np.dtype("int32")
-        assert depth["values"].values.tolist() == [7] * 20
-    finally:
-        collection.close()
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert dataset["depth"].dims == ("position",)
+        assert dataset["depth"].dtype == np.dtype("int32")
+        assert dataset["depth"].values.tolist() == [7] * 20
 
 
 def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
@@ -159,7 +138,7 @@ def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
     )
     genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
     destination = tmp_path / "multi.pbz"
-    pbzarr.create_store(destination)
+    pbzarr.create_store(destination, reference={"chr1": 20})
 
     report = pbzarr.import_bed(
         destination,
@@ -169,22 +148,13 @@ def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
     )
     assert report["contigs_written"] == 1
 
-    collection = pbzarr.open(destination, chunks=None)
-    try:
-        assert set(collection.children) == {"coverage", "score", "is_max"}
-        assert collection["coverage"]["values"].dtype == np.dtype("int32")
-        assert collection["score"]["values"].dtype == np.dtype("float32")
-        assert collection["is_max"]["values"].dtype == np.dtype("bool")
-        assert collection["score"]["values"].values[[0, -1]].tolist() == [
-            1.5,
-            -2.5,
-        ]
-        assert collection["is_max"]["values"].values[[0, -1]].tolist() == [
-            True,
-            False,
-        ]
-    finally:
-        collection.close()
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert set(dataset.data_vars) == {"coverage", "score", "is_max"}
+        assert dataset["coverage"].dtype == np.dtype("int32")
+        assert dataset["score"].dtype == np.dtype("float32")
+        assert dataset["is_max"].dtype == np.dtype("bool")
+        assert dataset["score"].values[[0, -1]].tolist() == [1.5, -2.5]
+        assert dataset["is_max"].values[[0, -1]].tolist() == [True, False]
 
 
 def test_import_bed_wide_form_gathers_fields_into_one_track(tmp_path):
@@ -196,7 +166,7 @@ def test_import_bed_wide_form_gathers_fields_into_one_track(tmp_path):
     )
     genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
     destination = tmp_path / "wide.pbz"
-    pbzarr.create_store(destination)
+    pbzarr.create_store(destination, reference={"chr1": 20})
 
     pbzarr.import_bed(
         destination,
@@ -206,14 +176,11 @@ def test_import_bed_wide_form_gathers_fields_into_one_track(tmp_path):
         column_dim="metric",
     )
 
-    collection, stats = _track(destination, "stats")
-    try:
-        assert stats["values"].dims == ("position", "metric")
-        assert stats["metric"].values.tolist() == ["cov", "mapq"]
-        assert stats["values"].isel(position=0).values.tolist() == [4, 60]
-        assert stats["values"].isel(position=-1).values.tolist() == [9, 300]
-    finally:
-        collection.close()
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert dataset["stats"].dims == ("position", "metric")
+        assert dataset["metric"].values.tolist() == ["cov", "mapq"]
+        assert dataset["stats"].isel(position=0).values.tolist() == [4, 60]
+        assert dataset["stats"].isel(position=-1).values.tolist() == [9, 300]
 
 
 def test_import_bed_multi_source_matrix(tmp_path):
@@ -231,7 +198,7 @@ def test_import_bed_multi_source_matrix(tmp_path):
     )
     genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
     destination = tmp_path / "matrix.pbz"
-    pbzarr.create_store(destination)
+    pbzarr.create_store(destination, reference={"chr1": 20})
 
     pbzarr.import_bed(
         destination,
@@ -240,13 +207,10 @@ def test_import_bed_multi_source_matrix(tmp_path):
         column_dim="sample",
     )
 
-    collection, depth = _track(destination, "depth")
-    try:
-        assert depth["values"].dims == ("position", "sample")
-        assert depth["sample"].values.tolist() == ["tumor", "normal"]
-        assert depth["values"].isel(position=0).values.tolist() == [1, 2]
-    finally:
-        collection.close()
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert dataset["depth"].dims == ("position", "sample")
+        assert dataset["sample"].values.tolist() == ["tumor", "normal"]
+        assert dataset["depth"].isel(position=0).values.tolist() == [1, 2]
 
 
 def test_import_bed_rejects_a_two_path_tuple(tmp_path):
@@ -259,10 +223,8 @@ def test_import_bed_rejects_a_two_path_tuple(tmp_path):
 
 
 def test_import_d4_codecs_override_controls_zarr_metadata(tmp_path, d4_fixture):
-    import json
-
     destination = tmp_path / "codecs.pbz"
-    pbzarr.create_store(destination)
+    pbzarr.create_store(destination, reference={"chr1": 1000})
     pbzarr.import_d4(
         destination,
         "depth",
@@ -273,7 +235,7 @@ def test_import_d4_codecs_override_controls_zarr_metadata(tmp_path, d4_fixture):
         ],
     )
 
-    meta = json.loads((destination / "depth" / "values" / "zarr.json").read_text())
+    meta = json.loads((destination / "depth" / "zarr.json").read_text())
     assert [c["name"] for c in meta["codecs"]] == ["bytes", "zstd"]
 
     with pytest.raises(pbzarr.PbzError):
