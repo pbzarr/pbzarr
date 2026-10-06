@@ -448,16 +448,27 @@ impl Prepared {
 
 pub(crate) struct PreparedAppend {
     pub(crate) targets: Vec<Destination<'static>>,
-    /// Every array this run widens, destinations included. Their new shapes
-    /// publish only after the engine's chunk writes land.
-    grown: Vec<Arc<ArrayHandle>>,
+    /// Every widened variable and its stored metadata carrying the new shape,
+    /// published only after the engine's chunk writes land. Writing the stored
+    /// JSON back with one field replaced keeps the rest byte for byte; a round
+    /// trip through zarrs would respell codecs that zarr-python then rejects.
+    grown: Vec<(String, serde_json::Value)>,
     /// The appended dimension's coordinate. It grows last, so a torn append
     /// reads back as a dimension-size conflict instead of silent fill.
-    coordinate: Arc<ArrayHandle>,
+    coordinate: (String, serde_json::Value, Arc<ArrayHandle>),
     /// Labels for the appended columns.
     labels: Vec<String>,
     /// Column width before the append.
     width: u64,
+}
+
+/// `info`'s stored metadata with `shape` replaced.
+fn grown_metadata(info: &VariableInfo, axis: usize, extent: u64) -> (String, serde_json::Value) {
+    let mut shape = info.shape.clone();
+    shape[axis] = extent;
+    let mut metadata = info.metadata.clone();
+    metadata["shape"] = serde_json::json!(shape);
+    (info.name.clone(), metadata)
 }
 
 /// A rank-2 array's column chunk, and its column shard when sharded.
@@ -532,8 +543,10 @@ impl Dataset {
         let mut dim = String::new();
         let mut labels: Vec<String> = Vec::new();
         let mut width = 0;
+        let mut infos = Vec::with_capacity(specs.len());
         for (index, (name, config)) in specs.iter().enumerate() {
             let info = self.append_target(name)?;
+            infos.push(info);
             let new = config.columns.clone().ok_or_else(|| {
                 PbzError::Metadata(format!(
                     "append: {name:?} has a column dimension but the run supplies no new labels"
@@ -618,7 +631,7 @@ impl Dataset {
 
         let mut grown = Vec::with_capacity(specs.len());
         let mut targets = Vec::with_capacity(specs.len());
-        for (name, config) in specs {
+        for ((name, config), info) in specs.iter().zip(infos) {
             let mut array = self.open_growable(name)?;
             let (col_chunk, shard_col) = column_grid(&array, name)?;
             if !width.is_multiple_of(col_chunk) {
@@ -645,6 +658,7 @@ impl Dataset {
             array
                 .set_shape(vec![total, width + batch])
                 .map_err(|e| super::metadata::array_error(name, e))?;
+            grown.push(grown_metadata(info, 1, width + batch));
             let array = Arc::new(array);
             let track = Track {
                 name: name.clone(),
@@ -653,10 +667,9 @@ impl Dataset {
                 rank: 2,
                 column_dim: Some(dim.clone()),
                 storage: self.storage.clone(),
-                values: RwLock::new(Some(array.clone())),
+                values: RwLock::new(Some(array)),
                 sealed: AtomicBool::new(false),
             };
-            grown.push(array);
             targets.push(Destination::Root {
                 track: Box::new(track),
                 labels: Some(grown_labels.clone()),
@@ -687,23 +700,18 @@ impl Dataset {
                     info.name
                 )));
             }
-            let mut array = self.open_growable(&info.name)?;
-            let mut shape = info.shape.clone();
-            shape[axis] = width + batch;
-            array
-                .set_shape(shape)
-                .map_err(|e| super::metadata::array_error(&info.name, e))?;
-            grown.push(Arc::new(array));
+            grown.push(grown_metadata(info, axis, width + batch));
         }
 
         let mut coordinate = self.open_growable(&dim)?;
         coordinate
             .set_shape(vec![width + batch])
             .map_err(|e| super::metadata::array_error(&dim, e))?;
+        let (name, metadata) = grown_metadata(coordinate_info, 0, width + batch);
         Ok(PreparedAppend {
             targets,
             grown,
-            coordinate: Arc::new(coordinate),
+            coordinate: (name, metadata, Arc::new(coordinate)),
             labels,
             width,
         })
@@ -713,23 +721,33 @@ impl Dataset {
         self.unconsolidate()
     }
 
+    fn publish_metadata(&self, name: &str, metadata: &serde_json::Value) -> Result<()> {
+        let key = StoreKey::new(format!("{name}/zarr.json"))
+            .map_err(|e| PbzError::Metadata(e.to_string()))?;
+        self.storage
+            .set(
+                &key,
+                serde_json::to_vec(metadata)
+                    .map_err(|e| PbzError::Metadata(e.to_string()))?
+                    .into(),
+            )
+            .map_err(storage_error)
+    }
+
     /// Publish the grown shapes, then the grown coordinate. The coordinate
     /// length is the committed column width.
     pub(crate) fn finish_append(&mut self, prepared: &PreparedAppend) -> Result<()> {
-        for array in &prepared.grown {
-            array.store_metadata().map_err(storage_error)?;
+        for (name, metadata) in &prepared.grown {
+            self.publish_metadata(name, metadata)?;
         }
+        let (name, metadata, array) = &prepared.coordinate;
         let end = prepared.width + prepared.labels.len() as u64;
         #[allow(clippy::single_range_in_vec_init)]
         let appended = ArraySubset::new_with_ranges(&[prepared.width..end]);
-        prepared
-            .coordinate
+        array
             .store_array_subset(&appended, ndarray::Array1::from(prepared.labels.clone()))
             .map_err(storage_error)?;
-        prepared
-            .coordinate
-            .store_metadata()
-            .map_err(storage_error)?;
+        self.publish_metadata(name, metadata)?;
         *self = Self::open_with_storage(self.storage.clone())?;
         Ok(())
     }

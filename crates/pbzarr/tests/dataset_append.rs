@@ -136,8 +136,19 @@ fn append_adds_columns_and_leaves_the_existing_chunks_alone() {
     let (mut ds, storage) = store();
     import(&mut ds, "depth", &["s0", "s1"], 2, 1);
     let before = chunks(&storage);
+    let stored: Vec<_> = ["depth", "sample"]
+        .map(|name| (name, ds.variables()[name].metadata.clone()))
+        .into();
 
     append(&mut ds, "depth", &["s2", "s3"], 3).unwrap();
+
+    // Growing publishes a new shape and nothing else: a codec respelled on
+    // the way out would make the store unreadable to other Zarr libraries.
+    for (name, before) in &stored {
+        let mut after = ds.variables()[*name].metadata.clone();
+        after["shape"] = before["shape"].clone();
+        assert_eq!(&after, before, "{name} metadata changed beyond its shape");
+    }
 
     assert_eq!(ds.variables()["depth"].shape, [12, 4]);
     assert_eq!(
