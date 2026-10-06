@@ -13,6 +13,9 @@ pub(crate) enum Destination<'a> {
     Root {
         track: Box<Track>,
         labels: Option<Vec<String>>,
+        /// First destination column on the track's column axis. Nonzero when
+        /// the run appends to an existing column axis.
+        column_offset: u64,
     },
 }
 impl Destination<'_> {
@@ -30,6 +33,12 @@ impl Destination<'_> {
     }
     pub(crate) fn dtype(&self) -> Dtype {
         self.track().dtype()
+    }
+    pub(crate) fn column_offset(&self) -> u64 {
+        match self {
+            Self::Legacy(_) => 0,
+            Self::Root { column_offset, .. } => *column_offset,
+        }
     }
     pub(crate) fn rank(&self) -> usize {
         self.track().rank()

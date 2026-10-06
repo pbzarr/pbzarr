@@ -5,9 +5,9 @@ use super::builder::{Import, ImportBuilder};
 use super::config::{Config, Report};
 use super::engine::PipelineOptions;
 use super::routing::SourceAxis;
-use crate::dataset::Dataset;
+use crate::dataset::{Dataset, DatasetPlan};
 use crate::io::ValueReader;
-use crate::{Genome, PbzError, PbzStore, Result, TrackConfig};
+use crate::{Contig, Genome, PbzError, PbzStore, Result, TrackConfig};
 
 /// A destination for one import run.
 ///
@@ -18,6 +18,10 @@ use crate::{Genome, PbzError, PbzStore, Result, TrackConfig};
 pub enum Target<'a> {
     Store(&'a mut PbzStore),
     Dataset(&'a mut Dataset),
+    /// A format-0.5 Dataset whose existing root variables grow along their
+    /// column dimension. [`Target::import`] routes this variant to the append
+    /// path, so every format entry point appends without knowing about it.
+    Append(&'a mut Dataset),
 }
 
 impl<'a> From<&'a mut PbzStore> for Target<'a> {
@@ -104,23 +108,117 @@ impl Target<'_> {
                 config.scale_tracks(store, &names)?;
                 Ok(report)
             }
-            Self::Dataset(dataset) => {
-                if !config.scales.is_empty() {
-                    return Err(PbzError::Metadata(
-                        "format 0.5 import: scales are not supported; a multiscale pyramid under one root Dataset is not defined".into(),
-                    ));
-                }
-                // A Dataset fixes its reference at creation, so the per-spec
-                // genome is dropped here; routing checks every reader against
-                // the reference before the run writes anything.
-                let specs = specs
-                    .into_iter()
-                    .map(|(name, _, cfg)| (name, cfg))
-                    .collect();
-                axes.apply(Import::from_readers(readers)?.into_dataset(dataset, specs))
-                    .options(options)
-                    .run()
-            }
+            Self::Dataset(dataset) => dataset_run(
+                dataset,
+                specs,
+                readers,
+                axes,
+                options,
+                config,
+                DatasetPlan::Create,
+            ),
+            Self::Append(dataset) => dataset_run(
+                dataset,
+                specs,
+                readers,
+                axes,
+                options,
+                config,
+                DatasetPlan::Append,
+            ),
         }
     }
+
+    /// Grow the `specs` tracks at this destination along their column
+    /// dimension and fill the new columns from `readers`.
+    ///
+    /// Every other root variable over that dimension grows with them, and its
+    /// new columns read as the Zarr fill value. A variable with no such
+    /// dimension, such as a reduction across columns, keeps a legal shape and
+    /// goes stale; nothing detects or marks that.
+    pub fn append<R: ValueReader>(
+        self,
+        specs: Vec<(String, Genome, TrackConfig)>,
+        readers: Vec<R>,
+        axes: Axes,
+        options: PipelineOptions,
+        config: &Config,
+    ) -> Result<Report> {
+        match self {
+            Self::Store(_) => Err(PbzError::UnsupportedFormat(
+                "append grows a format 0.5 root Dataset; this destination is a format 0.4 store"
+                    .into(),
+            )),
+            Self::Dataset(dataset) | Self::Append(dataset) => dataset_run(
+                dataset,
+                specs,
+                readers,
+                axes,
+                options,
+                config,
+                DatasetPlan::Append,
+            ),
+        }
+    }
+}
+
+fn dataset_run<R: ValueReader>(
+    dataset: &mut Dataset,
+    specs: Vec<(String, Genome, TrackConfig)>,
+    readers: Vec<R>,
+    axes: Axes,
+    options: PipelineOptions,
+    config: &Config,
+    plan: DatasetPlan,
+) -> Result<Report> {
+    if !config.scales.is_empty() {
+        return Err(PbzError::Metadata(
+            "format 0.5 import: scales are not supported; a multiscale pyramid under one root Dataset is not defined".into(),
+        ));
+    }
+    if plan == DatasetPlan::Append {
+        let reference = dataset.reference()?.contigs().to_vec();
+        for (_, genome, _) in &specs {
+            same_reference(genome.contigs(), &reference)?;
+        }
+    }
+    // A Dataset fixes its reference at creation, so the per-spec genome is
+    // dropped here; routing checks every reader against the reference before
+    // the run writes anything.
+    let specs = specs
+        .into_iter()
+        .map(|(name, _, cfg)| (name, cfg))
+        .collect();
+    axes.apply(Import::from_readers(readers)?.into_dataset_plan(dataset, specs, plan))
+        .options(options)
+        .run()
+}
+
+/// An append reads the store's own geometry, so the source must describe the
+/// same reference in the same order.
+fn same_reference(source: &[Contig], store: &[Contig]) -> Result<()> {
+    if source == store {
+        return Ok(());
+    }
+    let message = source
+        .iter()
+        .zip(store)
+        .enumerate()
+        .find(|(_, (a, b))| a != b)
+        .map(|(index, (source, store))| {
+            format!(
+                "contig {index} is {}:{} in the source but {}:{} in the store",
+                source.name, source.length, store.name, store.length
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "the source has {} contig(s) and the store has {}",
+                source.len(),
+                store.len()
+            )
+        });
+    Err(PbzError::Metadata(format!(
+        "append: source reference differs from the store reference: {message}"
+    )))
 }

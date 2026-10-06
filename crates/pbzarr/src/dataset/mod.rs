@@ -11,6 +11,7 @@ pub use metadata::{
 };
 pub use reference::{BinInterval, GenomicAxis, Reference};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
+pub(crate) use write::{DatasetPlan, Prepared};
 use zarrs::storage::ReadableWritableListableStorage;
 
 /// The `pbz:version` value written to, and required of, a root-Dataset store.

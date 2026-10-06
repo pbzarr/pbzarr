@@ -185,7 +185,8 @@ impl ImportRouting {
                 Some(SourceAxis::Fields) => n_fields as u64,
                 None => 1,
             };
-            let columns = 0..width;
+            let start = track.column_offset();
+            let columns = start..start + width;
 
             if columns_from.is_none() {
                 if track.rank() != 1 {
@@ -204,10 +205,10 @@ impl ImportRouting {
                     )));
                 }
                 let on_disk = track.columns_count()? as u64;
-                if on_disk != width {
+                if on_disk != columns.end {
                     return Err(PbzError::Metadata(format!(
                         "import routing: track {:?} has {on_disk} column(s) but the \
-                         routing supplies {width}",
+                         routing supplies {width} at column {start}",
                         track.name()
                     )));
                 }

@@ -17,6 +17,7 @@ use crossbeam_channel::Sender;
 use zarrs::array::ArrayShardedExt;
 
 use super::destination::Destination;
+use crate::dataset::{DatasetPlan, Prepared};
 use crate::error::{PbzError, Result};
 use crate::import::config::Report;
 use crate::import::engine::{self, CostModel, PipelineOptions, TapMessage};
@@ -25,6 +26,10 @@ use crate::import::routing::{ImportRouting, SourceAxis};
 use crate::io::ValueReader;
 use crate::track::Track;
 use crate::{TrackConfig, dataset::Dataset};
+
+/// A Dataset destination: the store, its track specifications, and whether
+/// the run creates those tracks or widens them.
+type DatasetTarget<'t> = (&'t mut Dataset, Vec<(String, TrackConfig)>, DatasetPlan);
 
 pub struct Import;
 
@@ -51,7 +56,7 @@ impl Import {
 pub struct ImportBuilder<'t, R: ValueReader> {
     readers: Vec<R>,
     tracks: Vec<&'t Track>,
-    dataset: Option<(&'t mut Dataset, Vec<(String, TrackConfig)>)>,
+    dataset: Option<DatasetTarget<'t>>,
     tracks_from: Option<SourceAxis>,
     columns_from: Option<SourceAxis>,
     options: PipelineOptions,
@@ -79,12 +84,21 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
     /// before writing. Existing dimensions require identical ordered labels.
     /// Errors may leave incomplete output; reopen the Dataset after an error.
     pub fn into_dataset(
-        mut self,
+        self,
         dataset: &'t mut Dataset,
         tracks: Vec<(String, TrackConfig)>,
     ) -> Self {
+        self.into_dataset_plan(dataset, tracks, DatasetPlan::Create)
+    }
+
+    pub(crate) fn into_dataset_plan(
+        mut self,
+        dataset: &'t mut Dataset,
+        tracks: Vec<(String, TrackConfig)>,
+        plan: DatasetPlan,
+    ) -> Self {
         self.tracks.clear();
-        self.dataset = Some((dataset, tracks));
+        self.dataset = Some((dataset, tracks, plan));
         self
     }
 
@@ -138,17 +152,15 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
         let prepared = self
             .dataset
             .as_ref()
-            .map(|(ds, specs)| ds.prepare_import(specs))
+            .map(|(ds, specs, plan)| ds.prepare(specs, *plan))
             .transpose()?;
         let legacy: Vec<_> = self
             .tracks
             .iter()
             .map(|track| Destination::Legacy(track))
             .collect();
-        let tracks: &[Destination<'_>] = prepared
-            .as_ref()
-            .map(|p| p.targets.as_slice())
-            .unwrap_or(&legacy);
+        let tracks: &[Destination<'_>] =
+            prepared.as_ref().map(Prepared::targets).unwrap_or(&legacy);
         if tracks.is_empty() {
             return Err(PbzError::Metadata(
                 "import: no destination tracks; call into_track(s) first".into(),
@@ -234,17 +246,15 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
         let prepared = self
             .dataset
             .as_ref()
-            .map(|(ds, specs)| ds.prepare_import(specs))
+            .map(|(ds, specs, plan)| ds.prepare(specs, *plan))
             .transpose()?;
         let legacy: Vec<_> = self
             .tracks
             .iter()
             .map(|track| Destination::Legacy(track))
             .collect();
-        let tracks: &[Destination<'_>] = prepared
-            .as_ref()
-            .map(|p| p.targets.as_slice())
-            .unwrap_or(&legacy);
+        let tracks: &[Destination<'_>] =
+            prepared.as_ref().map(Prepared::targets).unwrap_or(&legacy);
         if tracks.is_empty() {
             return Err(PbzError::Metadata(
                 "import: no destination tracks; call into_track(s) first".into(),
@@ -265,8 +275,8 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             self.expected_labels.as_deref(),
         )?;
         engine::validate_layout(tracks, &routing)?;
-        if let (Some((ds, _)), Some(prepared)) = (self.dataset.as_mut(), prepared.as_ref()) {
-            ds.begin_import(prepared)?;
+        if let (Some((ds, ..)), Some(prepared)) = (self.dataset.as_mut(), prepared.as_ref()) {
+            ds.begin(prepared)?;
         }
         let report = engine::run_import(
             self.readers,
@@ -276,8 +286,8 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             self.cost_model.as_deref(),
             self.tap.as_ref(),
         )?;
-        if let (Some((ds, _)), Some(prepared)) = (self.dataset.as_mut(), prepared.as_ref()) {
-            ds.finish_import(prepared)?;
+        if let (Some((ds, ..)), Some(prepared)) = (self.dataset.as_mut(), prepared.as_ref()) {
+            ds.finish(prepared)?;
         }
         Ok(report)
     }
