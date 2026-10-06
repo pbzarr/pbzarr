@@ -11,6 +11,19 @@ fn storage_error(error: impl std::fmt::Display) -> PbzError {
     PbzError::Store(error.to_string())
 }
 
+/// A shard edge must be a whole number of chunks, or the sharding codec
+/// rejects the array. Reject a request that is not, then cap at the array
+/// extent without breaking divisibility.
+fn shard_extent(request: u64, chunk: u64, extent: u64, axis: &str) -> Result<u64> {
+    if !request.is_multiple_of(chunk) {
+        return Err(PbzError::Metadata(format!(
+            "import: {axis} shard {request} must be a multiple of the {axis} chunk {chunk}"
+        )));
+    }
+    let capped = request.min(extent.max(1)).max(chunk);
+    Ok((capped / chunk).max(1) * chunk)
+}
+
 impl Dataset {
     /// Create a new format-0.5 Dataset with a fixed ordered reference.
     ///
@@ -225,7 +238,8 @@ impl Dataset {
             let chunk_pos = (config.chunk_size as u64).min(total.max(1)).max(1);
             let shard_pos = config
                 .shard_size
-                .map(|n| (n as u64).min(total.max(1)).max(1));
+                .map(|n| shard_extent(n as u64, chunk_pos, total, "position"))
+                .transpose()?;
             let mut chunk = vec![chunk_pos];
             let mut outer = vec![shard_pos.unwrap_or(chunk_pos)];
             if let Some(labels) = &config.columns {
@@ -236,12 +250,17 @@ impl Dataset {
                     .unwrap_or(width)
                     .min(width)
                     .max(1);
-                let shard_col = config
-                    .shard_column_size
-                    .map(|n| n as u64)
-                    .unwrap_or(width)
-                    .min(width)
-                    .max(1);
+                // One column chunk per shard by default, so widening the column
+                // axis later appends whole shards instead of rewriting one.
+                let shard_col = shard_extent(
+                    config
+                        .shard_column_size
+                        .map(|n| n as u64)
+                        .unwrap_or(col_chunk),
+                    col_chunk,
+                    width,
+                    "column",
+                )?;
                 chunk.push(col_chunk);
                 outer.push(if shard_pos.is_some() {
                     shard_col

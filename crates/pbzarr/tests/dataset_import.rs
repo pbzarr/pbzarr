@@ -439,3 +439,32 @@ fn unsupported_neighbor_does_not_block_supported_import() {
             .all(|&n| n == 7)
     );
 }
+
+#[test]
+fn a_sharded_cohort_shards_one_column_chunk_at_any_width() {
+    let (mut ds, _, _) = traced_dataset();
+    let labels: Vec<String> = (0..5).map(|i| format!("S{i}")).collect();
+    let cfg = TrackConfig::new(Dtype::U32)
+        .columns(labels.clone())
+        .column_dim("sample")
+        .chunk_size(4)
+        .column_chunk_size(2)
+        .shard_size(8);
+    let readers: Vec<ConstReader> = (0..5).map(|_| ConstReader::new(vec![7])).collect();
+    Import::from_readers(readers)
+        .unwrap()
+        .into_dataset(&mut ds, vec![("depth".into(), cfg)])
+        .readers_as_columns()
+        .expect_column_labels(labels)
+        .run()
+        .unwrap();
+    assert_eq!(ds.variables()["depth"].shape, [12, 5]);
+    let shard = &ds.variables()["depth"].metadata["chunk_grid"]["configuration"]["chunk_shape"];
+    // The column shard is one column chunk wide, so widening the column axis
+    // later appends whole shards. A width of 5 is not a multiple of 2.
+    assert_eq!(shard[1], 2);
+    assert_eq!(
+        ds.read_raw::<u32>("depth", &[0..12, 0..5]).unwrap(),
+        ndarray::ArrayD::from_elem(ndarray::IxDyn(&[12, 5]), 7)
+    );
+}
