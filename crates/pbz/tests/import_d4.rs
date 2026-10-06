@@ -95,3 +95,56 @@ fn import_d4_then_stat_mean() {
         "#chrom\tstart\tend\ts1\ts2\nchr1\t0\t1000\t25\t25\n"
     );
 }
+
+#[test]
+fn append_d4_widens_a_cohort_track() {
+    let dir = TempDir::new().unwrap();
+    let d4 = fixture("banded_1k.d4");
+    let store = dir.path().join("cohort.pbz");
+
+    let import = run_pbz([
+        "import".into(),
+        "d4".into(),
+        "-o".into(),
+        store.as_os_str().to_owned(),
+        "--track".into(),
+        "depth".into(),
+        "--no-progress".into(),
+        labeled(&d4, "s1"),
+        labeled(&d4, "s2"),
+    ]);
+    assert!(
+        import.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+
+    let append = run_pbz([
+        "append".into(),
+        "d4".into(),
+        "-o".into(),
+        store.as_os_str().to_owned(),
+        "--track".into(),
+        "depth".into(),
+        "--no-progress".into(),
+        labeled(&d4, "s3"),
+        labeled(&d4, "s4"),
+    ]);
+    assert!(
+        append.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&append.stderr)
+    );
+
+    let median = run_pbz([
+        "stat".into(),
+        "-s".into(),
+        "median".into(),
+        store.into_os_string(),
+        "depth".into(),
+    ]);
+    assert_eq!(
+        stdout_of(&median),
+        "#chrom\tstart\tend\ts1\ts2\ts3\ts4\nchr1\t0\t1000\t25\t25\t25\t25\n"
+    );
+}
