@@ -40,6 +40,8 @@ enum Command {
     Stat(StatArgs),
     /// Import data into a PBZ store.
     Import(Box<ImportArgs>),
+    /// Append columns to a track of a format-0.5 PBZ store.
+    Append(Box<AppendArgs>),
     /// Compute and publish a multiscale pyramid for a track.
     Scale(ScaleArgs),
 }
@@ -115,6 +117,147 @@ struct StatArgs {
 struct ImportArgs {
     #[command(subcommand)]
     format: ImportCommand,
+}
+
+#[derive(Debug, Args)]
+struct AppendArgs {
+    #[command(subcommand)]
+    format: AppendCommand,
+}
+
+#[derive(Debug, Subcommand)]
+#[command(
+    after_help = "The store fixes chunks, shards, codecs and the column dimension, so \
+                  append takes no layout flags. Every root variable over the appended \
+                  dimension grows; only --track receives values, and the other grown \
+                  columns read as the array fill value. A variable without that \
+                  dimension, such as a reduction across columns, keeps a legal shape \
+                  and goes stale; pbz neither detects nor marks it."
+)]
+enum AppendCommand {
+    /// Append columns decoded from tabix-indexed BED files.
+    Bed(AppendBedArgs),
+    /// Append columns decoded from BAM/CRAM files.
+    Bam(AppendBamArgs),
+    /// Append columns decoded from d4 files.
+    D4(AppendD4Args),
+    /// Append columns decoded from bigWig files.
+    #[command(name = "bigwig")]
+    BigWig(AppendBigWigArgs),
+}
+
+/// The store, the sources and the track every append names.
+#[derive(Debug, Args)]
+struct AppendTarget {
+    /// Format-0.5 PBZ store to grow. It must exist.
+    #[arg(short('o'), long)]
+    output: PathBuf,
+    #[command(flatten)]
+    input: ImportInputOptions,
+    /// Track to grow. It must already have a column dimension.
+    #[arg(long)]
+    track: String,
+}
+
+#[derive(Debug, Args)]
+struct AppendOptions {
+    /// Number of append workers.
+    #[arg(short = 't', long, default_value_t = 4)]
+    threads: usize,
+    /// Position spans open at once in the import engine. Default: auto.
+    #[arg(long = "in-flight", value_name = "N")]
+    in_flight: Option<usize>,
+    /// Position chunks each reader decodes per read pass. Default: auto.
+    #[arg(long = "decode-chunks", value_name = "N")]
+    decode_chunks: Option<usize>,
+    /// Show append progress on stderr. This is the default; the flag is
+    /// accepted so scripts can be explicit.
+    #[arg(long)]
+    progress: bool,
+    /// Hide the append progress display.
+    #[arg(long, conflicts_with = "progress")]
+    no_progress: bool,
+}
+
+impl AppendOptions {
+    /// Pipeline config for an append. `column_dim` comes from the store, so a
+    /// single source still forms a column batch instead of a scalar track.
+    fn config(&self, label: &str, column_dim: String) -> Config {
+        Config {
+            workers: self.threads,
+            in_flight_spans: self.in_flight.unwrap_or(0),
+            decode_chunks: self.decode_chunks.unwrap_or(0),
+            column_dim: Some(column_dim),
+            progress: (!self.no_progress).then(|| make_sink(label)),
+            ..Config::default()
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz append d4 -o cohort.pbz --track depth s3.d4 s4.d4:custom_label"
+)]
+struct AppendD4Args {
+    #[command(flatten)]
+    global: GlobalOptions,
+    #[command(flatten)]
+    append: AppendOptions,
+    #[command(flatten)]
+    target: AppendTarget,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz append bigwig -o cohort.pbz --track signal kidney.bw:kidney"
+)]
+struct AppendBigWigArgs {
+    #[command(flatten)]
+    global: GlobalOptions,
+    #[command(flatten)]
+    append: AppendOptions,
+    #[command(flatten)]
+    target: AppendTarget,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz append bam -o depth.pbz --track depth s3.bam\n  pbz append bam -o comp.pbz --track depth --mode composition --reference ref.fa s3.cram"
+)]
+struct AppendBamArgs {
+    #[command(flatten)]
+    global: GlobalOptions,
+    #[command(flatten)]
+    append: AppendOptions,
+    #[command(flatten)]
+    target: AppendTarget,
+    #[command(flatten)]
+    decode: BamDecodeOptions,
+}
+
+/// `--schema` creates several tracks, so it has no append form.
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz append bed -o cohort.pbz --track depth s3.bed.gz s4.bed.gz"
+)]
+struct AppendBedArgs {
+    #[command(flatten)]
+    global: GlobalOptions,
+    #[command(flatten)]
+    append: AppendOptions,
+    #[command(flatten)]
+    target: AppendTarget,
+    /// BED header column to decode (requires a `#`-prefixed header). Omit to
+    /// decode all BED value columns.
+    #[arg(long = "field")]
+    fields: Vec<String>,
+    /// Records sampled for dtype inference, or `all`.
+    #[arg(long, default_value = "1000", value_name = "N|all")]
+    infer_rows: String,
 }
 
 #[derive(Debug, Args)]
@@ -478,6 +621,13 @@ struct BamOptions {
     /// name and the per-event tracks are named `{track}_{field}`.
     #[arg(long)]
     track: String,
+    #[command(flatten)]
+    decode: BamDecodeOptions,
+}
+
+/// BAM/CRAM decode flags, shared by `import bam` and `append bam`.
+#[derive(Debug, Args)]
+struct BamDecodeOptions {
     /// Depth counts coverage only; composition also counts per-base events,
     /// emitting `{track}_{field}` for a, c, g, t, n, ins, del, ref_skip.
     #[arg(long, value_enum, default_value_t = ImportModeArg::Depth)]
@@ -582,6 +732,12 @@ fn main() -> Result<()> {
             ImportCommand::Bam(args) => import_bam(args),
             ImportCommand::D4(args) => import_d4(args),
             ImportCommand::BigWig(args) => import_bigwig(args),
+        },
+        Command::Append(append) => match append.format {
+            AppendCommand::Bed(args) => append_bed(args),
+            AppendCommand::Bam(args) => append_bam(args),
+            AppendCommand::D4(args) => append_d4(args),
+            AppendCommand::BigWig(args) => append_bigwig(args),
         },
         Command::Scale(args) => scale_cmd(args),
     }
@@ -827,28 +983,33 @@ fn import_bam(args: BamArgs) -> Result<()> {
     debug!("resolved {n_sources} alignment source(s)");
 
     let config = args.import.config(&args.bam.track)?;
-    let mode = match args.bam.mode {
+    let mode = match args.bam.decode.mode {
         ImportModeArg::Depth => ImportMode::Depth,
         ImportModeArg::Composition => ImportMode::Composition,
     };
-    let overlap = match args.bam.overlap {
+    let overlap = match args.bam.decode.overlap {
         OverlapModeArg::Proper => OverlapMode::ProperOnly,
         OverlapModeArg::All => OverlapMode::All,
         OverlapModeArg::None => OverlapMode::None,
     };
     let filter = DepthFilter {
-        min_mapq: args.bam.min_mapq,
-        exclude_flags: args.bam.exclude_flags,
-        min_bq: args.bam.min_bq,
+        min_mapq: args.bam.decode.min_mapq,
+        exclude_flags: args.bam.decode.exclude_flags,
+        min_bq: args.bam.decode.min_bq,
         overlap,
-        count_deletions: args.bam.count_deletions,
+        count_deletions: args.bam.decode.count_deletions,
     };
 
     let output = args.bam.output;
     let mut destination = open_or_create(&output, args.import.scales.is_some(), || {
         let source = &sources[0];
-        let reader = BamReader::open(&source.path, args.bam.reference.as_deref(), mode, filter)
-            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
+        let reader = BamReader::open(
+            &source.path,
+            args.bam.decode.reference.as_deref(),
+            mode,
+            filter,
+        )
+        .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
         Ok(reader.contigs().contigs().to_vec())
     })?;
 
@@ -858,7 +1019,7 @@ fn import_bam(args: BamArgs) -> Result<()> {
         &sources,
         mode,
         filter,
-        args.bam.reference,
+        args.bam.decode.reference,
         config,
     )
     .context("import BAM/CRAM")?;
@@ -955,6 +1116,155 @@ fn import_bigwig(args: BigWigArgs) -> Result<()> {
         report.tasks_completed,
         report.tasks_skipped
     );
+    Ok(())
+}
+
+/// Resolve the sources an append decodes, in column order.
+fn append_sources(input: &ImportInputOptions) -> Result<Vec<pbzarr::import::Source>> {
+    Ok(input
+        .resolve_input()?
+        .into_iter()
+        .map(|source| pbzarr::import::Source {
+            path: source.path,
+            column_label: source.label,
+        })
+        .collect())
+}
+
+/// Open the store an append grows and read the column dimension of `track`.
+///
+/// The dimension comes from the store so that one source still forms a column
+/// batch; an append never names a new dimension.
+fn open_append(path: &Path, track: &str) -> Result<(Dataset, String)> {
+    if !path.exists() {
+        bail!(
+            "append needs an existing store; {} does not exist",
+            path.display()
+        );
+    }
+    let dataset = match Dataset::open(path) {
+        Ok(dataset) => dataset,
+        Err(PbzError::UnsupportedFormat(found)) => bail!(
+            "{} is not a format 0.5 store (found {found}); pbz append only grows format 0.5",
+            path.display()
+        ),
+        Err(error) => {
+            return Err(error).with_context(|| format!("open store {}", path.display()));
+        }
+    };
+    let info = dataset
+        .variables()
+        .get(track)
+        .ok_or_else(|| anyhow!("track {track:?} is not in {}", path.display()))?;
+    let dim = info.dims.get(1).cloned().ok_or_else(|| {
+        anyhow!(
+            "track {track:?} has dimension(s) {:?}; append grows a column dimension",
+            info.dims
+        )
+    })?;
+    Ok((dataset, dim))
+}
+
+fn report_append(target: &AppendTarget, sources: usize, report: &pbzarr::import::Report) {
+    debug!(
+        "append wrote {} bytes across {} contig(s)",
+        report.bytes_written, report.contigs_written
+    );
+    println!(
+        "appended {sources} sources -> {} ({} tasks, {} skipped)",
+        target.output.display(),
+        report.tasks_completed,
+        report.tasks_skipped
+    );
+}
+
+fn append_d4(args: AppendD4Args) -> Result<()> {
+    init_logging(&args.global);
+    let sources = append_sources(&args.target.input)?;
+    let (mut dataset, dim) = open_append(&args.target.output, &args.target.track)?;
+    let config = args.append.config(&args.target.track, dim);
+    let report = from_d4(
+        Target::Append(&mut dataset),
+        &args.target.track,
+        &sources,
+        config,
+    )
+    .context("append d4")?;
+    report_append(&args.target, sources.len(), &report);
+    Ok(())
+}
+
+fn append_bigwig(args: AppendBigWigArgs) -> Result<()> {
+    init_logging(&args.global);
+    let sources = append_sources(&args.target.input)?;
+    let (mut dataset, dim) = open_append(&args.target.output, &args.target.track)?;
+    let config = args.append.config(&args.target.track, dim);
+    let report = from_bigwig(
+        Target::Append(&mut dataset),
+        &args.target.track,
+        &sources,
+        config,
+    )
+    .context("append bigWig")?;
+    report_append(&args.target, sources.len(), &report);
+    Ok(())
+}
+
+fn append_bam(args: AppendBamArgs) -> Result<()> {
+    init_logging(&args.global);
+    let sources = append_sources(&args.target.input)?;
+    let (mut dataset, dim) = open_append(&args.target.output, &args.target.track)?;
+    let config = args.append.config(&args.target.track, dim);
+    let mode = match args.decode.mode {
+        ImportModeArg::Depth => ImportMode::Depth,
+        ImportModeArg::Composition => ImportMode::Composition,
+    };
+    let filter = DepthFilter {
+        min_mapq: args.decode.min_mapq,
+        exclude_flags: args.decode.exclude_flags,
+        min_bq: args.decode.min_bq,
+        overlap: match args.decode.overlap {
+            OverlapModeArg::Proper => OverlapMode::ProperOnly,
+            OverlapModeArg::All => OverlapMode::All,
+            OverlapModeArg::None => OverlapMode::None,
+        },
+        count_deletions: args.decode.count_deletions,
+    };
+    let report = from_bam(
+        Target::Append(&mut dataset),
+        &args.target.track,
+        &sources,
+        mode,
+        filter,
+        args.decode.reference,
+        config,
+    )
+    .context("append BAM/CRAM")?;
+    report_append(&args.target, sources.len(), &report);
+    Ok(())
+}
+
+fn append_bed(args: AppendBedArgs) -> Result<()> {
+    init_logging(&args.global);
+    let sources = append_sources(&args.target.input)?;
+    let (mut dataset, dim) = open_append(&args.target.output, &args.target.track)?;
+    let genome = Genome::new(dataset.reference()?.contigs().to_vec())?;
+    let config = args.append.config(&args.target.track, dim);
+    let options = BedImportOptions {
+        fields: (!args.fields.is_empty()).then_some(args.fields),
+        track: Some(args.target.track.clone()),
+        infer_rows: parse_infer_rows(&args.infer_rows)?,
+        ..BedImportOptions::default()
+    };
+    let report = from_bed_matrix(
+        Target::Append(&mut dataset),
+        &sources,
+        genome,
+        &options,
+        config,
+    )
+    .context("append BED columns")?;
+    report_append(&args.target, sources.len(), &report);
     Ok(())
 }
 
