@@ -11,10 +11,11 @@ use crate::{Contig, Genome, PbzError, PbzStore, Result, TrackConfig};
 
 /// A destination for one import run.
 ///
-/// Both variants take the same track specifications and the same [`Axes`]:
-/// `Store` writes one Zarr group per track, `Dataset` writes root variables
-/// over shared root coordinates. The format entry points accept anything that
-/// converts into this, so `&mut store` and `&mut dataset` both pass directly.
+/// Every variant takes the same track specifications and the same [`Axes`]:
+/// `Store` writes one Zarr group per track, `Dataset` writes new root
+/// variables over shared root coordinates, and `Append` widens root variables
+/// that already exist. The format entry points accept anything that converts
+/// into this, so `&mut store` and `&mut dataset` both pass directly.
 pub enum Target<'a> {
     Store(&'a mut PbzStore),
     Dataset(&'a mut Dataset),
