@@ -320,6 +320,48 @@ pub(crate) fn plan_batches(ranges: &[FlatRange], chunk: u64, max_chunks: u64) ->
     batches
 }
 
+/// Batches for `ranges` (sorted by `lo`) on the track's inner chunk grid,
+/// so a sharded track decodes only the subchunks its regions touch. Each
+/// batch is read one column tile at a time, so its budget covers one tile.
+pub(crate) fn plan(track: &Track, ranges: &[FlatRange]) -> Result<Vec<Batch>> {
+    let (inner_pos, inner_col) = track.inner_chunk_shape()?;
+    let tile_bytes = inner_pos * inner_col * dtype_size(track.dtype()) as u64;
+    let max_chunks = (BATCH_TARGET_BYTES / tile_bytes.max(1)).max(1);
+    Ok(plan_batches(ranges, inner_pos, max_chunks))
+}
+
+/// Selected columns grouped by inner column chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ColumnTile {
+    /// Column range read for this tile.
+    pub cols: std::ops::Range<usize>,
+    /// (output slot, track column) pairs read from this tile.
+    pub picks: Vec<(usize, usize)>,
+}
+
+pub(crate) fn column_tiles(selected: &[usize], inner_col: u64) -> Vec<ColumnTile> {
+    let inner_col = inner_col.max(1) as usize;
+    let mut by_tile: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
+    for (slot, &col) in selected.iter().enumerate() {
+        by_tile
+            .entry(col / inner_col)
+            .or_default()
+            .push((slot, col));
+    }
+    by_tile
+        .into_values()
+        .map(|mut picks| {
+            picks.sort_by_key(|&(slot, col)| (col, slot));
+            let lo = picks.first().expect("tile has a pick").1;
+            let hi = picks.last().expect("tile has a pick").1 + 1;
+            ColumnTile {
+                cols: lo..hi,
+                picks,
+            }
+        })
+        .collect()
+}
+
 /// Union mask for hist: sort, then merge overlapping or touching ranges.
 pub(crate) fn coalesce(ranges: &mut [(u64, u64)]) -> Vec<(u64, u64)> {
     ranges.sort_unstable();
@@ -367,7 +409,9 @@ pub struct StatOutput {
     pub result: StatResult,
 }
 
-const BATCH_TARGET_BYTES: u64 = 64 << 20;
+/// Decoded bytes one work unit (batch × column tile) aims for. Peak memory
+/// is about this times the worker count, independent of sample count.
+const BATCH_TARGET_BYTES: u64 = 8 << 20;
 
 pub fn run(
     track: &Track,
@@ -406,10 +450,7 @@ pub fn run(
     } else {
         regions.len()
     };
-    let chunk = track.chunk_size()? as u64;
-    let per_position = track.columns_count()? as u64 * dtype_size(track.dtype()) as u64;
-    let max_chunks = (BATCH_TARGET_BYTES / (chunk * per_position).max(1)).max(1);
-    let batches = plan_batches(&ranges, chunk, max_chunks);
+    let batches = plan(track, &ranges)?;
     let result = dispatch(track, &batches, n_regions, &selected, kind)?;
     Ok(StatOutput { samples, result })
 }
@@ -704,10 +745,12 @@ fn hist_table(accs: Vec<Vec<CountAcc>>) -> HistTable {
     HistTable { values, counts }
 }
 
-/// Per-batch partial: accumulator rows keyed by region position.
+/// Per-unit partial: accumulators keyed by region position, one per tile pick.
 type RegionAccs<A> = Vec<(usize, Vec<A>)>;
 
-/// One partial accumulator row per region per batch, merged in region order.
+/// Reads each batch one column tile at a time and merges the per-region
+/// partials in unit order, so a work unit holds at most one tile of one
+/// batch in memory.
 fn accumulate<T, A, I, C>(
     track: &Track,
     batches: &[Batch],
@@ -724,43 +767,58 @@ where
 {
     let rank1 = track.rank() == 1;
     let n_out = if rank1 { 1 } else { selected.len() };
-    let n_cols = track.columns_count()?;
+    let tiles = if rank1 {
+        vec![ColumnTile {
+            cols: 0..1,
+            picks: vec![(0, 0)],
+        }]
+    } else {
+        column_tiles(selected, track.inner_chunk_shape()?.1)
+    };
+    let units: Vec<(&Batch, &ColumnTile)> = batches
+        .iter()
+        .flat_map(|batch| tiles.iter().map(move |tile| (batch, tile)))
+        .collect();
     let window = rayon::current_num_threads().saturating_mul(2).max(1);
     let mut out: Vec<Vec<A>> = (0..n_regions)
         .map(|_| (0..n_out).map(|_| init()).collect())
         .collect();
-    for group in batches.chunks(window) {
-        let partials: Vec<Result<RegionAccs<A>>> = group
+    for group in units.chunks(window) {
+        let partials: Vec<Result<(&ColumnTile, RegionAccs<A>)>> = group
             .par_iter()
-            .map(|batch| {
-                let raw = track
-                    .read_flat::<T>(batch.span.clone())?
-                    .into_raw_vec_and_offset()
-                    .0;
+            .map(|&(batch, tile)| {
+                let data = if rank1 {
+                    track.read_flat::<T>(batch.span.clone())?
+                } else {
+                    track.read_flat_columns::<T>(
+                        batch.span.clone(),
+                        tile.cols.start as u64..tile.cols.end as u64,
+                    )?
+                };
+                let raw = data.into_raw_vec_and_offset().0;
+                let width = tile.cols.len();
                 let mut per_region: BTreeMap<usize, Vec<A>> = BTreeMap::new();
                 for item in &batch.items {
                     let accs = per_region
                         .entry(item.region_pos)
-                        .or_insert_with(|| (0..n_out).map(|_| init()).collect());
+                        .or_insert_with(|| tile.picks.iter().map(|_| init()).collect());
                     let first = (item.lo - batch.span.start) as usize;
                     let rows = (item.hi - item.lo) as usize;
                     for row in first..first + rows {
-                        if rank1 {
-                            accs[0].update(convert(raw[row]));
-                        } else {
-                            for (k, &col) in selected.iter().enumerate() {
-                                accs[k].update(convert(raw[row * n_cols + col]));
-                            }
+                        let base = row * width;
+                        for (acc, &(_, col)) in accs.iter_mut().zip(&tile.picks) {
+                            acc.update(convert(raw[base + col - tile.cols.start]));
                         }
                     }
                 }
-                Ok(per_region.into_iter().collect())
+                Ok((tile, per_region.into_iter().collect()))
             })
             .collect();
-        for batch in partials {
-            for (region_pos, accs) in batch? {
-                for (slot, acc) in out[region_pos].iter_mut().zip(accs) {
-                    slot.merge(acc);
+        for partial in partials {
+            let (tile, regions) = partial?;
+            for (region_pos, accs) in regions {
+                for (acc, &(slot, _)) in accs.into_iter().zip(&tile.picks) {
+                    out[region_pos][slot].merge(acc);
                 }
             }
         }
@@ -1168,5 +1226,120 @@ mod tests {
             table.counts,
             vec![vec![1, 0], vec![2, 0], vec![1, 0], vec![0, 3], vec![0, 1]]
         );
+    }
+
+    /// 100 positions × 5 samples, 10×2 inner chunks in 40×2 shards.
+    /// value = pos*10 + col.
+    fn sharded(dir: &std::path::Path) -> PbzStore {
+        let genome = Genome::new(vec![Contig {
+            name: "chr1".into(),
+            length: 100,
+        }])
+        .unwrap();
+        let mut store = PbzStore::create(dir.join("sharded.pbz")).unwrap();
+        store
+            .create_track(
+                "cov",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32)
+                    .columns((1..=5).map(|i| format!("s{i}")).collect())
+                    .column_dim("sample")
+                    .chunk_size(10)
+                    .column_chunk_size(2)
+                    .shard_size(40)
+                    .shard_column_size(2),
+            )
+            .unwrap();
+        let all = genome.resolve(&"chr1".parse().unwrap()).unwrap();
+        let data: Vec<i32> = (0..100)
+            .flat_map(|pos| (0..5).map(move |col| pos * 10 + col))
+            .collect();
+        store
+            .track("cov")
+            .unwrap()
+            .write_region(
+                &all,
+                ndarray::Array2::from_shape_vec((100, 5), data)
+                    .unwrap()
+                    .into_dyn(),
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn inner_chunk_shape_reports_subchunk_of_sharded_track() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = sharded(dir.path());
+        let track = store.track("cov").unwrap();
+        assert_eq!(track.chunk_size().unwrap(), 40);
+        assert_eq!(track.inner_chunk_shape().unwrap(), (10, 2));
+        // Unsharded: the chunk itself (clipped to the 16-position track).
+        let store = fixture(dir.path());
+        let depth = store.track("depth").unwrap();
+        assert_eq!(
+            depth.inner_chunk_shape().unwrap(),
+            (depth.chunk_size().unwrap() as u64, 1)
+        );
+    }
+
+    #[test]
+    fn plan_reads_only_touched_inner_chunks_within_a_shard() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = sharded(dir.path());
+        let track = store.track("cov").unwrap();
+        // Both regions sit in shard 0 (positions 0..40) but in inner chunks 0 and 3.
+        let ranges = [range(0, 0, 5), range(1, 30, 35)];
+        let batches = plan(track, &ranges).unwrap();
+        let spans: Vec<_> = batches.iter().map(|b| b.span.clone()).collect();
+        assert_eq!(spans, vec![0..5, 30..35]);
+    }
+
+    #[test]
+    fn column_tiles_follow_inner_chunk_columns() {
+        let tiles = column_tiles(&[0, 1, 2, 3, 4], 2);
+        let cols: Vec<_> = tiles.iter().map(|t| t.cols.clone()).collect();
+        assert_eq!(cols, vec![0..2, 2..4, 4..5]);
+        // Output slots keep the caller's order; tiles read only the span of
+        // their selected columns.
+        let tiles = column_tiles(&[4, 0, 1], 2);
+        let got: Vec<_> = tiles
+            .iter()
+            .map(|t| (t.cols.clone(), t.picks.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(0..2, vec![(1, 0), (2, 1)]), (4..5, vec![(0, 4)])]
+        );
+    }
+
+    #[test]
+    fn run_mean_on_sharded_track_across_column_tiles() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = sharded(dir.path());
+        let track = store.track("cov").unwrap();
+        let contig = whole(track)[0].contig;
+        let region = |start, end| Region { contig, start, end };
+        let regions = [region(0, 5), region(30, 35), region(35, 85)];
+        let out = run(track, &regions, StatKind::Mean, &StatOptions::default()).unwrap();
+        let StatResult::PerRegion(rows) = out.result else {
+            panic!("expected rows")
+        };
+        // mean(pos)*10 + col: positions 0..5 -> 20, 30..35 -> 320, 35..85 -> 595
+        let expect = |base: f64| {
+            (0..5)
+                .map(|c| StatValue::Float(base + c as f64))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows, vec![expect(20.0), expect(320.0), expect(595.0)]);
+
+        let options = StatOptions {
+            columns: Some(vec!["s5".into(), "s2".into()]),
+        };
+        let out = run(track, &regions[..1], StatKind::Max, &options).unwrap();
+        let StatResult::PerRegion(rows) = out.result else {
+            panic!("expected rows")
+        };
+        assert_eq!(rows, vec![vec![StatValue::Int(44), StatValue::Int(41)]]);
     }
 }
