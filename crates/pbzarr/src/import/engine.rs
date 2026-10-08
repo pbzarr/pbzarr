@@ -47,9 +47,8 @@ use crate::io::{Dtype, OutputSinkMut, ReaderError, ValueReader, WindowSink};
 use crate::track::Track;
 
 pub struct PipelineOptions {
-    /// Decode worker thread count. On the first import in a process, this
-    /// also sizes rayon's global pool (which zarrs uses for encoding),
-    /// unless `RAYON_NUM_THREADS` is set.
+    /// Worker thread count: the size of the one pool that runs both source
+    /// decoding and zarrs encoding, so at most this many threads are busy.
     pub workers: usize,
     /// Open decode spans allowed at once. Bounds the open chunk buffers:
     /// each span holds up to `decode_chunks` buffers per track, and the
@@ -1604,23 +1603,25 @@ pub(crate) fn run_import<R: ValueReader>(
 
     let (piece_tx, piece_rx) = bounded::<Piece>((workers * 2).max(1));
 
-    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
-        // zarrs encodes subchunks on rayon's global pool, which defaults to
-        // one thread per logical CPU and contends with the decode workers
-        // above. `build_global` only takes effect the first time it succeeds
-        // in a process, hence the ignored error here.
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(workers)
-            .build_global();
-    }
+    // Decode workers and zarrs' subchunk encoding share this one pool, so
+    // `workers` bounds the busy threads: a worker that writes a buffer helps
+    // run its encode instead of idling while a second pool does the work.
+    // `broadcast` runs exactly one worker loop per pool thread, so a thread
+    // waiting on an encode never picks up a second, queued worker loop.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .thread_name(|i| format!("pbz-import-{i}"))
+        .build()
+        .map_err(|e| PbzError::Store(format!("build import thread pool: {e}")))?;
 
     thread::scope(|scope| {
-        for _ in 0..workers {
-            let piece_rx = piece_rx.clone();
-            let ctx = &ctx;
-            let originals = &originals;
-            let pools = &pools;
-            scope.spawn(move || {
+        let ctx = &ctx;
+        let originals = &originals;
+        let pools = &pools;
+        let piece_rx = &piece_rx;
+        let pool = &pool;
+        scope.spawn(move || {
+            pool.broadcast(|_| {
                 let mut busy = Duration::ZERO;
                 let mut idle = Duration::ZERO;
                 loop {
@@ -1678,7 +1679,7 @@ pub(crate) fn run_import<R: ValueReader>(
                     .worker_idle_ns
                     .fetch_add(idle.as_nanos() as u64, Ordering::Relaxed);
             });
-        }
+        });
 
         let mut gate_wait = Duration::ZERO;
         'produce: for &span_idx in &span_order {
@@ -1911,6 +1912,49 @@ mod tests {
 
         fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
             Ok(self.clone())
+        }
+    }
+
+    /// Delegates to a reader and records, per read, whether it ran on a
+    /// rayon pool thread and that pool's size.
+    #[derive(Clone)]
+    struct ThreadProbe<R> {
+        inner: R,
+        seen: Arc<std::sync::Mutex<Vec<(bool, usize)>>>,
+    }
+
+    impl<R: ValueReader> ValueReader for ThreadProbe<R> {
+        fn contigs(&self) -> &Genome {
+            self.inner.contigs()
+        }
+
+        fn output_schema(&self) -> &OutputSchema {
+            self.inner.output_schema()
+        }
+
+        fn read_into(
+            &mut self,
+            contig: &str,
+            start: u64,
+            end: u64,
+            outputs: &mut [OutputSinkMut<'_>],
+        ) -> std::result::Result<(), crate::io::ReaderError> {
+            self.seen.lock().unwrap().push((
+                rayon::current_thread_index().is_some(),
+                rayon::current_num_threads(),
+            ));
+            self.inner.read_into(contig, start, end, outputs)
+        }
+
+        fn may_have_data(&self, contig: &str, start: u64, end: u64) -> bool {
+            self.inner.may_have_data(contig, start, end)
+        }
+
+        fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
+            Ok(Self {
+                inner: self.inner.fork()?,
+                seen: Arc::clone(&self.seen),
+            })
         }
     }
 
@@ -2174,6 +2218,43 @@ mod tests {
                 assert_eq!(values[pos], 100 + pos as i32, "{contig} position {pos}");
             }
         }
+    }
+
+    #[test]
+    fn workers_run_on_a_pool_of_exactly_the_requested_size() {
+        // Decode and zarrs encode share one pool of `workers` threads, so
+        // `--threads N` bounds the busy threads at N rather than 2N.
+        let dir = TempDir::new().unwrap();
+        let genome = one_contig(400);
+        let mut store = PbzStore::create(dir.path().join("pool.pbz")).unwrap();
+        store
+            .create_track(
+                "v",
+                genome.clone(),
+                TrackConfig::new(Dtype::I32).chunk_size(16),
+            )
+            .unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = ThreadProbe {
+            inner: SynthReader::new(genome, Dtype::I32, 0..400, 0),
+            seen: Arc::clone(&seen),
+        };
+        Import::from_readers(vec![reader])
+            .unwrap()
+            .into_track(store.track("v").unwrap())
+            .options(PipelineOptions {
+                workers: 3,
+                decode_chunks: 1,
+                ..PipelineOptions::default()
+            })
+            .run()
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty());
+        assert!(
+            seen.iter().all(|&probe| probe == (true, 3)),
+            "reads ran outside a 3-thread pool: {seen:?}"
+        );
     }
 
     #[test]
