@@ -747,7 +747,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2276,7 +2276,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2502,7 +2502,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2856,7 +2856,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3091,7 +3091,7 @@ dependencies = [
 [[package]]
 name = "zarrs"
 version = "0.23.13"
-source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
+source = "git+https://github.com/cademirch/zarrs?rev=1ef8c5fa913fb1b3e064a3757ef224ac2f939547#1ef8c5fa913fb1b3e064a3757ef224ac2f939547"
 dependencies = [
  "async-lock",
  "base64",
@@ -3140,7 +3140,7 @@ dependencies = [
 [[package]]
 name = "zarrs_chunk_grid"
 version = "0.5.1"
-source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
+source = "git+https://github.com/cademirch/zarrs?rev=1ef8c5fa913fb1b3e064a3757ef224ac2f939547#1ef8c5fa913fb1b3e064a3757ef224ac2f939547"
 dependencies = [
  "derive_more",
  "inventory",
@@ -3155,7 +3155,7 @@ dependencies = [
 [[package]]
 name = "zarrs_chunk_key_encoding"
 version = "0.2.0"
-source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
+source = "git+https://github.com/cademirch/zarrs?rev=1ef8c5fa913fb1b3e064a3757ef224ac2f939547#1ef8c5fa913fb1b3e064a3757ef224ac2f939547"
 dependencies = [
  "derive_more",
  "inventory",
@@ -3167,7 +3167,7 @@ dependencies = [
 [[package]]
 name = "zarrs_codec"
 version = "0.2.1"
-source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
+source = "git+https://github.com/cademirch/zarrs?rev=1ef8c5fa913fb1b3e064a3757ef224ac2f939547#1ef8c5fa913fb1b3e064a3757ef224ac2f939547"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -3188,7 +3188,7 @@ dependencies = [
 [[package]]
 name = "zarrs_data_type"
 version = "0.9.0"
-source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
+source = "git+https://github.com/cademirch/zarrs?rev=1ef8c5fa913fb1b3e064a3757ef224ac2f939547#1ef8c5fa913fb1b3e064a3757ef224ac2f939547"
 dependencies = [
  "derive_more",
  "half",
@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "zarrs_filesystem"
 version = "0.3.9"
-source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
+source = "git+https://github.com/cademirch/zarrs?rev=1ef8c5fa913fb1b3e064a3757ef224ac2f939547#1ef8c5fa913fb1b3e064a3757ef224ac2f939547"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3222,7 +3222,7 @@ dependencies = [
 [[package]]
 name = "zarrs_metadata"
 version = "0.7.5"
-source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
+source = "git+https://github.com/cademirch/zarrs?rev=1ef8c5fa913fb1b3e064a3757ef224ac2f939547#1ef8c5fa913fb1b3e064a3757ef224ac2f939547"
 dependencies = [
  "derive_more",
  "half",
@@ -3235,7 +3235,7 @@ dependencies = [
 [[package]]
 name = "zarrs_metadata_ext"
 version = "0.4.4"
-source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
+source = "git+https://github.com/cademirch/zarrs?rev=1ef8c5fa913fb1b3e064a3757ef224ac2f939547#1ef8c5fa913fb1b3e064a3757ef224ac2f939547"
 dependencies = [
  "derive_more",
  "monostate",
@@ -3250,7 +3250,7 @@ dependencies = [
 [[package]]
 name = "zarrs_plugin"
 version = "0.4.1"
-source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
+source = "git+https://github.com/cademirch/zarrs?rev=1ef8c5fa913fb1b3e064a3757ef224ac2f939547#1ef8c5fa913fb1b3e064a3757ef224ac2f939547"
 dependencies = [
  "paste",
  "regex",
@@ -3261,7 +3261,7 @@ dependencies = [
 [[package]]
 name = "zarrs_storage"
 version = "0.4.3"
-source = "git+https://github.com/cademirch/zarrs?rev=cac400ebc8ba2db193e2b25df078e2d858d88229#cac400ebc8ba2db193e2b25df078e2d858d88229"
+source = "git+https://github.com/cademirch/zarrs?rev=1ef8c5fa913fb1b3e064a3757ef224ac2f939547#1ef8c5fa913fb1b3e064a3757ef224ac2f939547"
 dependencies = [
  "auto_impl",
  "bytes",

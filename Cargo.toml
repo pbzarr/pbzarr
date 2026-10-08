@@ -26,8 +26,9 @@ debug = true
 strip = false
 split-debuginfo = "packed"
 
-# Temporary zarrs pin: partial-decode cache below an array-to-array codec was
-# built with the wrong-stage shape (transpose + pcodec reads failed). Drop when
-# the fix ships upstream.
+# Temporary zarrs pin (branch perf-transpose-fixed-size): the partial-decode
+# cache below an array-to-array codec was built with the wrong-stage shape
+# (transpose + pcodec reads failed), and the transpose codec permuted byte by
+# byte (~30x slower per chunk). Drop when both fixes ship upstream.
 [patch.crates-io]
-zarrs = { git = "https://github.com/cademirch/zarrs", rev = "cac400ebc8ba2db193e2b25df078e2d858d88229" }
+zarrs = { git = "https://github.com/cademirch/zarrs", rev = "1ef8c5fa913fb1b3e064a3757ef224ac2f939547" }
