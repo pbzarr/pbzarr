@@ -4,7 +4,7 @@ Status: agreed design, 2026-10-05. Not yet implemented. This replaces the
 earlier `Dataset`/`Track` wrapper draft in
 [proposals/format-05/PYTHON_API.md](../proposals/format-05/PYTHON_API.md),
 which was written before format 0.5 landed and before the genomic index was
-settled. The [schema](../proposals/format-05/README.md) owns the on-disk
+settled. The [schema](../../spec/README.md) owns the on-disk
 contract. The fuller store specification lives in `docs/STORE_SPEC.md`, which is
 untracked and present only in the main checkout.
 

@@ -1,9 +1,9 @@
 # Rust and CLI decisions for the PBZ core draft
 
 Status: accepted direction with additive Rust support, 2026-10-01. This page describes the development
-[core convention](README.md), not the implemented format 0.4 behavior.
+[core convention](../../../spec/README.md), not the implemented format 0.4 behavior.
 It records five implementation boundaries for Rust and the CLI.
-The [conformance cases](CONFORMANCE.md) supply concrete examples and validation rules.
+The [conformance cases](../../../spec/CONFORMANCE.md) supply concrete examples and validation rules.
 
 ## Format transition
 
@@ -71,7 +71,7 @@ that reference before mutation.
 An import that uses an existing dimension must supply the same labels in the
 same order. Mismatched references or labels fail before mutation. Import does
 not silently reorder, union, broadcast, or extend shared coordinates.
-The [writing policies](README.md#writing-policies-supported-by-this-schema)
+The [writing policies](../../../spec/README.md#writing-policies-supported-by-this-schema)
 define the separate persistence operations.
 
 ## 3. Named-dimension CLI selection with a bounded initial output model
@@ -114,7 +114,7 @@ than bases for a binned variable.
 Commands do not reconstruct base values or infer an aggregation meaning.
 An independently supplied binned variable need not contain means, sums, or
 values derived from another track.
-The [core geometry rules](README.md#dimensions-and-genomic-geometry) define the
+The [core geometry rules](../../../spec/README.md#dimensions-and-genomic-geometry) define the
 bin layout.
 
 ## 5. Encodings, declared missingness, and partial reader support
@@ -130,13 +130,13 @@ shard, and codec choices remain authoritative. Implementations reject unsupporte
 choices rather than silently replacing their layouts or codecs.
 The conformance cases cover the supported combinations.
 
-The [value rules](README.md#values-and-user-metadata) distinguish storage fill
+The [value rules](../../../spec/README.md#values-and-user-metadata) distinguish storage fill
 from declared missingness. Zero and false retain their ordinary meaning unless
 the variable explicitly declares them missing. CLI output and reductions honor
 declared `_FillValue` semantics. A storage fill alone does not exclude values
 from a reduction. Any raw-value API must clearly distinguish encoded values
 from values with missingness applied.
-The [initial encoding profile](CONFORMANCE.md#values-and-encodings) separates
+The [initial encoding profile](../../../spec/CONFORMANCE.md#values-and-encodings) separates
 ordinary logical Booleans from integer sentinel masking. It does not claim
 support for nullable Boolean encodings that native Xarray currently decodes
 inconsistently.

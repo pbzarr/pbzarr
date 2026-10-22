@@ -1,22 +1,19 @@
 # Python API proposal for the PBZ core draft
 
 Status: discussion draft, 2026-09-26. This describes a proposed API for the
-[core convention draft](README.md), not the implemented format 0.4 API.
+[core convention draft](../../../spec/README.md), not the implemented format 0.4 API.
 Method names and signatures below are proposals. No production behavior or
 release scope changes with this document.
 
-Follow-up: the [runnable Dataset/Track prototype](../../../python/prototypes/dataset_track_poc/README.md)
-explores this interface using a custom `GenomicIndex` in place of the public
-`geometry` argument below. It demonstrates wrapper/native calculations,
-contig-aware coarsening, and new-track writes. It is an experiment, not adoption
-of the draft API or a change to production support.
+Superseded by [the Python API plan](../../plans/2026-10-05-python-api-design.md).
+The Dataset/Track prototype that followed this draft has been removed.
 
 Decisions recorded 2026-09-30 supersede the earlier signatures below: use a
 retained runtime genomic index instead of the public `geometry`/`GenomicMapping`
 surface, and let the Track wrapper own contig-aware windowing (working name
 `windows`). A separate native coarsening accessor is optional. The unchanged
 signatures below remain the earlier API sketch, not the final class definitions.
-The [conformance draft](CONFORMANCE.md) now owns concrete store examples, and
+The [conformance draft](../../../spec/CONFORMANCE.md) now owns concrete store examples, and
 [Rust/CLI decisions](RUST_CLI.md) records the agreed cross-language scope.
 
 ## Recommendation

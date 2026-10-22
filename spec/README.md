@@ -1,22 +1,20 @@
-# PBZ core convention proposal
+# PBZ format specification
 
-Status: agreed direction with a concrete conformance draft, updated 2026-10-01.
-This proposes a new encoding; it does not describe the implemented 0.4 format
-or change the release roadmap.
-The identifier "0.5" is provisional, not a published format version.
-The new encoding will receive a new format version. Conversion from existing
-stores is outside the initial scope; this does not decide legacy read support.
+Status: draft, updated 2026-10-22. This directory is the home of the PBZ
+specification. It describes format `0.5`, which imports write and the Python
+`pbzarr.Dataset` handle reads. The rules can still change before the 1.0
+release candidate; `0.5` is not a published, stable format version. Format
+`0.4` (one group per track) is legacy and is not described here.
 
 [Conformance examples and validation rules](CONFORMANCE.md) make the contract
-reviewable. [Rust and CLI decisions](RUST_CLI.md) define the agreed implementation
-scope. The [validation record](VALIDATION.md) distinguishes executed checks from
+reviewable. [Rust and CLI decisions](../docs/proposals/format-05/RUST_CLI.md) define the agreed implementation
+scope. The [validation record](../docs/proposals/format-05/VALIDATION.md) distinguishes executed checks from
 future Rust/Python conformance requirements.
-The fuller store specification is `docs/STORE_SPEC.md`, which is not tracked
-yet; it moves to `spec/` before 1.0. The additive Rust `pbzarr::dataset::Dataset`
-reader implements milestone A of the development convention. Dataset creation
+The Rust `pbzarr::dataset::Dataset` reader implements milestone A of this
+specification. Dataset creation
 and existing 1D/2D imports implement milestone B; the validation record
 distinguishes executed checks from work still pending.
-Milestone B's [writing contract](WRITING.md) records what imports write.
+Milestone B's [writing contract](../docs/proposals/format-05/WRITING.md) records what imports write.
 
 ## Model
 
@@ -180,13 +178,12 @@ replay, recomputation, or source-version guarantee is implied.
 
 ## Python workflow and retained context
 
-The [Python API proposal](PYTHON_API.md) sketches the Dataset/Track wrappers,
-native Xarray integration, and write boundary supported by this convention.
-The later [prototype](../../../python/prototypes/dataset_track_poc/README.md)
-explores a runtime genomic index instead of a public geometry argument.
-Wrapper-owned windowing is the intended interface; a separate native Xarray
-coarsening accessor is optional. Runtime indexes are not serialized as genomic
-coordinate arrays.
+The earlier [Python API proposal](../docs/proposals/format-05/PYTHON_API.md) sketched Dataset/Track
+wrappers, native Xarray integration, and the write boundary.
+The agreed Python API is in
+[the Python API plan](../docs/plans/2026-10-05-python-api-design.md): a store
+handle in 1.0, and a runtime genomic index in 1.1. Runtime indexes are not
+serialized as genomic coordinate arrays.
 
 The proposed wrappers and accessors use the same stored Dataset:
 
@@ -247,7 +244,7 @@ These are API contracts; they add no required metadata fields.
 The current Rust import path populates all targets before publishing their
 metadata in request order. It preserves existing tracks and removes stale
 consolidated metadata so native Xarray can discover successful additions. The
-[Rust writing contract](WRITING.md#publication-and-failure) records the limits:
+[Rust writing contract](../docs/proposals/format-05/WRITING.md#publication-and-failure) records the limits:
 errors propagate normally, incomplete output may remain, and callers must reopen
 after an error. Cleanup and uncertain-write reporting are deferred.
 
@@ -271,7 +268,7 @@ the required cross-array arithmetic.
 
 ## References
 
-The [validation record](VALIDATION.md) describes the native Xarray example checks.
+The [validation record](../docs/proposals/format-05/VALIDATION.md) describes the native Xarray example checks.
 
 * [Zarr conventions](https://github.com/zarr-conventions/zarr-conventions-spec)
 * [Zarr v3 core](https://zarr-specs.readthedocs.io/en/latest/v3/core/)

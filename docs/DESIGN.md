@@ -2,12 +2,12 @@
 
 PBZ is a small Zarr v3 convention for dense, per-base genomic data. The format supplies genomic interpretation and a flat track layout; Zarr supplies storage and codecs; xarray and Dask supply the Python read and analysis model.
 
-Format 0.5 (one root Dataset) is what imports write and what Python reads; see the [format 0.5 proposal](proposals/format-05/README.md). The 0.4 per-track layout described in parts of this document is legacy: the Rust `PbzStore` API, `pbz view`, `pbz stat`, and pyramids still use it. Earlier contig-major and wrapper-oriented designs are historical only.
+Format 0.5 (one root Dataset) is what imports write and what Python reads; see the [format 0.5 specification](../spec/README.md). The 0.4 per-track layout described in parts of this document is legacy: the Rust `PbzStore` API, `pbz view`, `pbz stat`, and pyramids still use it. Earlier contig-major and wrapper-oriented designs are historical only.
 
 ## Development reader
 
 The additive Rust `pbzarr::dataset::Dataset` reads the
-[format `0.5` root-Dataset schema](proposals/format-05/README.md).
+[format `0.5` root-Dataset schema](../spec/README.md).
 It catalogs direct root arrays, validates reference and dimension coordinates,
 and reads typed rectangular subsets. `read_raw` preserves physical values and
 missing sentinels; `read_bool` decodes the supported Boolean encodings.

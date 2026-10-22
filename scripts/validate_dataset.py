@@ -74,7 +74,7 @@ def check_rust_imports(writer, probe, destination):
 
 def main():
     module_spec = importlib.util.spec_from_file_location(
-        "core_examples", ROOT / "docs/proposals/format-05/examples.py"
+        "core_examples", ROOT / "spec/examples.py"
     )
     examples = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(examples)

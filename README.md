@@ -174,7 +174,7 @@ Every track declares one data type and fill value. Imported tracks are chunked a
 
 Format 0.4 stores, which used one group per track, are not readable from Python in this version. The `pbz view` and `pbz stat` commands still read them.
 
-See the [format proposal](docs/proposals/format-05/README.md) for the full rules and the [design document](docs/DESIGN.md) for the Rust API.
+See the [format specification](spec/README.md) for the full rules and the [design document](docs/DESIGN.md) for the Rust API.
 
 ## Status
 

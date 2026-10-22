@@ -122,7 +122,7 @@ cached; this is not a concurrent snapshot guarantee.
 
 ## Concrete conformance examples — 2026-09-30
 
-Ran [examples.py](examples.py) with the existing project interpreter:
+Ran [examples.py](../../../spec/examples.py) with the existing project interpreter:
 
 ```sh
 .pixi/envs/default/bin/python docs/proposals/format-05/examples.py --output /private/tmp/pbz-core-examples-20260930-9305
@@ -155,7 +155,7 @@ Results:
   documented expected outcomes. No production PBZ validator was run against
   them; rejection coverage remains implementation work.
 
-The [conformance page](CONFORMANCE.md) records those fixtures and the limits of
+The [conformance page](../../../spec/CONFORMANCE.md) records those fixtures and the limits of
 the initial encoding profile. Proposal JSON parsing, Python syntax, and local
 Markdown file-link checks also passed. `git diff --check` passed for tracked
 changes. No Rust tests, production Python suite, or cross-language round trip was

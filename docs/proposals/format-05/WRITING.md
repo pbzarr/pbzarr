@@ -2,7 +2,7 @@
 
 Status: implemented Rust import path, 2026-10-01. This page concerns `0.5`,
 which CLI imports write since 2026-10-05. The
-[core convention](README.md) owns the schema.
+[core convention](../../../spec/README.md) owns the schema.
 
 ## Objective
 
@@ -88,4 +88,4 @@ The broader failure policy remains design intent, not an implemented guarantee.
 Concurrent writers/readers, replacement, pyramids, automatic provenance, new
 source dtypes, and arbitrary-rank Rust authoring are outside this step. Column
 append was added later (2026-10-05); see the append policy in the
-[README](README.md).
+[README](../../../spec/README.md).

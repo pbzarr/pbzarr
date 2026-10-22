@@ -1,7 +1,7 @@
 """Native Zarr examples for the PBZ core draft; not a production PBZ validator.
 
 Run from the repository root with:
-    pixi run python docs/proposals/format-05/examples.py
+    pixi run python spec/examples.py
 
 By default stores are temporary. --output NEW_DIRECTORY keeps them for review.
 Run pixi run validate-dataset to check the generated corpus with Rust.

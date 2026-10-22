@@ -10,7 +10,7 @@ a release format version is assigned. No conversion is included.
 From the repository root, using the existing project environment:
 
 ```sh
-pixi run python docs/proposals/format-05/examples.py
+pixi run python spec/examples.py
 ```
 
 The command creates temporary Zarr v3 stores and verifies the valid examples
@@ -21,7 +21,7 @@ it is not format metadata.
 
 The script also generates intentionally invalid stores. Their outcomes are checked by the separate Rust conformance command. Some
 invalid examples still open in Xarray: PBZ imposes additional genomic rules.
-The [validation record](VALIDATION.md) identifies what has actually run.
+The [validation record](../docs/proposals/format-05/VALIDATION.md) identifies what has actually run.
 
 ## Canonical example
 
@@ -137,7 +137,7 @@ variables in one store. G3 prevents putting both on the same variable.
 
 ### Values and encodings
 
-The [Rust/CLI scope](RUST_CLI.md) specifies the planned primitive dtype support.
+The [Rust/CLI scope](../docs/proposals/format-05/RUST_CLI.md) specifies the planned primitive dtype support.
 The convention itself does not impose a codec registry or require every reader
 to support every standard encoding.
 
