@@ -1,0 +1,51 @@
+name: Wheels
+
+# Builds and smoke-tests the Python wheels. Called by release.yml before
+# publishing, and by ci.yml on pull requests so a broken wheel build shows
+# up before a release.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to build; empty means the triggering commit."
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64 }
+          - { os: macos-14, target: universal2-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          target: ${{ matrix.target }}
+          # hts-sys (rust-htslib) runs bindgen, which needs libclang and
+          # clang's builtin headers. The manylinux2014 image has neither, so
+          # build on manylinux_2_28 (glibc 2.28+) and install clang there.
+          # macOS runners get libclang from Xcode.
+          manylinux: "2_28"
+          before-script-linux: |
+            dnf install -y clang-devel
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Smoke-test the wheel
+        run: |
+          python -m pip install dist/*.whl
+          python -c "import pbzarr, pbzarr._native; print(pbzarr.__name__, 'imports')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: dist
