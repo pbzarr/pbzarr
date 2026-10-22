@@ -6,7 +6,7 @@ use ndarray::{ArrayD, IxDyn};
 use serde_json::Value;
 use std::sync::Arc;
 use zarrs::{
-    array::{Array, ArraySubset},
+    array::{Array, ArrayShardedExt as _, ArraySubset},
     metadata::ArrayMetadata,
 };
 
@@ -103,6 +103,20 @@ pub(super) fn float_fill(info: &VariableInfo) -> Result<Option<f64>> {
 }
 
 impl Dataset {
+    /// Decode unit of `name`: the subchunk when sharded, else the chunk (also
+    /// when a codec before sharding hides the subchunk shape).
+    pub(crate) fn inner_chunk_shape(&self, name: &str) -> Result<Vec<u64>> {
+        let array = self.array(name)?;
+        if let Some(sub) = array.effective_subchunk_shape() {
+            return Ok(sub.iter().map(|n| n.get()).collect());
+        }
+        let origin = vec![0; array.dimensionality()];
+        let chunk = array
+            .chunk_shape(&origin)
+            .map_err(|e| PbzError::Store(format!("chunk shape for {name}: {e}")))?;
+        Ok(chunk.iter().map(|n| n.get()).collect())
+    }
+
     pub(super) fn array(&self, name: &str) -> Result<Arc<ArrayHandle>> {
         let mut handles = self
             .handles
@@ -202,6 +216,44 @@ impl Dataset {
         name: &str,
         ranges: &[Range<u64>],
     ) -> Result<ArrayD<T>> {
+        self.read(name, ranges, true)
+    }
+
+    /// `read_raw` without the scope check, for a caller that ran
+    /// [`Dataset::check_scope`] once and then reads many ranges.
+    pub(crate) fn read_checked<T: ElementOwned>(
+        &self,
+        name: &str,
+        ranges: &[Range<u64>],
+    ) -> Result<ArrayD<T>> {
+        self.read(name, ranges, false)
+    }
+
+    /// The validation `read_raw` runs before every read of `name`.
+    pub(crate) fn check_scope(&self, name: &str) -> Result<()> {
+        let report = self.validate_scope(Some(name))?;
+        if report.status == ValidationStatus::Valid {
+            return Ok(());
+        }
+        let message = report
+            .issues
+            .iter()
+            .map(|i| format!("{}: {}", i.rule, i.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(if report.status == ValidationStatus::Incomplete {
+            PbzError::UnsupportedEncoding(message)
+        } else {
+            PbzError::Metadata(message)
+        })
+    }
+
+    fn read<T: ElementOwned>(
+        &self,
+        name: &str,
+        ranges: &[Range<u64>],
+        check: bool,
+    ) -> Result<ArrayD<T>> {
         let info = self
             .variables
             .get(name)
@@ -222,19 +274,8 @@ impl Dataset {
         T::validate_data_type(array.data_type()).map_err(|e| PbzError::InvalidDtype {
             dtype: e.to_string(),
         })?;
-        let report = self.validate_scope(Some(name))?;
-        if report.status != ValidationStatus::Valid {
-            let message = report
-                .issues
-                .iter()
-                .map(|i| format!("{}: {}", i.rule, i.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(if report.status == ValidationStatus::Incomplete {
-                PbzError::UnsupportedEncoding(message)
-            } else {
-                PbzError::Metadata(message)
-            });
+        if check {
+            self.check_scope(name)?;
         }
         if shape.contains(&0) {
             return ArrayD::from_shape_vec(IxDyn(&shape), Vec::<T>::new())

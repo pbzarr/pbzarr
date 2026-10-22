@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use ndarray::ArrayD;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use zarrs::array::{Array, ArraySubset};
+use zarrs::array::{Array, ArrayShardedExt, ArraySubset};
 use zarrs::storage::{ReadableWritableListableStorage, ReadableWritableListableStorageTraits};
 
 use crate::Result;
@@ -303,6 +303,26 @@ impl Track {
         shape.first().copied().ok_or_else(|| {
             PbzError::Metadata(format!("track {:?}: rank-0 values array", self.name))
         })
+    }
+
+    /// Decode unit of the `values` array as (positions, columns): the
+    /// subchunk when sharded, else the chunk. Columns is 1 for rank-1 tracks.
+    pub(crate) fn inner_chunk_shape(&self) -> Result<(u64, u64)> {
+        let rank2 = self.rank == 2;
+        let values = self.values_array()?;
+        if values.is_sharded() {
+            let sub = values.effective_subchunk_shape().ok_or_else(|| {
+                PbzError::Metadata(format!(
+                    "track {:?}: sharded values array with indeterminate subchunk shape",
+                    self.name
+                ))
+            })?;
+            let sub = sub.as_slice();
+            Ok((sub[0].get(), if rank2 { sub[1].get() } else { 1 }))
+        } else {
+            let unit = self.write_unit_shape()?;
+            Ok((unit[0] as u64, if rank2 { unit[1] as u64 } else { 1 }))
+        }
     }
 
     /// Number of columns: 1 for scalar (rank-1) tracks; for cohort (rank-2)

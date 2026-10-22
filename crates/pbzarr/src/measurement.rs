@@ -20,6 +20,8 @@ pub enum Measurement<'a> {
         dtype: Dtype,
         columns: u64,
         chunk: usize,
+        /// Decode unit as (positions, columns): the subchunk when sharded.
+        inner: (u64, u64),
     },
 }
 
@@ -79,6 +81,9 @@ impl<'a> Measurement<'a> {
             .and_then(|n| usize::try_from(n).ok())
             .filter(|&n| n > 0)
             .ok_or_else(|| PbzError::Metadata(format!("{name}: invalid position chunk shape")))?;
+        dataset.check_scope(name)?;
+        let shape = dataset.inner_chunk_shape(name)?;
+        let inner = (shape[0], shape.get(1).copied().unwrap_or(1));
         let genome = Arc::new(Genome::new(dataset.reference()?.contigs().to_vec())?);
         Ok(Self::Root {
             dataset,
@@ -88,6 +93,7 @@ impl<'a> Measurement<'a> {
             dtype,
             columns: info.shape.get(1).copied().unwrap_or(1),
             chunk,
+            inner,
         })
     }
 
@@ -145,6 +151,14 @@ impl<'a> Measurement<'a> {
         }
     }
 
+    /// Decode unit as (positions, columns), which `stat` plans reads around.
+    pub(crate) fn inner_chunk_shape(&self) -> Result<(u64, u64)> {
+        match self {
+            Self::Legacy(track) => track.inner_chunk_shape(),
+            Self::Root { inner, .. } => Ok(*inner),
+        }
+    }
+
     pub fn column_labels(&self) -> Result<Vec<String>> {
         match self {
             Self::Legacy(track) => track.column_labels(),
@@ -182,11 +196,23 @@ impl<'a> Measurement<'a> {
             } => {
                 if dims.len() == 1 {
                     #[allow(clippy::single_range_in_vec_init)]
-                    dataset.read_raw(name, &[position])
+                    dataset.read_checked(name, &[position])
                 } else {
-                    dataset.read_raw(name, &[position, 0..*columns])
+                    dataset.read_checked(name, &[position, 0..*columns])
                 }
             }
+        }
+    }
+
+    /// Read a flat position range for a column subrange of a rank-2 track.
+    pub(crate) fn read_flat_columns<T: Numeric>(
+        &self,
+        position: Range<u64>,
+        columns: Range<u64>,
+    ) -> Result<ArrayD<T>> {
+        match self {
+            Self::Legacy(track) => track.read_flat_columns(position, columns),
+            Self::Root { dataset, name, .. } => dataset.read_checked(name, &[position, columns]),
         }
     }
 }
