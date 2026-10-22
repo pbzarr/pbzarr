@@ -97,8 +97,11 @@ changes:
   arithmetic, scope doc D7) and refuses other `pbz:` keys.
 - `import_bam` and `append_bam` take the FASTA path as `fasta=`, not
   `reference=`, because `create(reference=)` is a contig mapping.
-- Settled details: `write` writes root consolidated metadata as its last step,
-  matching the Rust writer (scope doc D13); the `chunks=` default is above.
+- Settled details: `write` leaves the store without consolidated metadata,
+  matching the Rust writer, until scope doc D13 is decided; the `chunks=`
+  default is above.
+- `create(destination, *, reference)` only in 1.0; `coords=` and `attrs=`
+  come later (`write` adds label coordinates).
 
 ### 1.0 tests
 
@@ -448,8 +451,8 @@ available test and costs almost nothing, because the example already exists.
 
 ## Details to settle during implementation
 
-- Settled 2026-10-21: `write` writes root consolidated metadata as its last
-  step, matching the Rust writer. The `chunks=` default is the stored shard
-  shape.
+- Settled 2026-10-21: `write` leaves the store without consolidated metadata,
+  matching the Rust writer, until scope doc D13 is decided. The `chunks=`
+  default is the stored shard shape.
 - Whether `Windows` exposes `reduce(func)` in addition to the four named
   reducers. The prototype has it; it is not needed for the tests above.

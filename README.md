@@ -27,20 +27,23 @@ This also has a few useful side effects:
 
 ## Data model
 
-pbzarr uses the [dataset model of xarray](https://docs.xarray.dev/en/stable/user-guide/data-structures.html#dataset). In this model, a dataset holds many variables, and the variables share the same coordinates. In pbzarr, the collection is the dataset, each track is one variable, and the coordinates are genomic positions.
+pbzarr uses the [dataset model of xarray](https://docs.xarray.dev/en/stable/user-guide/data-structures.html#dataset). A `.pbz` store opens as one xarray Dataset. Each track is one variable, and all tracks share the store's reference genome and labels.
 
-A track has at most two dimensions: genomic position and one explicitly labeled column axis. The column axis is homogeneous, so every column shares the track's data type, fill value, and compression settings. It can label samples from several input sources, or label BED columns that a schema groups into one track. Those two axes cannot appear together because that would require a rank-3 track; grouped BED-column imports therefore accept one source only. When values need different data types or settings, each kind goes into its own track. For example, depth, mapping quality, and a mask become three tracks in one collection.
+A track has at most two dimensions: genomic position and one labeled column axis, such as `sample`. The column axis is homogeneous, so every column shares the track's data type, fill value, and compression settings. When values need different data types or settings, each kind goes into its own track. For example, depth, mapping quality, and a mask become three tracks in one store.
 
-Each track records its own genome. Tracks that record the same genome have the same length and the same base order, so pbzarr can open them together and calculate across them. See [format](#format) for more details.
+The store fixes its reference (contig names and lengths) when it is created. Every track covers that whole reference. See [format](#format) for more details.
 
 ## Python examples
 
-### Import d4 files
+### Create a store and import d4 files
 
 ```python
 import pbzarr
 
-pbzarr.create_store("depth.pbz")
+import pandas as pd
+
+fai = pd.read_csv("genome.fai", sep="\t", header=None, usecols=[0, 1])
+pbzarr.create("depth.pbz", reference=dict(zip(fai[0], fai[1])))
 pbzarr.import_d4(
     "depth.pbz",
     "depth",
@@ -49,20 +52,21 @@ pbzarr.import_d4(
 )
 ```
 
-This creates a `depth` track with one row per genomic position and one column per sample.
+This creates a `depth` track with one row per genomic position and one column per sample. The store's reference must match the genome of every source exactly: the same contig names, lengths, and order.
 
 ### Read a region
 
 ```python
-depth = pbzarr.open("depth.pbz/depth")
+ds = pbzarr.open("depth.pbz")
 
-window = depth.pbz.region("chr1:100000-101000")
-brain = depth.pbz.region("chr1:100000-101000", column="brain")
+rows = ds.reference.rows("chr1:100000-101000")
+window = ds["depth"].isel(position=rows)
+brain = window.sel(sample="brain")
 
 values = window.compute()
 ```
 
-pbz uses zero-based, half-open coordinates.
+`ds["depth"]` is a lazy `xarray.DataArray`. pbz uses zero-based, half-open coordinates. Use `isel` with `ds.reference.rows(...)` for genomic regions; `sel(position=...)` is reserved for a later genomic index.
 
 ### Calculate statistics over regions
 
@@ -73,34 +77,32 @@ peaks = [
     ("chr2", 200000, 200150),
 ]
 
-peak_means = depth.pbz.reduce_regions(peaks, "mean")
+peak_means = ds.reduce_regions(peaks, "mean")
 result = peak_means.compute()
 ```
 
-The result has one mean for each peak and sample. Other reductions include `sum`, `min`, `max`, `count`, `std`, `var`, `median`, and `quantile`.
+The result has one mean for each peak and sample. Other reductions include `sum`, `min`, `max`, `count`, `std`, `var`, `median`, and `quantile`. Regions can also be a list of strings such as `"chr1:100000-100200"`, or a dataframe with `chrom`, `start`, and `end` columns.
 
 Dask keeps reads and calculations lazy until `compute()`. The computed result must still fit in memory.
 
-### Open a collection
-
-Opening a track returns an `xarray.Dataset`. Opening a collection returns an `xarray.DataTree` whose children are tracks.
+### Write a derived track
 
 ```python
-study = pbzarr.open("study.pbz")
-
-depth = study["depth"].to_dataset()
-mask = study["mask"].to_dataset()
+ds = pbzarr.open("depth.pbz", mode="r+")
+ds.write({"over_10": (ds["depth"] >= 10).mean("sample")})
 ```
 
-Each track records its own genome. Tracks with matching genomes can be used together.
+A derived track must cover the whole reference on `position`, or have no genomic dimension. The write adds the track to the same store, with the default Zarr codecs unless `encoding=` says otherwise.
 
 ### Import other files
 
 ```python
-pbzarr.create_store("signals.pbz")
+reference = dict(zip(fai[0], fai[1]))
+
+pbzarr.create("signals.pbz", reference=reference)
 pbzarr.import_bigwig("signals.pbz", "signal", "sample.bw")
 
-pbzarr.create_store("scores.pbz")
+pbzarr.create("scores.pbz", reference=reference)
 pbzarr.import_bed(
     "scores.pbz",
     "sites.bed.gz",
@@ -131,7 +133,15 @@ pbz import bigwig -o cohort.pbz --track signal -c sample brain.bw:brain liver.bw
 
 All sources must describe the same genome. Without explicit labels, the import uses each file's stem as its column label.
 
-The command accepts the same import options as `pbz import d4`. These include `--file-list`, `--threads`, chunk and shard sizes, `--codecs`, `--scales`, and `--no-progress`.
+The command accepts the same import options as `pbz import d4`. These include `--file-list`, `--threads`, chunk and shard sizes, `--codecs`, and `--no-progress`.
+
+Add samples to an existing cohort track:
+
+```sh
+pbz append bigwig -o cohort.pbz --track signal heart.bw:heart
+```
+
+Every variable over the appended dimension grows. Tracks that receive no data read their fill value in the new columns.
 
 Preview the tracks and storage layout without writing a store:
 
@@ -143,40 +153,28 @@ The source list contains one path per line, optionally followed by a tab and a l
 
 ## Format
 
-A `.pbz` collection is a Zarr v3 directory. Each child directory is a track.
+A `.pbz` store is one Zarr v3 group. Tracks and coordinates are arrays directly under the root.
 
 ```text
-study.pbz/
-├── zarr.json
-├── depth/
-│   ├── zarr.json
-│   ├── values
-│   ├── offsets
-│   ├── contigs
-│   └── sample
-└── mask/
-    ├── zarr.json
-    ├── values
-    ├── offsets
-    └── contigs
+cohort.pbz/
+├── zarr.json        root attributes: pbz:version, pbz:reference
+├── contig           contig names
+├── contig_length    contig lengths
+├── sample           column labels
+├── depth            (position, sample)
+└── over_10          (position,)
 ```
 
-Each track group holds a fixed set of arrays:
+- The root attribute `pbz:reference` names the two reference arrays. Their order defines the genome: the `position` dimension is all contigs concatenated in that order.
+- Offsets are not stored. The first row of contig `i` is the sum of the lengths before it, so the rows for `chr2:10-20` are that sum plus 10 up to that sum plus 20. All coordinates are zero-based and half-open.
+- A column axis such as `sample` has a label array of the same name. Tracks that share it share its labels.
+- Binned tracks use a `bin_N` dimension. Bins restart at each contig, so a contig's last bin can be short.
 
-- `values`: the data, with contigs concatenated along the position axis in genome order. The shape is `(L,)` for a track without columns or `(L, n_columns)` with them, where `L` is the total length of the track's genome.
-- `contigs`: the contig names, in the same order.
-- `offsets`: an int64 index with one entry more than `contigs`. `offsets[i]` is the first row of contig `i`, so `offsets[i+1] - offsets[i]` is its length and the last entry equals `L`.
-- a column-label array, named after the column dimension (`sample` above). Present only when the track has columns.
+Every track declares one data type and fill value. Imported tracks are chunked and compressed with Blosc (zstd with byte shuffle) by default; imports can override the codec pipeline and chunk grid with standard Zarr v3 metadata (`--codecs` on the CLI, `codecs=` in Python). A store opens with plain xarray (`xr.open_zarr`), with no pbzarr code.
 
-Every track declares one data type and one fill value, and positions with no data hold the fill value. The `values` array is chunked and compressed with Blosc (zstd with byte shuffle) by default; imports can override the codec pipeline and chunk grid with standard Zarr v3 metadata (`--codecs` on the CLI, `codecs=` in Python). For a track with columns, chunks extend across columns as well as positions, so values from different samples compress together.
+Format 0.4 stores, which used one group per track, are not readable from Python in this version. The `pbz view` and `pbz stat` commands still read them.
 
-Region reads are index arithmetic. The rows for `chr2:10-20` are `offsets[i] + 10` up to `offsets[i] + 20`, where `i` is the index of chr2 in `contigs`. All coordinates are zero-based and half-open.
-
-A track's genome is the list of `(contig name, length)` pairs defined by `contigs` and `offsets`. There is no genome at the collection level: each track carries its own, and two tracks in one collection can cover different genomes. Each track also stores a genome checksum, the MD5 of its contig names and lengths sorted by name. Two tracks record the same genome exactly when their checksums are equal, and pbzarr applies this test whenever it aligns or combines tracks. A track can also store a genome name such as `hg38`, but the name is a human-readable label and has no part in the checksum.
-
-A track's `zarr.json` holds this metadata: the format version, the genome checksum and name, the coordinate convention, and the names of the index arrays. pbzarr writes the metadata block last during an import, so the block also marks the track as complete. A track group without it is incomplete, and opening a collection skips it.
-
-See the [design document](docs/DESIGN.md) for the full file rules and Rust API.
+See the [format proposal](docs/proposals/format-05/README.md) for the full rules and the [design document](docs/DESIGN.md) for the Rust API.
 
 ## Status
 

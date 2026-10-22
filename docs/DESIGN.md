@@ -2,7 +2,7 @@
 
 PBZ is a small Zarr v3 convention for dense, per-base genomic data. The format supplies genomic interpretation and a flat track layout; Zarr supplies storage and codecs; xarray and Dask supply the Python read and analysis model.
 
-This document describes PBZ v0.4, the current layout and public APIs. Earlier contig-major and wrapper-oriented designs are historical only.
+Format 0.5 (one root Dataset) is what imports write and what Python reads; see the [format 0.5 proposal](proposals/format-05/README.md). The 0.4 per-track layout described in parts of this document is legacy: the Rust `PbzStore` API, `pbz view`, `pbz stat`, and pyramids still use it. Earlier contig-major and wrapper-oriented designs are historical only.
 
 ## Development reader
 
@@ -15,9 +15,9 @@ The module caches metadata and reference geometry, so callers must reopen after
 external changes. It does not provide a concurrent-mutation snapshot.
 
 CLI imports and appends write format `0.5`, and `pbz view` and `pbz stat`
-read both layouts. Python opens a `0.5` store as a plain `xr.Dataset`;
-Python region operations still read only `0.4` stores. `PbzStore` remains the
-`0.4` API, and pyramids exist only there. A format `0.4` root presented to
+read both layouts. Python opens a `0.5` store through the `pbzarr.Dataset`
+handle and refuses `0.4` stores. `PbzStore` remains the `0.4` Rust API, and
+pyramids exist only there. A format `0.4` root presented to
 `Dataset` reports as an unsupported format.
 
 ## Goals
@@ -99,23 +99,21 @@ The worker that completes a buffer writes it. On an unsharded track, the buffer 
 
 ## Python API
 
-Importing `pbzarr` registers `.pbz` accessors on `xr.Dataset` and `xr.DataTree`. The public namespace is `PbzError`, `open`, `RegionQuery`, `parse_region`, `create_store`, `import_d4`, `import_bigwig`, `import_bed`, and `import_bam`.
+The public namespace is `Dataset`, `Reference`, `PbzError`, `open`, `create`, `RegionQuery`, `parse_region`, `import_d4`, `import_bigwig`, `import_bed`, and `import_bam`. Python reads through zarr-python and xarray; Rust is used only for imports.
 
-`pbzarr.open(source, *, tracks=None, chunks=..., storage_options=None)` opens a track as an `xr.Dataset` or a collection as an `xr.DataTree`. `tracks=` selects direct collection children without opening others.
+`pbzarr.open(source, *, mode="r", tracks=None, chunks=..., storage_options=None)` returns a `pbzarr.Dataset` handle for a format 0.5 store. It checks the pbz convention entry and version, and refuses a format 0.4 store. `mode="r+"` allows `write`. `tracks=` narrows the exposed tracks and keeps the reference and label coordinates. By default each track is a Dask array chunked by its stored shard (or chunk) shape; `chunks=None` gives lazy NumPy-backed arrays.
 
-`DataTree.pbz.dataset(tracks=None)` composes selected compatible tracks without aligning labels. It rejects tracks with different genome checksums or incompatible shared coordinate labels.
+The handle is not a value. `ds[name]` returns a plain `xr.DataArray`, and `to_xarray()` returns the opened `xr.Dataset`. The handle owns the store, its `Reference`, and the operations that need store state: `regions`, `reduce_regions`, and `write`.
 
-`Dataset.pbz.region(query, *, column=None)` returns one contig-local `values` slice. `Dataset.pbz.regions(intervals)` and `DataTree.pbz.regions(intervals, *, tracks=None)` create a packed, derived Dataset for many non-overlapping regions.
+`Reference` is a mapping of contig name to length. `rows(query, dim="position")` maps one region to a slice of flat rows with the same rule as the Rust reader; on `bin_N` it gives the bins that intersect the region. Empty and out-of-range regions are refused. Select with `ds["depth"].isel(position=ds.reference.rows("chr1:100-200"))`. `sel(position=...)` is reserved: with no genomic index, xarray treats it as row positions, and its meaning changes when the index arrives.
 
-Packed data carries interval coordinates and `offsets`. `Dataset.pbz.reduce_regions(intervals, reducer, **kwargs)` packs the selected intervals and reduces each complete interval along `position` in one call. Supported reducers are `mean`, `sum`, `min`, `max`, `count`, `std`, `var`, `median`, `quantile`, and `summit` (which requires a `by=` variable).
+`regions(intervals)` packs many non-overlapping regions into a derived Dataset with interval coordinates and `offsets`. `reduce_regions(intervals, reducer, **kwargs)` reduces each complete interval along `position`. Intervals may be a dataframe, three arrays, rows, or a list of region strings. Supported reducers are `mean`, `sum`, `min`, `max`, `count`, `std`, `var`, `median`, `quantile`, and `summit` (which requires a `by=` variable). Only tracks with a leading `position` dimension take part, and they may have at most one more dimension.
 
-Default opening turns regular Zarr chunks, or outer shards, into Dask chunks. `chunks=None` uses xarray’s non-Dask backend: ordinary one-region slices stay lazy, while many-region reads gather only selected pieces eagerly.
+An eager packed Dataset must still fit RAM: its complete values require memory proportional to selected bases × columns × variables. Default Dask is recommended for large selections.
 
-An eager packed Dataset must still fit RAM: its complete values require memory proportional to selected bases × columns × variables. Default Dask is recommended for large selections; xarray owns the resulting resource lifetime, so callers close returned datasets and trees when done.
+`write(tracks, *, encoding=None)` adds `xr.DataArray` values as new root tracks through `to_zarr(mode="a")`. A genomic dimension must come first and span the reference. Shared non-genomic dimensions must match the store's labels, and a new dimension needs a labeled coordinate. The write keeps the root attributes, drops `pbz:summary` and the zarrs provenance attribute from the values, refuses other `pbz:` attributes and attributes that change decoding, and writes `_FillValue` only when the caller declares one in `encoding=`. Track names must not be genomic dimension names. It refuses when the store changed since the handle opened it, and it removes the arrays it created if the write fails. Written tracks use the Zarr and xarray default codecs unless `encoding=` says otherwise. The write leaves the store without consolidated metadata, as the Rust writer does.
 
-Packed region Datasets are in-memory/lazy derived values. Rectilinear opening and an on-disk region read/write representation are explicitly deferred.
-
-All writers are destination-oriented, and every writer returns a small report dictionary. `create_store(destination)` creates an empty collection before `import_d4`, `import_bigwig`, `import_bed`, or `import_bam` writes tracks into it. The writers share the `workers`, `chunk_size`, `column_chunk_size`, `shard_size`, `shard_column_size`, `codecs`, `progress`, and `scales` keyword arguments. `scales=` is an optional list of downsampling factors that builds a multiscale mean pyramid on each created track after the base import.
+`create(destination, *, reference)` creates an empty store and returns an `r+` handle. The reference must equal the genome of every source imported later: the same names, lengths, and order. `import_d4`, `import_bigwig`, `import_bed`, and `import_bam` write tracks into an existing format 0.5 store and return a small report dictionary. They share the `workers`, `chunk_size`, `column_chunk_size`, `shard_size`, `shard_column_size`, `codecs`, and `progress` keyword arguments. `import_bam` takes the CRAM reference FASTA as `fasta=`.
 
 `import_bed(destination, sources, *, genome, ...)` covers every BED shape in one call, mirroring `pbz import bed`: `track=`/`column=`/`dtype=` import one BED column as one track, and `schema=` maps BED column selectors (header names or 1-based numbers) to dtypes, one track per entry, with `None` dtypes inferred. Any 2D output, over several sources or over several BED columns of one wide track, requires `column_dim=`.
 
@@ -133,11 +131,11 @@ The format-agnostic import engine drives any `ValueReader`. A reader exposes an 
 
 ## Interoperability
 
-PBZ uses standard Zarr v3 groups, arrays, codecs, and variable-length UTF-8 strings. Released xarray can open the hierarchy directly through `xr.open_datatree(..., engine="zarr", consolidated=False)`.
+PBZ uses standard Zarr v3 groups, arrays, codecs, and variable-length UTF-8 strings. Released xarray opens a format 0.5 store directly through `xr.open_zarr(..., consolidated=False)`.
 
-`pbzarr.open` adds validation, track discovery, coordinate classification, Dask chunk defaults, composition, and genomic region operations. It does not require an alternative Python store object or a separate data model.
+`pbzarr.open` adds identity and reference checks, Dask chunk defaults, region selection, region operations, and validated writes.
 
-Cross-language validation writes a regular fixture with Rust, opens it through released xarray and `pbzarr.open`, and compares direct children, dimensions, coordinate arrays, attributes, representative values, and contig-boundary behavior.
+Cross-language validation (`pixi run validate-roundtrip`) imports d4 fixtures with Rust, opens the stores through released xarray and `pbzarr.open`, compares variables, dimensions, dtypes, root attributes, values, and a contig boundary, then writes a derived track from Python and checks the store with the Rust `check_dataset` example.
 
 ## CLI
 
@@ -147,6 +145,6 @@ The `pbz` CLI ships `import d4`, `import bigwig`, `import bed`, `import bam`, an
 
 ## Deferred work
 
-Benchmarks, append operations, cloud write adapters, and pyramid unpublish or rescale remain future work.
+Benchmarks, append from Python, cloud write adapters, and pyramid unpublish or rescale remain future work.
 
 Rectilinear chunk-grid opening needs upstream support and is not a current PBZ read mode. On-disk region reads and writes are likewise not part of the Python or PyO3 surface.
