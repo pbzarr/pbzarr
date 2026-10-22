@@ -7,17 +7,18 @@ This document describes PBZ v0.4, the current layout and public APIs. Earlier co
 ## Development reader
 
 The additive Rust `pbzarr::dataset::Dataset` reads the
-[format `0.5` root-Dataset schema](STORE_SPEC.md#format-05-store-schema).
+[format `0.5` root-Dataset schema](proposals/format-05/README.md).
 It catalogs direct root arrays, validates reference and dimension coordinates,
 and reads typed rectangular subsets. `read_raw` preserves physical values and
 missing sentinels; `read_bool` decodes the supported Boolean encodings.
 The module caches metadata and reference geometry, so callers must reopen after
 external changes. It does not provide a concurrent-mutation snapshot.
 
-This reader is an explicit development entry point. The default `PbzStore`,
-CLI, and production Python API still use format 0.4. A format `0.4` root
-presented to it reports as an unsupported format. CLI and wrapper integration
-remain later milestones.
+CLI imports and appends write format `0.5`, and `pbz view` and `pbz stat`
+read both layouts. Python opens a `0.5` store as a plain `xr.Dataset`;
+Python region operations still read only `0.4` stores. `PbzStore` remains the
+`0.4` API, and pyramids exist only there. A format `0.4` root presented to
+`Dataset` reports as an unsupported format.
 
 ## Goals
 

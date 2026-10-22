@@ -35,7 +35,7 @@ impl FromStr for RegionQuery {
     /// Accepted forms:
     /// - `"chr1"` — entire contig
     /// - `"chr1:1000-2000"` — half-open range `[1000, 2000)`
-    /// - `"chr1:1000"` — single position
+    /// - `"chr1:1000"` — from position 1000 to the contig end
     ///
     /// Commas in numeric values are stripped (e.g. `chr1:1,000,000-2,000,000`).
     /// Whitespace is trimmed.

@@ -89,10 +89,19 @@ pub(super) fn encoding_limit(info: &VariableInfo) -> Option<String> {
             return Some(format!("unsupported logical encoding: {field}"));
         }
     }
-    if attrs["units"]
-        .as_str()
-        .is_some_and(|s| s.contains(" since "))
-    {
+    if attrs["units"].as_str().is_some_and(|s| {
+        s.contains(" since ")
+            || matches!(
+                s,
+                "days"
+                    | "hours"
+                    | "minutes"
+                    | "seconds"
+                    | "milliseconds"
+                    | "microseconds"
+                    | "nanoseconds"
+            )
+    }) {
         return Some("calendar/time decoding is unsupported".into());
     }
     if let Some(logical) = attrs.get("dtype") {

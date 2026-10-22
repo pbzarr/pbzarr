@@ -9,6 +9,7 @@ use crate::{PbzError, Result};
 pub use metadata::{
     Role, Support, ValidationIssue, ValidationReport, ValidationStatus, VariableInfo,
 };
+pub(crate) use read::float_fill;
 pub use reference::{BinInterval, GenomicAxis, Reference};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 pub(crate) use write::{DatasetPlan, Prepared};

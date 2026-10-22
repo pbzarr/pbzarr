@@ -206,14 +206,16 @@ pub fn build_root_store(dir: &Path) -> PathBuf {
         vec![n; 6],
     ]);
     let s2 = Column::Floats(vec![vec![n, n, 1.0, 1.0, 1.0, 1.0, n, n, n, n], vec![n; 6]]);
-    // One sample per inner chunk, sharded.
-    let af = TrackConfig::new(Dtype::F32)
+    // One sample per inner chunk, sharded, with the NaN `_FillValue` Xarray
+    // writes for float variables.
+    let mut af = TrackConfig::new(Dtype::F32)
         .columns(vec!["s1".into(), "s2".into()])
         .column_dim("sample")
         .chunk_size(4)
         .column_chunk_size(1)
         .shard_size(8)
         .shard_column_size(1);
+    af.extra.insert("_FillValue".into(), "AAAAAAAA+H8=".into());
     Import::from_readers(vec![ColumnReader::new(s1), ColumnReader::new(s2)])
         .unwrap()
         .into_dataset(&mut dataset, vec![("af".into(), af)])

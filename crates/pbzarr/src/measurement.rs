@@ -33,6 +33,18 @@ fn unsupported(info: &VariableInfo, reason: &str) -> PbzError {
     ))
 }
 
+/// A float `_FillValue` of NaN declares the missing values these commands
+/// already skip.
+fn missing_is_nan(info: &VariableInfo) -> bool {
+    matches!(
+        info.metadata["data_type"].as_str(),
+        Some("float32" | "float64")
+    ) && crate::dataset::float_fill(info)
+        .ok()
+        .flatten()
+        .is_some_and(f64::is_nan)
+}
+
 impl<'a> Measurement<'a> {
     pub fn legacy(track: &'a Track) -> Self {
         Self::Legacy(track)
@@ -66,8 +78,11 @@ impl<'a> Measurement<'a> {
                 "at most one axis beside position is supported",
             ));
         }
-        if !info.metadata["attributes"]["_FillValue"].is_null() {
-            return Err(unsupported(info, "declared missing values are unsupported"));
+        if !info.metadata["attributes"]["_FillValue"].is_null() && !missing_is_nan(info) {
+            return Err(unsupported(
+                info,
+                "declared missing values other than NaN are unsupported",
+            ));
         }
         let stored = info.metadata["data_type"].as_str().unwrap_or("");
         let dtype = Dtype::from_str(stored).map_err(|_| PbzError::InvalidDtype {

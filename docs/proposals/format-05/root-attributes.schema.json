@@ -12,7 +12,7 @@
         "type": "object",
         "required": ["uuid"],
         "properties": {
-          "uuid": {"const": "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c"}
+          "uuid": {"const": "d5bd7bea-0388-4e0a-9844-707c034e9add"}
         }
       },
       "minContains": 1,

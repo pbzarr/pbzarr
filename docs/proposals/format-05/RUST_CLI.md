@@ -16,14 +16,14 @@ promise or prohibit legacy reading. Legacy reading needs a separate support
 decision. A reader must identify the format before it interprets the store.
 It must report an unsupported format explicitly.
 
-The default entry points and release roadmap still use format 0.4. The additive
-`pbzarr::dataset::Dataset` reader now implements draft-format inspection,
+CLI imports and appends write format 0.5 (2026-10-05); `pbz view` and
+`pbz stat` read both layouts. The `pbzarr::dataset::Dataset` reader implements
+draft-format inspection,
 validation, and typed positional reads; see the [validation record](VALIDATION.md).
 Milestone B adds `Dataset::create` / `create_with_storage` and the existing
 Import builder's `into_dataset` target, reusing TrackConfig for 1D/2D source
-imports. See the [creation/import example and limits](WRITING.md) and
-[implementation plan](../../STORE_SPEC.md).
-CLI integration remains milestone C. No separate writer object or arbitrary-rank
+imports. See the [creation/import example and limits](WRITING.md).
+No separate writer object or arbitrary-rank
 Rust authoring interface was added. Broader valid arrays remain readable through
 Dataset and writable through native Xarray/Zarr.
 

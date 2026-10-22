@@ -71,7 +71,7 @@ fn checked_shape<T>(shape: &[u64]) -> Result<Vec<usize>> {
     Ok(dims)
 }
 
-pub(super) fn float_fill(info: &VariableInfo) -> Result<Option<f64>> {
+pub(crate) fn float_fill(info: &VariableInfo) -> Result<Option<f64>> {
     let fill = &info.attrs()["_FillValue"];
     if fill.is_null() {
         return Ok(None);

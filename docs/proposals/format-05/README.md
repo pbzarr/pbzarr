@@ -11,13 +11,12 @@ stores is outside the initial scope; this does not decide legacy read support.
 reviewable. [Rust and CLI decisions](RUST_CLI.md) define the agreed implementation
 scope. The [validation record](VALIDATION.md) distinguishes executed checks from
 future Rust/Python conformance requirements.
-The [implementation sequence and first Rust reader plan](../../STORE_SPEC.md)
-turn this contract into staged work. The additive Rust `pbzarr::dataset::Dataset`
+The fuller store specification is `docs/STORE_SPEC.md`, which is not tracked
+yet; it moves to `spec/` before 1.0. The additive Rust `pbzarr::dataset::Dataset`
 reader implements milestone A of the development convention. Dataset creation
 and existing 1D/2D imports implement milestone B; the validation record
 distinguishes executed checks from work still pending.
-The [Rust import migration plan](../../STORE_SPEC.md)
-covers milestone B and its [writing contract](WRITING.md).
+Milestone B's [writing contract](WRITING.md) records what imports write.
 
 ## Model
 
@@ -258,8 +257,10 @@ crash recovery.
 ## What the JSON Schema checks
 
 [root-attributes.schema.json](root-attributes.schema.json) validates the root
-attribute document. It proposes retaining the existing convention UUID while
-using the explicit provisional encoding version to distinguish this design.
+attribute document. Format 0.5 has its own convention UUID,
+`d5bd7bea-0388-4e0a-9844-707c034e9add`. The 0.4 UUID `b7e3c1a2-...` identifies
+the per-track group layout, and readers report it as an unsupported legacy
+format.
 No schema URL is invented; a versioned schema/spec URL should be added when
 published. Names in zarr_conventions are descriptive, not the identity check.
 

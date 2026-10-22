@@ -1,5 +1,20 @@
 # Proposal validation
 
+Later work, not recorded in the dated sections below: CLI integration, Python
+open and import, and column append landed on 2026-10-05.
+
+## Merge of `main`, 2026-10-21
+
+`main` (`cdaf9bd`: inner-chunk stat reads, zarrs pin `1ef8c5f`, one import
+thread pool) was merged into this branch. Checks run on the merged tree:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo clippy --workspace -- -D warnings`: pass.
+- `cargo test --workspace`: 270 passed, 0 failed, 1 ignored.
+- `pixi run validate-dataset`: pass (7 valid, 16 invalid, 1 unsupported
+  version), after the schema and `examples.py` moved to the 0.5 UUID.
+- `pixi run test-py` (after `install-wheel`): 147 passed.
+
 ## Rust import milestone — 2026-10-01
 
 Dataset creation and the existing Import builder now support the provisional
