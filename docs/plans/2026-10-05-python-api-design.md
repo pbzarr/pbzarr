@@ -48,6 +48,7 @@ def open(source, *, mode="r", tracks=None, chunks=..., storage_options=None) -> 
 def create(destination, *, reference, coords=None, attrs=None,
            storage_options=None) -> Dataset: ...
 def drop_index(obj: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray: ...
+def interval_mask(obj: xr.Dataset | xr.DataArray, intervals) -> xr.DataArray: ...
 
 
 class Dataset:
@@ -115,6 +116,89 @@ from its length. The rule is therefore: **fail loudly at the point of use,
 never silently reconstruct.** `windows`, `write`, `reduce_regions` and
 `regions` each resolve the index and raise a message that names the array and
 says the genomic context was dropped.
+
+### One region per selection
+
+`sel` takes exactly one region, and `isel` takes a slice. Neither accepts a
+list or an array of positions. This follows from the representation: rows are a
+`range`, which is what makes the index cost 136 bytes over a 3.1-billion
+position genome. A disjoint row set is not a range, and representing one means
+either materializing an index array, roughly 800 MB for 100 million positions,
+or holding a list of ranges, which breaks `to_pandas_index` and the pandas
+interop that depends on it.
+
+The surfaces for several regions are therefore separate operations that return
+different shapes, not alternative spellings of selection:
+
+| Intent | Call | Output axis |
+| --- | --- | --- |
+| One contiguous region, then keep computing | `array.sel(position="chr1:100-200")` | `position`, index narrows |
+| Several regions, one statistic each | `ds.reduce_regions(intervals, "mean")` | `region`, one row per interval |
+| Several regions, raw values keeping identity | `ds.regions(intervals)` | `region` and `position`, packed |
+| Most positions minus some, axis intact | `array.where(cond)` | `position`, index preserved |
+
+The last row covers the most common reason to reach for several positions:
+excluding a blacklist, keeping callable sites, dropping low-mappability bases.
+`where` preserves both the dimension and the index, stays lazy, and still
+permits `sel` afterwards, so masking rather than selection is the documented
+answer for that intent.
+
+### Masking with intervals
+
+`where` needs a condition, and the condition is often a set of intervals from a
+BED file rather than a threshold on values. `pbz.interval_mask` supplies it:
+
+```python
+mask = pbz.interval_mask(obj, intervals)   # bool DataArray on the genomic axis
+inside = depth.where(mask)
+outside = depth.where(~mask)
+```
+
+The input forms are the ones `_regions.py` already parses: a dataframe with a
+`contig`, `chrom` or `#chrom` column plus `start` plus `stop` or `end`, three
+arrays, or rows. A BED read with `pd.read_csv(path, sep="\t")` therefore works
+without conversion.
+
+The result is `True` where a position falls inside any interval. Direction is
+the caller's choice, which is why the name says `interval_mask` rather than
+`mask`. The mask is a plain Boolean `DataArray` carrying the index, so one mask
+serves every track in the store.
+
+It is a module function rather than a handle method because it must align with
+the target's rows. A selected view needs a view-shaped mask, and the view's own
+index knows its rows while the handle knows only the full reference. This gives
+the module a consistent division: handle methods for store state, module
+functions for index-aware geometry on values, which is also where
+`pbz.drop_index` belongs.
+
+The implementation must be lazy and chunk-aligned. Map the intervals to flat
+row ranges through the reference, merge overlapping or touching ranges once,
+then build a Dask Boolean array on the target's own chunk grid where each block
+resolves membership with `np.searchsorted` against the merged bounds. That is
+`O(block + log n)` per block and materializes nothing. The merge means
+overlapping BED entries cost nothing extra.
+
+The earlier store prototype's `rasterize` is not a model for this: it loops over
+intervals building a full-length Boolean per interval, which is quadratic and
+eager.
+
+On a `bin_N` axis the mask marks bins that intersect an interval, matching how
+the schema defines region selection on a binned axis.
+
+A selection collapsing to a disjoint row set would lose genomic meaning in any
+case, because the result has no single contiguous mapping back to the
+reference. Packing such data onto a `region` axis is the honest shape for it and
+keeps each interval's identity.
+
+Contigs adjacent in reference order are contiguous, so restricting to `chr1`
+and `chr2` is one slice. Only non-adjacent sets are disjoint.
+
+Both refusals must name the alternative. A list or array of regions passed to
+`sel`, and any array indexer passed to `isel`, raise an error that points at
+`regions` and `reduce_regions`. The prototype's current messages
+("A region must be 'contig:start-end' or a three-item tuple" and "supports
+genomic slices, not fancy indexing") are accurate but tell the caller nothing
+about where to go.
 
 ### Drop
 
@@ -244,9 +328,15 @@ Core functionality only, no edge-case or attribute tests. About six:
 3. A derived write round-trips: compute `(depth >= 5).sum("sample")`, write it,
    reopen, compare.
 4. `reduce_regions` over a few intervals matches a hand-computed value.
-5. An array whose index was dropped raises a clear error from `windows` and
-   from `write`.
-6. Arithmetic between two differently-selected views raises rather than
+5. `interval_mask` over a BED-shaped dataframe spanning a contig boundary,
+   with one overlapping pair, produces the expected Boolean; `where` then
+   preserves the index and the genomic axis and `sel` still works on the
+   masked result. This is the documented answer for selecting most positions
+   minus some, so it is core rather than an edge case.
+6. Refusals name their alternative: an array whose index was dropped raises
+   from `windows` and from `write`; a list of regions passed to `sel` raises
+   and names `regions`.
+7. Arithmetic between two differently-selected views raises rather than
    aligning.
 
 Plus one cross-language check: write a track from Python, then validate the
