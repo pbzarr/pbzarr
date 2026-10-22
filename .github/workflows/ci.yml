@@ -38,3 +38,6 @@ jobs:
       - run: pixi run test-py
 
       - run: pixi run validate-roundtrip
+
+  wheels:
+    uses: ./.github/workflows/wheels.yml
