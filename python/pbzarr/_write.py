@@ -9,8 +9,7 @@ from typing import TypeAlias
 
 from . import _native
 from ._native import PbzError
-from ._open import _read_root_attrs
-from ._xarray import _has_pbz_marker, _node_kind
+from ._dataset import _check_identity, _root_attrs
 
 PathLike: TypeAlias = str | os.PathLike[str]
 Source: TypeAlias = PathLike | tuple[PathLike, str]
@@ -89,97 +88,15 @@ def _codecs_json(codecs: list | dict | None) -> str | None:
     return json.dumps(codecs)
 
 
-def _require_absent(path: str) -> None:
-    if os.path.lexists(path):
-        raise FileExistsError(f"destination already exists: {path}")
-
-
-def _require_collection(path: str) -> None:
+def _require_destination(path: str) -> None:
+    """The destination must be an existing format 0.5 PBZ store."""
     if not os.path.isdir(path):
-        raise PbzError(f"destination is not an existing PBZ collection: {path}")
+        raise PbzError(f"destination is not an existing PBZ store: {path}")
     try:
-        attrs = _read_root_attrs(path, storage_options=None)
-        kind = _node_kind(attrs)
-    except PbzError:
-        raise
+        attrs = _root_attrs(path, None)
     except Exception as error:
-        raise PbzError(f"destination is not a PBZ collection: {path}") from error
-    if kind != "collection":
-        raise PbzError(f"destination is not a PBZ collection: {path}")
-
-
-def _require_dataset(path: str) -> None:
-    if not os.path.isdir(path):
-        raise PbzError(f"destination is not an existing PBZ dataset: {path}")
-    try:
-        attrs = _read_root_attrs(path, storage_options=None)
-    except Exception as error:
-        raise PbzError(f"destination is not a PBZ dataset: {path}") from error
-    if not _has_pbz_marker(attrs):
-        raise PbzError(f"destination is not a format 0.5 PBZ dataset: {path}")
-    version = attrs.get("pbz:version")
-    if version != "0.5":
-        raise PbzError(f"destination declares pbz:version {version!r}, not 0.5: {path}")
-
-
-def _require_destination(path: str, scales: Sequence[int] | None = None) -> str:
-    """Check the destination and report which format it already uses."""
-    try:
-        attrs = _read_root_attrs(path, storage_options=None)
-    except Exception:
-        attrs = {}
-    if _has_pbz_marker(attrs):
-        _require_dataset(path)
-        if scales:
-            raise ValueError(
-                "scales= is not supported by format 0.5: a multiscale pyramid"
-                " under one root Dataset is not defined"
-            )
-        return "0.5"
-    _require_collection(path)
-    return "0.4"
-
-
-def _contigs(reference: Mapping[str, int]) -> list[tuple[str, int]]:
-    if not isinstance(reference, Mapping):
-        raise TypeError("reference must be a mapping of contig name to length")
-    if not reference:
-        raise ValueError("reference must not be empty")
-    contigs: list[tuple[str, int]] = []
-    for name, length in reference.items():
-        if not isinstance(name, str) or not name:
-            raise ValueError(f"contig name must be a nonempty string; got {name!r}")
-        if isinstance(length, bool) or not isinstance(length, int) or length < 0:
-            raise ValueError(
-                f"length of contig {name!r} must be a nonnegative integer;"
-                f" got {length!r}"
-            )
-        contigs.append((name, int(length)))
-    return contigs
-
-
-def create_store(
-    destination: PathLike,
-    /,
-    *,
-    reference: Mapping[str, int],
-) -> None:
-    """Create an empty PBZ store at an absent filesystem destination.
-
-    The store is one root dataset over shared root coordinates. `reference=`
-    gives the ordered mapping of contig name to length that every track
-    shares, fixed here for the lifetime of the store.
-    """
-    destination_path = _path(destination, "destination")
-    contigs = _contigs(reference)
-    _require_absent(destination_path)
-    return _native.create_store(destination_path, contigs)
-
-
-def _scales(scales: Sequence[int] | None) -> list[int] | None:
-    if scales is None:
-        return None
-    return [int(factor) for factor in scales]
+        raise PbzError(f"destination is not a PBZ store: {path}") from error
+    _check_identity(attrs)
 
 
 def import_d4(
@@ -197,14 +114,11 @@ def import_d4(
     shard_column_size: int | None = None,
     progress: bool = False,
     codecs: list | dict | None = None,
-    scales: Sequence[int] | None = None,
 ) -> dict[str, int | float]:
     """Import one or more D4 sources into an existing PBZ store.
 
-    The destination's existing layout decides the format. `scales=` builds
-    a multiscale pyramid on the new track with the given downsampling
-    factors; `None` or empty builds no pyramid, and a format 0.5 store
-    rejects it. `in_flight=` caps the position spans the
+    The destination must be a format 0.5 store from `pbzarr.create`.
+    `in_flight=` caps the position spans the
     engine holds open at once (`None` = auto). `decode_chunks=` sets the
     position chunks each reader decodes per pass (default auto). Returns
     the import report dict.
@@ -212,7 +126,7 @@ def import_d4(
     destination_path = _path(destination, "destination")
 
     normalized_sources = _sources(sources)
-    _require_destination(destination_path, scales)
+    _require_destination(destination_path)
     return _native.import_d4(
         destination_path,
         track,
@@ -225,7 +139,7 @@ def import_d4(
         shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
-        scales=_scales(scales),
+        scales=None,
         in_flight=in_flight,
         decode_chunks=decode_chunks,
     )
@@ -246,14 +160,11 @@ def import_bigwig(
     shard_column_size: int | None = None,
     progress: bool = False,
     codecs: list | dict | None = None,
-    scales: Sequence[int] | None = None,
 ) -> dict[str, int | float]:
     """Import one or more bigWig sources into an existing PBZ store.
 
-    The destination's existing layout decides the format. `scales=` builds
-    a multiscale pyramid on the new track with the given downsampling
-    factors; `None` or empty builds no pyramid, and a format 0.5 store
-    rejects it. `in_flight=` caps the position spans the
+    The destination must be a format 0.5 store from `pbzarr.create`.
+    `in_flight=` caps the position spans the
     engine holds open at once (`None` = auto). `decode_chunks=` sets the
     position chunks each reader decodes per pass (default auto). Returns
     the import report dict.
@@ -261,7 +172,7 @@ def import_bigwig(
     destination_path = _path(destination, "destination")
 
     normalized_sources = _sources(sources)
-    _require_destination(destination_path, scales)
+    _require_destination(destination_path)
     return _native.import_bigwig(
         destination_path,
         track,
@@ -274,7 +185,7 @@ def import_bigwig(
         shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
-        scales=_scales(scales),
+        scales=None,
         in_flight=in_flight,
         decode_chunks=decode_chunks,
     )
@@ -314,7 +225,6 @@ def import_bed(
     in_flight: int | None = None,
     decode_chunks: int | None = None,
     progress: bool = False,
-    scales: Sequence[int] | None = None,
 ) -> dict[str, int | float]:
     """Import tabix-indexed BED sources into an existing PBZ store.
 
@@ -334,10 +244,8 @@ def import_bed(
 
     Output is 2D when there are several sources, or when one track holds
     several BED columns. Every 2D output requires `column_dim=`.
-    The destination's existing layout decides the format. `scales=` builds
-    a multiscale pyramid on each new track with the given downsampling
-    factors; `None` or empty builds no pyramid, and a format 0.5 store
-    rejects it. `in_flight=` caps the position spans the
+    The destination must be a format 0.5 store from `pbzarr.create`.
+    `in_flight=` caps the position spans the
     engine holds open at once (`None` = auto). `decode_chunks=` sets the
     position chunks each reader decodes per pass (default auto). Returns
     the import report dict.
@@ -360,7 +268,7 @@ def import_bed(
                 raise TypeError("schema dtypes must be strings or None")
             schema_entries.append((_bed_selector(key), value))
     normalized_column = _bed_selector(column) if column is not None else None
-    _require_destination(destination_path, scales)
+    _require_destination(destination_path)
     return _native.import_bed(
         destination_path,
         normalized_sources,
@@ -377,7 +285,7 @@ def import_bed(
         shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
-        scales=_scales(scales),
+        scales=None,
         in_flight=in_flight,
         decode_chunks=decode_chunks,
     )
@@ -389,7 +297,7 @@ def import_bam(
     sources: Source | Iterable[Source],
     *,
     mode: str = "depth",
-    reference: PathLike | None = None,
+    fasta: PathLike | None = None,
     min_mapq: int = 0,
     exclude_flags: int = 1796,
     min_bq: int = 0,
@@ -406,13 +314,12 @@ def import_bam(
     decode_chunks: int | None = None,
     progress: bool = False,
     codecs: list | dict | None = None,
-    scales: Sequence[int] | None = None,
 ) -> dict[str, int | float]:
     """Import per-base depth or composition counts from BAM/CRAM sources.
 
     `mode` is `"depth"` (writes `track`) or `"composition"` (writes `track`
     plus one `track_{field}` per composition field). CRAM sources need
-    `reference`; BAM sources ignore it. `count_deletions` defaults to
+    `fasta`; BAM sources ignore it. `count_deletions` defaults to
     `False`, matching the samtools/mosdepth/Picard/riker convention that
     CIGAR `D` positions do not count toward depth; set `True` to count
     deletion spans toward depth (useful for callability masks). `overlap`
@@ -420,10 +327,8 @@ def import_bam(
     collapsing only PROPER_PAIR-flagged overlapping mates to one count;
     `"all"` matches riker/samtools-mpileup-style unconditional dedup of any
     overlapping mate pair; `"none"` disables dedup, double-counting every
-    overlapping pair's shared span. The destination's existing
-    layout decides the format. `scales=` builds a multiscale pyramid on each
-    new track with the given downsampling factors; `None` or empty builds no
-    pyramid, and a format 0.5 store rejects it. `in_flight=`
+    overlapping pair's shared span. The destination must be a format 0.5
+    store from `pbzarr.create`. `in_flight=`
     caps the position spans the engine holds open at once (`None` = auto).
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
@@ -445,14 +350,14 @@ def import_bam(
                 )
             merged.append((path, label))
         normalized_sources = merged
-    reference_path = _path(reference, "reference") if reference is not None else None
-    _require_destination(destination_path, scales)
+    fasta_path = _path(fasta, "fasta") if fasta is not None else None
+    _require_destination(destination_path)
     return _native.import_bam(
         destination_path,
         track,
         normalized_sources,
         mode,
-        reference_path,
+        fasta_path,
         min_mapq,
         exclude_flags,
         min_bq,
@@ -466,7 +371,7 @@ def import_bam(
         shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
-        scales=_scales(scales),
+        scales=None,
         in_flight=in_flight,
         decode_chunks=decode_chunks,
     )

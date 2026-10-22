@@ -16,7 +16,9 @@ def import_d4(
     progress: bool = ...,
     codecs: str | None = ...,
     scales: Sequence[int] | None = ...,
-) -> dict[str, int]: ...
+    in_flight: int | None = ...,
+    decode_chunks: int | None = ...,
+) -> dict[str, int | float]: ...
 def import_bigwig(
     store_path: str,
     track: str,
@@ -30,7 +32,9 @@ def import_bigwig(
     progress: bool = ...,
     codecs: str | None = ...,
     scales: Sequence[int] | None = ...,
-) -> dict[str, int]: ...
+    in_flight: int | None = ...,
+    decode_chunks: int | None = ...,
+) -> dict[str, int | float]: ...
 def import_bed(
     store_path: str,
     sources: Sequence[tuple[str, str | None]],
@@ -48,7 +52,9 @@ def import_bed(
     progress: bool = ...,
     codecs: str | None = ...,
     scales: Sequence[int] | None = ...,
-) -> dict[str, int]: ...
+    in_flight: int | None = ...,
+    decode_chunks: int | None = ...,
+) -> dict[str, int | float]: ...
 def import_bam(
     store_path: str,
     track: str,
@@ -69,5 +75,7 @@ def import_bam(
     progress: bool = ...,
     codecs: str | None = ...,
     scales: Sequence[int] | None = ...,
-) -> dict[str, int]: ...
-def create_store(store_path: str) -> None: ...
+    in_flight: int | None = ...,
+    decode_chunks: int | None = ...,
+) -> dict[str, int | float]: ...
+def create_store(store_path: str, reference: Sequence[tuple[str, int]]) -> None: ...

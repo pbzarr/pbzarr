@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-import pbzarr  # noqa: F401
+import pbzarr
 from pbzarr._regions import (
     _reduce_packed_dataset,
     _validate_packed_dataset,
@@ -52,7 +52,6 @@ def _packed_dataset(*, lazy: bool = False, multiple: bool = False) -> xr.Dataset
         ),
         attrs={
             "pbz:representation": "packed-regions",
-            "pbz:parent_genome_checksum": "md5:test",
             "pbz:coordinates": "0-based-half-open",
         },
     )
@@ -137,7 +136,6 @@ def test_summit_selects_one_position_per_region_and_column() -> None:
         ),
         attrs={
             "pbz:representation": "packed-regions",
-            "pbz:parent_genome_checksum": "md5:test",
             "pbz:coordinates": "0-based-half-open",
         },
     )
@@ -343,27 +341,12 @@ def test_reduce_is_lazy_and_culls_to_a_bounded_cross_chunk_region() -> None:
         source_blocks.append(
             da.from_delayed(task, shape=(stop - start,), dtype=np.float64)
         )
-    track = xr.Dataset(
-        {"values": ("position", da.concatenate(source_blocks))},
-        coords=xr.Coordinates(
-            {
-                "contigs": ("contig", ["chr1"]),
-                "offsets": ("contig_boundary", [0, 9]),
-            },
-            indexes={},
-        ),
-        attrs={
-            "zarr_conventions": [{"uuid": "test", "name": "perbase"}],
-            "perbase:kind": "track",
-            "perbase:version": "0.4",
-            "perbase:coordinates": "0-based-half-open",
-            "perbase:genome_checksum": "md5:8579e0e056d92d53101d9b70ba03f797",
-        },
-    )
+    track = xr.Dataset({"values": ("position", da.concatenate(source_blocks))})
     closed = []
     track.set_close(lambda: closed.append(True))
     packed = regions_dataset(
         track,
+        pbzarr.Reference(["chr1"], [9]),
         [("chr1", 1, 5), ("chr1", 6, 9)],
         target_bytes=8,
         max_source_blocks=16,

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import functools
-import hashlib
 import pickle
 
 import dask.array as da
 import numpy as np
 import pytest
 import xarray as xr
-import zarr
 from zarr.storage import MemoryStore
 
 import pbzarr
@@ -18,6 +16,7 @@ from pbzarr._regions import (
     _gather_block,
     _plan_variable_regions,
 )
+from _helpers import write_pbz_store
 
 
 def _layout(
@@ -240,37 +239,15 @@ class _CountingStore(MemoryStore):
         )
 
 
-def _eager_track() -> tuple[_CountingStore, xr.Dataset]:
+def _eager_track() -> tuple[_CountingStore, pbzarr.Dataset]:
     store = _CountingStore()
-    group = zarr.open_group(store, mode="w", zarr_format=3)
-    group.create_array(
-        "values",
-        data=np.arange(10, dtype=np.int16),
+    write_pbz_store(
+        store,
+        {"chr1": 10},
+        "depth",
+        np.arange(10, dtype=np.int16),
+        dims=("position",),
         chunks=(4,),
-        dimension_names=("position",),
-    )
-    group.create_array(
-        "contigs",
-        data=np.asarray(["chr1"]),
-        chunks=(1,),
-        dimension_names=("contig",),
-    )
-    group.create_array(
-        "offsets",
-        data=np.asarray([0, 10], dtype=np.int64),
-        chunks=(2,),
-        dimension_names=("contig_boundary",),
-    )
-    payload = "chr1\t10\n"
-    group.attrs.update(
-        {
-            "zarr_conventions": [{"uuid": "test", "name": "perbase"}],
-            "perbase:kind": "track",
-            "perbase:version": "0.4",
-            "perbase:coordinates": "0-based-half-open",
-            "perbase:genome_checksum": "md5:"
-            + hashlib.md5(payload.encode()).hexdigest(),
-        }
     )
     dataset = pbzarr.open(store, chunks=None)
     store.reads.clear()
@@ -281,7 +258,7 @@ def test_plan_variable_regions_inspects_chunks_none_without_reading_values():
     store, dataset = _eager_track()
 
     batch_regions, batch_pieces, pieces = _plan_variable_regions(
-        dataset["values"],
+        dataset["depth"],
         _layout([3], [7]),
         target_bytes=100,
         max_source_blocks=16,
@@ -290,7 +267,7 @@ def test_plan_variable_regions_inspects_chunks_none_without_reading_values():
     np.testing.assert_array_equal(batch_regions, [0, 1])
     np.testing.assert_array_equal(batch_pieces, [0, 1])
     assert pieces.tolist() == [(0, 3, 7)]
-    assert not [key for key in store.reads if "/values/c/" in f"/{key}"]
+    assert not [key for key in store.reads if "/depth/c/" in f"/{key}"]
 
 
 def test_two_million_regions_plan_in_typed_linear_storage_without_values():

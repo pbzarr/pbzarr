@@ -1,26 +1,21 @@
-"""pbzarr — Python wheel for PBZ (Per-Base Zarr) flat-layout stores."""
+"""pbzarr: per-base genomic signal in Zarr v3 stores."""
 
-from . import _accessor as _accessor
-from . import _datatree_accessor as _datatree_accessor
+from ._dataset import Dataset, create, open
 from ._native import PbzError
-from ._open import open
+from ._reference import Reference
 from ._region import RegionQuery, parse_region
-from ._write import (
-    create_store,
-    import_bam,
-    import_bed,
-    import_bigwig,
-    import_d4,
-)
+from ._write import import_bam, import_bed, import_bigwig, import_d4
 
 __all__ = [
+    "Dataset",
     "PbzError",
+    "Reference",
     "RegionQuery",
-    "parse_region",
-    "create_store",
-    "import_d4",
-    "import_bigwig",
-    "import_bed",
+    "create",
     "import_bam",
+    "import_bed",
+    "import_bigwig",
+    "import_d4",
     "open",
+    "parse_region",
 ]

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import xarray as xr
 
 import pbzarr
 
@@ -47,7 +46,7 @@ def test_import_bam_depth_single_source_matches_hand_computed_vector(tmp_path):
         expected[start : start + read_len] += 1
 
     destination = tmp_path / "depth.pbz"
-    pbzarr.create_store(destination, reference={contig: length})
+    pbzarr.create(destination, reference={contig: length}).close()
 
     report = pbzarr.import_bam(destination, "depth", bam, mode="depth")
     assert report["contigs_written"] == 1
@@ -58,7 +57,7 @@ def test_import_bam_depth_single_source_matches_hand_computed_vector(tmp_path):
     assert report["bytes_written"] > 0
 
     with pbzarr.open(destination, chunks=None) as dataset:
-        assert isinstance(dataset, xr.Dataset)
+        assert isinstance(dataset, pbzarr.Dataset)
         assert dataset["depth"].dims == ("position",)
         assert dataset["depth"].dtype == np.dtype("int32")
         assert dataset["depth"].values.tolist() == expected.tolist()

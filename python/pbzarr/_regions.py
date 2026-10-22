@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import threading
 
 import dask
@@ -18,7 +17,10 @@ import zarr
 
 from ._native import PbzError
 from ._region import RegionQuery, parse_region
-from ._xarray import _PBZ_SOURCE_ATTR, _validate_track
+
+# Set by `open` on a track's Dask array: where the raw Zarr array lives, so
+# region tasks can reopen it instead of carrying the whole source graph.
+_PBZ_SOURCE_ATTR = "_pbz_source"
 
 
 _I64_MIN = -(2**63)
@@ -894,7 +896,7 @@ def _compact_source_reference(values: xr.DataArray):
     reference = getattr(values.data, _PBZ_SOURCE_ATTR, None)
     if not isinstance(reference, dict) or values.chunks is None:
         return None
-    required = ("source", "array_path", "storage_options")
+    required = ("source", "array_path", "storage_options", "token")
     if any(key not in reference for key in required):
         return None
     return {key: reference[key] for key in required}
@@ -934,6 +936,7 @@ def _read_gather_block(
 
 def reduce_regions_dataset(
     ds: xr.Dataset,
+    reference,
     intervals,
     reducer: str,
     /,
@@ -946,6 +949,7 @@ def reduce_regions_dataset(
     _validate_reducer(reducer, kwargs)
     packed = regions_dataset(
         ds,
+        reference,
         intervals,
         target_bytes=target_bytes,
         max_source_blocks=max_source_blocks,
@@ -955,12 +959,13 @@ def reduce_regions_dataset(
 
 def regions_dataset(
     ds: xr.Dataset,
+    reference,
     intervals,
     *,
     target_bytes: int = _TARGET_BYTES,
     max_source_blocks: int = _MAX_SOURCE_BLOCKS,
 ) -> xr.Dataset:
-    layout = _resolve_regions(ds, intervals)
+    layout = _resolve_regions(ds, reference, intervals)
 
     data_variables = {}
     column_coordinates = {}
@@ -1011,7 +1016,7 @@ def regions_dataset(
         for dimension in values.dims[1:]:
             column_coordinates[dimension] = ds[dimension].variable
 
-    contigs = np.asarray(ds["contigs"].values)
+    contigs = np.asarray(reference.names, dtype=object)
     coordinates = xr.Coordinates(
         {
             "offsets": ("region_boundary", layout.packed_offsets),
@@ -1027,15 +1032,11 @@ def regions_dataset(
         },
         indexes={},
     )
-    checksum = ds.attrs.get(
-        "perbase:genome_checksum", ds.attrs.get("genome_checksum")
-    )
     result = xr.Dataset(
         data_vars=data_variables,
         coords=coordinates,
         attrs={
             "pbz:representation": "packed-regions",
-            "pbz:parent_genome_checksum": checksum,
             "pbz:coordinates": "0-based-half-open",
         },
     )
@@ -1269,57 +1270,33 @@ def _normalize_coordinate(value, name: str) -> int | None:
     return coordinate
 
 
-def _resolve_region(
-    ds: xr.Dataset, query
-) -> tuple[RegionQuery, slice]:
-    if "pbz:representation" in ds.attrs:
-        raise PbzError("region() requires a normal PBZ track Dataset")
-    _validate_track(ds)
-    normalized = _normalize_one(query)
-    return _resolve_one(ds, normalized)
-
-
 def _resolve_one(
-    ds: xr.Dataset, normalized: RegionQuery
+    reference, normalized: RegionQuery
 ) -> tuple[RegionQuery, slice]:
-    contigs = np.asarray(ds["contigs"].values).tolist()
-    try:
-        contig_id = contigs.index(normalized.contig)
-    except ValueError as error:
-        raise KeyError(f"unknown contig {normalized.contig!r}") from error
-
-    offsets = np.asarray(ds["offsets"].values)
-    flat_start = int(offsets[contig_id])
-    contig_length = int(offsets[contig_id + 1]) - flat_start
-    start = 0 if normalized.start is None else normalized.start
-    stop = contig_length if normalized.stop is None else normalized.stop
-
-    if start < 0:
-        raise ValueError("region start must be nonnegative")
-    if stop <= start:
-        raise ValueError("region must be nonempty with start less than stop")
-    if stop > contig_length:
-        raise ValueError(
-            f"region stop {stop} exceeds contig length {contig_length}"
-        )
-
-    resolved = RegionQuery(normalized.contig, start, stop)
-    return resolved, slice(flat_start + start, flat_start + stop)
+    """One region's contig-local bounds and flat rows, by ``Reference.rows``."""
+    flat = reference.rows(normalized)
+    base = int(reference.offsets[reference.names.index(normalized.contig)])
+    return RegionQuery(normalized.contig, flat.start - base, flat.stop - base), flat
 
 
-def _resolve_regions(ds: xr.Dataset, intervals) -> RegionLayout:
+def _resolve_regions(ds: xr.Dataset, reference, intervals) -> RegionLayout:
     if "pbz:representation" in ds.attrs:
         raise PbzError("regions() requires a normal PBZ track Dataset")
-    _validate_regions_dataset(ds)
+    _check_tracks(ds, reference)
 
     if isinstance(intervals, (RegionQuery, str)) or (
         isinstance(intervals, tuple)
         and len(intervals) == 3
         and isinstance(intervals[0], str)
+        and all(
+            bound is None
+            or (isinstance(bound, (int, np.integer)) and not isinstance(bound, bool))
+            for bound in intervals[1:]
+        )
     ):
         normalized = _normalize_one(intervals)
-        resolved, flat_slice = _resolve_one(ds, normalized)
-        contigs = np.asarray(ds["contigs"].values)
+        resolved, flat_slice = _resolve_one(reference, normalized)
+        contigs = np.asarray(reference.names, dtype=object)
         contig_id = np.flatnonzero(contigs == resolved.contig)
         return _build_region_layout(
             np.asarray([int(contig_id[0])], dtype=np.int64),
@@ -1334,12 +1311,14 @@ def _resolve_regions(ds: xr.Dataset, intervals) -> RegionLayout:
     if columns is None:
         columns = _array_columns(intervals)
     if columns is None:
+        columns = _query_columns(intervals, reference)
+    if columns is None:
         columns = _row_columns(intervals)
     contig_names, starts, stops = _validate_columns(*columns)
 
-    contigs = np.asarray(ds["contigs"].values)
+    contigs = np.asarray(reference.names, dtype=object)
     contig_ids = _contig_ids(contigs, contig_names)
-    offsets = np.asarray(ds["offsets"].values, dtype=np.int64)
+    offsets = reference.offsets
     contig_lengths = offsets[contig_ids + 1] - offsets[contig_ids]
     if np.any(starts < 0):
         raise ValueError("region start must be nonnegative")
@@ -1367,74 +1346,33 @@ def _resolve_regions(ds: xr.Dataset, intervals) -> RegionLayout:
     )
 
 
-def _validate_regions_dataset(ds: xr.Dataset) -> None:
-    if "pbz:representation" in ds.attrs:
-        raise PbzError("regions() requires an unpacked PBZ Dataset")
-    if "perbase:version" in ds.attrs or ds.attrs.get("perbase:kind") == "track":
-        _validate_track(ds)
-        return
-
-    allowed_attrs = {"genome_checksum", "coordinates", "genome_name"}
-    if set(ds.attrs) - allowed_attrs:
-        raise PbzError("regions() requires an exactly composed PBZ Dataset")
-    if ds.attrs.get("coordinates") != "0-based-half-open":
-        raise PbzError("invalid composed Dataset coordinate convention")
+def _check_tracks(ds: xr.Dataset, reference) -> None:
     if not ds.data_vars:
-        raise PbzError("composed PBZ Dataset must contain at least one track")
-    if "contigs" not in ds.coords or "offsets" not in ds.coords:
-        raise PbzError("composed PBZ Dataset is missing genome coordinates")
-    if ds["contigs"].dims != ("contig",):
-        raise PbzError("composed contigs must use the contig dimension")
-    if ds["offsets"].dims != ("contig_boundary",):
-        raise PbzError("composed offsets must use the contig_boundary dimension")
-
-    contigs_array = np.asarray(ds["contigs"].values)
-    offsets = np.asarray(ds["offsets"].values)
-    if not np.issubdtype(offsets.dtype, np.integer) or np.issubdtype(
-        offsets.dtype, np.bool_
-    ):
-        raise PbzError("composed offsets must be integers")
-    if offsets.ndim != 1 or offsets.size != contigs_array.size + 1:
-        raise PbzError("composed offsets must bound every contig")
-    contigs = contigs_array.tolist()
-    if any(not isinstance(contig, str) or not contig for contig in contigs):
-        raise PbzError("composed contig names must be nonempty strings")
-    if len(set(contigs)) != len(contigs):
-        raise PbzError("composed contig names must be unique")
-    if offsets[0] != 0 or np.any(offsets[1:] < offsets[:-1]):
-        raise PbzError("composed offsets must be nondecreasing from zero")
-
-    expected_variables = set(ds.data_vars) | {"contigs", "offsets"}
+        raise PbzError("regions() needs at least one position-first track")
+    size = reference.size("position")
     for name, values in ds.data_vars.items():
         if values.ndim not in {1, 2} or values.dims[0] != "position":
-            raise PbzError(f"composed track {name!r} must have position first")
-        if values.shape[0] != int(offsets[-1]):
-            raise PbzError(f"composed track {name!r} has incompatible geometry")
-        if values.ndim == 2:
-            column_dim = values.dims[1]
-            if column_dim not in ds.coords:
-                raise PbzError(
-                    f"composed track {name!r} is missing column labels"
-                )
-            labels = ds[column_dim]
-            if labels.dims != (column_dim,) or labels.size != values.shape[1]:
-                raise PbzError(
-                    f"composed track {name!r} has invalid column labels"
-                )
-            expected_variables.add(column_dim)
-    if set(ds.variables) != expected_variables:
-        raise PbzError("regions() requires an exactly composed PBZ Dataset")
-    if any("position" in coordinate.dims for coordinate in ds.coords.values()):
-        raise PbzError("composed PBZ Dataset has a position-dependent coordinate")
+            raise PbzError(f"track {name!r} must have position first")
+        if values.shape[0] != size:
+            raise PbzError(
+                f"track {name!r} has {values.shape[0]} positions; the reference has {size}"
+            )
+        if values.ndim == 2 and values.dims[1] not in ds.coords:
+            raise PbzError(f"track {name!r} is missing {values.dims[1]!r} labels")
 
-    records = sorted(
-        zip(contigs, np.diff(offsets), strict=True),
-        key=lambda item: item[0].encode("utf-8"),
+
+def _query_columns(intervals, reference):
+    """A list of region strings or RegionQuery objects, as three columns."""
+    if not isinstance(intervals, (list, tuple)) or not intervals or not all(
+        isinstance(item, (str, RegionQuery)) for item in intervals
+    ):
+        return None
+    resolved = [_resolve_one(reference, _normalize_one(item))[0] for item in intervals]
+    return (
+        np.asarray([r.contig for r in resolved], dtype=object),
+        np.asarray([r.start for r in resolved], dtype=np.int64),
+        np.asarray([r.stop for r in resolved], dtype=np.int64),
     )
-    payload = "".join(f"{name}\t{int(length)}\n" for name, length in records)
-    checksum = "md5:" + hashlib.md5(payload.encode("utf-8")).hexdigest()
-    if ds.attrs.get("genome_checksum") != checksum:
-        raise PbzError("composed genome checksum does not match geometry")
 
 
 def _dataframe_columns(intervals):

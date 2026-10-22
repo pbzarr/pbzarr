@@ -1,7 +1,12 @@
-"""Validate a regular Rust PBZ fixture through released xarray and pbzarr.
+"""Round-trip a format 0.5 store between Rust, released xarray, and pbzarr.
+
+Rust imports the committed d4 cohort; released xarray and ``pbzarr.open``
+must agree on it. Python then writes a derived track, and the Rust
+``check_dataset`` example must still report the store valid.
 
 Run via ``pixi run validate-roundtrip`` from the repository root.
 """
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -11,70 +16,71 @@ import numpy as np
 import pbzarr
 import xarray as xr
 
-
-def _dataset(tree: xr.DataTree, track: str) -> xr.Dataset:
-    return tree[track].to_dataset(inherit=False)
-
-
-def _assert_track_equal(
-    released: xr.Dataset, opened: xr.Dataset, track: str
-) -> None:
-    assert set(released.sizes) == set(opened.sizes), track
-    assert dict(released.sizes) == dict(opened.sizes), track
-    assert set(released.variables) == set(opened.variables), track
-
-    published_attrs = {
-        key: value
-        for key, value in opened.attrs.items()
-        if key != "perbase:kind"
-    }
-    assert dict(released.attrs) == published_attrs, track
-    assert opened.attrs["perbase:kind"] == "track", track
-
-    for name in released.variables:
-        left = released[name]
-        right = opened[name]
-        assert left.dims == right.dims, (track, name)
-        assert left.dtype == right.dtype, (track, name)
-        np.testing.assert_equal(left.values, right.values, err_msg=(track, name))
+ROOT = Path(__file__).resolve().parents[1]
+COHORT = [ROOT / "fixtures/d4/cohort_s0.d4", ROOT / "fixtures/d4/cohort_s1.d4"]
+# Header order chr2 (500 bp of 100) then chr1 (300 bp of 7).
+MULTI_CONTIG = ROOT / "fixtures/d4/multi_contig.d4"
 
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / "smoke.pbz"
-        subprocess.run(
-            ["cargo", "run", "--quiet", "--example", "fixture_smoke_store", "--", str(out)],
-            check=True,
+        out = Path(tmp) / "cohort.pbz"
+        pbzarr.create(out, reference={"chr1": 10_000}).close()
+        pbzarr.import_d4(
+            out, "depth", [(COHORT[0], "s0"), (COHORT[1], "s1")], column_dim="sample"
         )
 
-        released = xr.open_datatree(out, engine="zarr", consolidated=False)
-        opened = pbzarr.open(out, chunks=None)
-        try:
-            assert isinstance(opened, xr.DataTree)
+        released = xr.open_zarr(out, consolidated=False)
+        with pbzarr.open(out, chunks=None) as ds:
+            opened = ds.to_xarray()
+            assert set(released.variables) == set(opened.variables)
             assert dict(released.attrs) == dict(opened.attrs)
-            assert set(released.children) == {"depth", "mask"}
-            assert set(opened.children) == set(released.children)
+            for name in released.variables:
+                assert released[name].dims == opened[name].dims, name
+                assert released[name].dtype == opened[name].dtype, name
+                np.testing.assert_equal(released[name].values, opened[name].values)
+            rows = ds.reference.rows("chr1:9990-10000")
+            np.testing.assert_equal(
+                ds["depth"].isel(position=rows).sel(sample="s1").values,
+                np.full(10, 100 + (999 % 50) + 1),
+            )
+        released.close()
 
-            for track in ("mask", "depth"):
-                _assert_track_equal(
-                    _dataset(released, track), _dataset(opened, track), track
-                )
+        with pbzarr.open(out, mode="r+") as ds:
+            ds.write({"mean_depth": ds["depth"].astype("float32").mean("sample")})
 
-            depth = _dataset(opened, "depth")["values"]
-            mask = _dataset(opened, "mask")["values"]
-            assert depth.dims == ("position", "sample")
-            assert list(_dataset(opened, "depth")["sample"].values) == ["A", "B", "C"]
-            assert list(_dataset(opened, "depth")["contigs"].values) == ["chr1", "chr2"]
-            np.testing.assert_equal(_dataset(opened, "depth")["offsets"].values, [0, 2000, 3000])
+        subprocess.run(
+            ["cargo", "build", "--quiet", "-p", "pbzarr", "--example", "check_dataset"],
+            cwd=ROOT,
+            check=True,
+        )
+        target = json.loads(
+            subprocess.check_output(
+                ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+                cwd=ROOT,
+                text=True,
+            )
+        )["target_directory"]
+        report = json.loads(
+            subprocess.check_output(
+                [str(Path(target) / "debug/examples/check_dataset"), str(out)], text=True
+            )
+        )
+        assert report["status"] == "valid", report["issues"]
+        assert report["variables"]["mean_depth"]["logical_support"] == "Supported"
 
-            # The fixture resets its per-contig source pattern at the flat boundary.
-            np.testing.assert_equal(depth.isel(position=1999).values, [1999, 3998, 5997])
-            np.testing.assert_equal(depth.isel(position=2000).values, [0, 0, 0])
-            assert bool(mask.isel(position=1999).values) is False
-            assert bool(mask.isel(position=2000).values) is False
-        finally:
-            opened.close()
-            released.close()
+        multi = Path(tmp) / "multi.pbz"
+        pbzarr.create(multi, reference={"chr2": 500, "chr1": 300}).close()
+        pbzarr.import_d4(multi, "depth", MULTI_CONTIG)
+        with pbzarr.open(multi) as ds:
+            depth = ds["depth"]
+            assert ds.reference.rows("chr1:0-1") == slice(500, 501)
+            np.testing.assert_equal(
+                depth.isel(position=ds.reference.rows("chr2:499-500")).values, [100]
+            )
+            np.testing.assert_equal(
+                depth.isel(position=ds.reference.rows("chr1:0-1")).values, [7]
+            )
 
     print("round-trip OK")
     return 0
