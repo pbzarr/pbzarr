@@ -2223,8 +2223,8 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rust-htslib"
-version = "1.0.1"
-source = "git+https://github.com/cademirch/rust-htslib?rev=c08910034decaec2fb278a07d7f9422a38ac38cd#c08910034decaec2fb278a07d7f9422a38ac38cd"
+version = "1.0.2"
+source = "git+https://github.com/rust-bio/rust-htslib?rev=036ef1f2a6c0a20efcaf3fb43de46b234b37261e#036ef1f2a6c0a20efcaf3fb43de46b234b37261e"
 dependencies = [
  "bio-types",
  "byteorder",
