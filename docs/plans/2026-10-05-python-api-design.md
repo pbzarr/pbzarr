@@ -8,6 +8,106 @@ settled. The [schema](../proposals/format-05/README.md) owns the on-disk
 contract. The fuller store specification lives in `docs/STORE_SPEC.md`, which is
 untracked and present only in the main checkout.
 
+Amended 2026-10-21: the work ships in two steps. 1.0 ships the handle without
+the custom index; 1.1 adds the index. The next section says what changes. The
+rest of this document describes the end state; where it conflicts with the
+next section, the next section wins for 1.0.
+
+## Release split: handle in 1.0, index in 1.1
+
+### What 1.0 ships
+
+The public surface below, minus `GenomicIndex` and `drop_index`, plus three
+additions:
+
+```python
+def open(source, *, mode="r", tracks=None, level=None, chunks=...,
+         storage_options=None) -> Dataset: ...
+def interval_mask(obj, intervals, *, reference=None) -> xr.DataArray: ...
+
+class Reference(Mapping[str, int]):          # contig -> length
+    offsets: ...                             # cached_property
+    def size(self, dim: str = "position") -> int: ...
+    def rows(self, query, dim: str = "position") -> slice: ...
+    def interval(self, row: int, dim: str = "position") -> RegionQuery: ...
+```
+
+- `ds[name]` returns a plain `xr.DataArray` with no custom index.
+- Region selection is `ds["depth"].isel(position=ds.reference.rows("chr1:100-200"))`.
+  `rows` follows the Rust rule in `crates/pbzarr/src/dataset/reference.rs`:
+  `position` maps to `base + start .. base + stop`; `bin_N` maps to
+  `base + start // N .. base + ceil(stop / N)`. Empty and out-of-range regions
+  are refused, as in Rust. `rows` is the one region parser; the 1.1
+  `GenomicIndex.sel` calls it.
+- `sel(position=...)` is reserved in 1.0. With no index, Xarray falls back to
+  row positions, and that meaning changes when the index arrives. The docs say
+  to use `isel` with `reference.rows`.
+- `open(level=N)` returns a read-only handle for the summary level group
+  `levels/bin_N/` (scope doc D7). Its `to_xarray()` is an ordinary Dataset over
+  `bin_N` that also carries the root `sample` and contig coordinates.
+  `mode="r+"` with `level=` is refused.
+- `interval_mask` ships for targets that span the full reference; `reference=`
+  is required when the target is not a handle. Masks on narrowed views come
+  with the index in 1.1.
+- `windows(size)` is a cut line: it ships only if the bin-aligned design
+  (rechunk on bin edges, then `map_blocks` with `np.add.reduceat`,
+  `np.minimum.reduceat`, `np.maximum.reduceat`) fits the budget. The D7 levels
+  already cover the standard bin sizes. Its test checks that
+  `windows(N).mean()` equals the stored level mean.
+- `append_<fmt>` module functions over the Rust engine, after the engine
+  supports single-sample append (scope doc D12).
+- `chunks=` default: the stored shard shape (`encoding["shards"]`, else
+  `encoding["chunks"]`). With one sample per inner chunk, Xarray's default
+  would give one task per sample per position chunk.
+- Read-only zip open. A format 0.4 or 0.5 store raises "legacy store, run
+  `pbz convert`".
+
+### Forward-compatibility contract
+
+These rules hold in 1.0 and stay true when the index lands, so no 1.0 call
+changes:
+
+1. A full-span array with no index stays writable. `write` checks the length
+   against the reference and does not require an index.
+2. In 1.1, an array indexer passed to `isel` on a genomic dimension drops the
+   index and does not raise. `where(drop=True)` calls `isel` with arrays, so the
+   blanket refusal in "One region per selection" applies to `sel` only: a list
+   or array passed to `sel` raises and names `regions` and `reduce_regions`.
+3. A slice passed to `isel` narrows the index, so
+   `isel(position=reference.rows(q))` keeps working.
+4. The index stays opt-in (`open(..., index=True)`) until a test pins that its
+   coordinate never reaches `to_zarr` as a dense array. A later minor version
+   makes it the default. The `index=False` escape hatch stays for one more
+   minor version.
+
+### Corrections found while checking this plan
+
+- "A caller who then runs `to_zarr` themselves will hit an Xarray error" (Drop
+  section) is not what the installed Xarray does. Its writer calls
+  `np.asarray` on the index variable, so the likely result is a dense
+  `position` coordinate (about 25 GB for GRCh38), not an error. Not run;
+  the 1.1 work must pin this with a test on a tiny reference and block it.
+- `tracks=` must keep the reference coordinates. Today `_open.py` subsets with
+  `opened[names]`, and Xarray then drops `contig` and `contig_length`.
+- `to_zarr(mode="a")` replaces the root attributes, so `write` re-reads the raw
+  root attributes and writes them back.
+- `write` re-reads the on-disk catalog at write time. A handle opened before an
+  append refuses `write` with "store changed since open; reopen".
+- `write` strips `pbz:summary` from attributes (Xarray keeps it through
+  arithmetic, scope doc D7) and refuses other `pbz:` keys.
+- `import_bam` and `append_bam` take the FASTA path as `fasta=`, not
+  `reference=`, because `create(reference=)` is a contig mapping.
+- Settled details: `write` writes root consolidated metadata as its last step,
+  matching the Rust writer (scope doc D13); the `chunks=` default is above.
+
+### 1.0 tests
+
+The testing list below, with these changes: tests 1 and 5 select with
+`reference.rows`; test 6 covers the refusal of a write whose length does not
+span the reference; test 7 (the alignment guard) moves to 1.1. Add: `open` of
+a level returns `bin_N` data with the root coordinates; `open` of a 0.4 store
+raises the legacy error.
+
 ## Why this replaces the earlier draft
 
 Two facts settled since that draft was written change the shape of the API.
@@ -212,8 +312,9 @@ Dropping is internal and happens in exactly two places:
 
 `to_xarray()` keeps the index, because carrying genomic context into native
 work is the reason the index exists. A caller who then runs `to_zarr`
-themselves will hit an Xarray error, so `pbz.drop_index(obj)` is public for
-that case.
+themselves must not get a dense `position` coordinate (see "Corrections found
+while checking this plan"), so `pbz.drop_index(obj)` is public for that case
+and the index blocks that write.
 
 ## Contig-aware windowing
 
@@ -306,16 +407,18 @@ recomputed them on every access inside the region hot path.
 ## Out of scope
 
 Deferred in the roadmap or undefined in the schema, and therefore not built
-here: `replace`, `patch`, `append`, `update_attrs`, multiscale and pyramid
-support, conversion from format 0.4, and 64-bit integer dense dtypes.
+here: `replace`, `patch`, `update_attrs`, building summary levels from Python
+(reading them is `open(level=N)`), and conversion from format 0.4. Append from
+Python is the `append_<fmt>` binding over the Rust engine (see the release
+split). 64-bit integer dense dtypes follow the scope doc (D6).
 
 `Dataset.from_xarray` is dropped: it would mean a store handle with no store.
 
 Registering the index for native `ds.sel` use by callers who never import the
 wrapper is the behavior this design already provides, since the index is a real
-Xarray index. No separate opt-in accessor is needed. Note that this does
-conflict with `ROADMAP.md`, which records that no custom index is approved;
-that entry is now out of date and should be updated when this lands.
+Xarray index. No separate opt-in accessor is needed. `ROADMAP.md` records
+that no custom index is approved; that matches 1.0 (no index) and should be
+updated when the 1.1 index lands.
 
 ## Testing
 
@@ -345,9 +448,8 @@ available test and costs almost nothing, because the example already exists.
 
 ## Details to settle during implementation
 
-- Whether `write` refreshes consolidated metadata. It must leave the store in
-  the same state the Rust writer leaves it in, so that both paths agree.
-- The exact `chunks=` default for `open`. The format-0.4 path uses a sentinel
-  meaning "use the stored chunking"; `xr.open_zarr` spells that `chunks={}`.
+- Settled 2026-10-21: `write` writes root consolidated metadata as its last
+  step, matching the Rust writer. The `chunks=` default is the stored shard
+  shape.
 - Whether `Windows` exposes `reduce(func)` in addition to the four named
   reducers. The prototype has it; it is not needed for the tests above.
