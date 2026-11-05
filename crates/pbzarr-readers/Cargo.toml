@@ -1,4 +1,4 @@
-# Holds format-specific git dependencies (d4, the rust-htslib fork) so the
+# Holds format-specific git dependencies (d4 and rust-htslib) so the
 # core `pbzarr` crate stays free of git deps and remains publishable to
 # crates.io. Not published itself.
 [package]
@@ -46,11 +46,10 @@ wide = "1.6.1"
 # CRAM backend. libdeflate speeds up the block codec; bzip2/lzma cover the
 # rarer block compression methods CRAM permits. `hts-sys` builds the
 # vendored htslib C sources (bindgen included, no system-linking/pkg-config
-# mode) for self-contained, pinned wheels.
-# Pinned to a fork carrying a fix for a CRAM index drop-order use-after-free
-# in upstream `Drop for IndexedReader` (hts_close ran before the index was
-# destroyed); drop this pin once upstream releases the fix.
-rust-htslib = { git = "https://github.com/cademirch/rust-htslib", rev = "c08910034decaec2fb278a07d7f9422a38ac38cd", default-features = false, features = [
+# mode) for self-contained, pinned wheels. Upstream v1.0.2 is the first release
+# with the CRAM index drop-order fix (rust-bio/rust-htslib#518), but it is not
+# on crates.io yet; pin its tag commit until it is, then switch to "1.0.2".
+rust-htslib = { git = "https://github.com/rust-bio/rust-htslib", rev = "036ef1f2a6c0a20efcaf3fb43de46b234b37261e", default-features = false, features = [
     "libdeflate",
     "bzip2",
     "lzma",

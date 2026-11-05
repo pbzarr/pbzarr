@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/pbzarr/pbzarr/compare/v0.6.0...v0.7.0) (2026-10-22)
+
+
+### Features
+
+* **pbz:** add bigwig import CLI ([39ca5e8](https://github.com/pbzarr/pbzarr/commit/39ca5e804b0f49c89266b5b79902b7938d16d1f6))
+
+
+### Bug Fixes
+
+* fix linux wheel build ([#26](https://github.com/pbzarr/pbzarr/issues/26)) ([c2af566](https://github.com/pbzarr/pbzarr/commit/c2af56688dfdd3f687f4520cacd6e23027824689))
+* read inner chunks for stat ([b059a35](https://github.com/pbzarr/pbzarr/commit/b059a35086664d83a84fa2c31b85a4d72638c5ca))
+* respect --threads on import ([cdaf9bd](https://github.com/pbzarr/pbzarr/commit/cdaf9bd11ef9f8d38459136c77c9a1f34fbb8a6c))
+
 ## [0.6.0](https://github.com/pbzarr/pbzarr/compare/v0.5.1...v0.6.0) (2026-09-02)
 
 

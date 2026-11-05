@@ -19,8 +19,11 @@ Python wheel (PyPI) ship in lockstep.
 3. **Merge the release PR.** That creates the git tag and GitHub release
    (`releases_created == 'true'`), which triggers the publish jobs in
    `.github/workflows/release.yml`:
-   - **build-wheels** — maturin builds abi3 wheels for linux x86_64 and a macOS
-     universal2 wheel (Intel + Apple Silicon) on the macos-14 Apple Silicon runner.
+   - **build-wheels** — `.github/workflows/wheels.yml` builds abi3 wheels for
+     linux x86_64 (manylinux_2_28, glibc 2.28 or newer) and a macOS universal2
+     wheel (Intel + Apple Silicon) on the macos-14 Apple Silicon runner, then
+     installs and imports each wheel. CI runs the same workflow on every pull
+     request, so a broken wheel build shows up before a release.
    - **publish-pypi** — uploads the wheels via PyPI Trusted Publishing
      (OIDC, environment `pypi`; no token stored).
    - **publish-crate** — `cargo publish -p pbzarr` via crates.io Trusted
