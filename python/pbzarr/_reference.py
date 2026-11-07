@@ -60,6 +60,13 @@ class Reference(Mapping[str, int]):
         self._lengths = lengths
         self._index = {name: i for i, name in enumerate(names)}
 
+    @classmethod
+    def from_xarray(cls, obj) -> Reference:
+        """The reference of a DataArray or Dataset with a ``reference`` coordinate."""
+        from ._coord import reference_of
+
+        return reference_of(obj)
+
     @property
     def names(self) -> tuple[str, ...]:
         return self._names
