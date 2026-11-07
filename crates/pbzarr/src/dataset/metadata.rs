@@ -1,4 +1,4 @@
-use super::FORMAT_VERSION;
+use super::{FORMAT_VERSION, REFERENCE_ARRAYS};
 use crate::{PbzError, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +34,12 @@ impl VariableInfo {
     pub(super) fn attrs(&self) -> &Value {
         &self.metadata["attributes"]
     }
+    /// A track is a root array whose first dimension is `position` or `bin_N`.
+    pub fn is_track(&self) -> bool {
+        self.dims
+            .first()
+            .is_some_and(|d| matches!(GenomicAxis::from_dimension(d), Ok(Some(_))))
+    }
 }
 fn get_json(storage: &ReadableWritableListableStorage, key: &str) -> Result<Option<Value>> {
     let key = StoreKey::new(key).map_err(|e| PbzError::Metadata(e.to_string()))?;
@@ -42,11 +48,6 @@ fn get_json(storage: &ReadableWritableListableStorage, key: &str) -> Result<Opti
         .map_err(|e| PbzError::Store(e.to_string()))?
         .map(|b| serde_json::from_slice(&b).map_err(|e| PbzError::Metadata(e.to_string())))
         .transpose()
-}
-fn coordinate_names(attrs: &Value, names: &mut BTreeSet<String>) {
-    if let Some(value) = attrs["coordinates"].as_str() {
-        names.extend(value.split_whitespace().map(str::to_owned));
-    }
 }
 pub(super) fn encoding_limit(info: &VariableInfo) -> Option<String> {
     let dtype = info.metadata["data_type"].as_str().unwrap_or("");
@@ -151,8 +152,6 @@ pub(super) fn catalog(
     if version != FORMAT_VERSION {
         return Err(PbzError::UnsupportedFormat(version.into()));
     }
-    let mut coords = BTreeSet::new();
-    coordinate_names(attrs, &mut coords);
     let mut variables = BTreeMap::new();
     let children = storage
         .list_dir(&StorePrefix::root())
@@ -180,30 +179,26 @@ pub(super) fn catalog(
                     .collect()
             })
             .unwrap_or_default();
-        if dims == [name] && shape.len() == 1 {
-            coords.insert(name.to_owned());
-        }
-        coordinate_names(&meta["attributes"], &mut coords);
+        let coordinate = REFERENCE_ARRAYS.contains(&name) || (dims == [name] && shape.len() == 1);
         let mut info = VariableInfo {
             name: name.into(),
             dims,
             shape,
-            role: Role::Measurement,
+            role: if coordinate {
+                Role::Coordinate
+            } else {
+                Role::Measurement
+            },
             metadata: meta,
             logical_support: Support::Supported,
         };
         info.logical_support = support(&info);
         variables.insert(name.to_owned(), info);
     }
-    for name in coords {
-        if let Some(info) = variables.get_mut(&name) {
-            info.role = Role::Coordinate;
-        }
-    }
     Ok((root, variables))
 }
 
-use super::{Dataset, GenomicAxis, Reference};
+use super::{CONTIG_DIM, CONTIG_ID, CONTIG_LENGTH, CONTIG_MD5, Dataset, GenomicAxis, Reference};
 use crate::Contig;
 use std::num::NonZeroU64;
 
@@ -304,41 +299,22 @@ fn dims_valid(info: &VariableInfo) -> bool {
 }
 impl Dataset {
     fn reference_arrays(&self) -> Result<(&VariableInfo, &VariableInfo)> {
-        let r = &self.root["attributes"]["pbz:reference"];
-        let resolve = |key: &str| -> Result<&VariableInfo> {
-            let name = r[key]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| PbzError::Metadata(format!("R2: missing reference {key}")))?;
-            zarrs::node::NodeName::new(name).map_err(|e| PbzError::Metadata(format!("R2: {e}")))?;
+        let resolve = |name: &str| {
             self.variables
                 .get(name)
                 .ok_or_else(|| PbzError::Metadata(format!("R2: missing root array {name}")))
         };
-        let names = resolve("names")?;
-        let lengths = resolve("lengths")?;
-        if names.name == lengths.name {
-            return Err(PbzError::Metadata(
-                "R2: reference pointers must be distinct".into(),
-            ));
+        let names = resolve(CONTIG_ID)?;
+        let lengths = resolve(CONTIG_LENGTH)?;
+        let on_contig = |info: &VariableInfo| {
+            dims_valid(info) && info.shape.len() == 1 && info.dims == [CONTIG_DIM]
+        };
+        if !on_contig(names) || names.metadata["data_type"] != "string" {
+            return Err(PbzError::Metadata(format!(
+                "R4: {CONTIG_ID} must be a string array on dimension {CONTIG_DIM}"
+            )));
         }
-        if names.role != Role::Coordinate || lengths.role != Role::Coordinate {
-            return Err(PbzError::Metadata(
-                "R3: reference arrays must be coordinates".into(),
-            ));
-        }
-        if !dims_valid(names)
-            || names.shape.len() != 1
-            || names.dims != [names.name.clone()]
-            || names.metadata["data_type"] != "string"
-        {
-            return Err(PbzError::Metadata(
-                "R4: reference names must be a string dimension coordinate".into(),
-            ));
-        }
-        if !dims_valid(lengths)
-            || lengths.dims != names.dims
-            || lengths.shape != names.shape
+        if !on_contig(lengths)
             || !matches!(
                 lengths.metadata["data_type"].as_str(),
                 Some(
@@ -347,9 +323,16 @@ impl Dataset {
             )
             || lengths.attrs()["dtype"] == "bool"
         {
-            return Err(PbzError::Metadata(
-                "R5: reference lengths must be integer values on the names dimension".into(),
-            ));
+            return Err(PbzError::Metadata(format!(
+                "R5: {CONTIG_LENGTH} must be an integer array on dimension {CONTIG_DIM}"
+            )));
+        }
+        if let Some(md5) = self.variables.get(CONTIG_MD5)
+            && (!on_contig(md5) || md5.metadata["data_type"] != "string")
+        {
+            return Err(PbzError::Metadata(format!(
+                "R7: {CONTIG_MD5} must be a string array on dimension {CONTIG_DIM}"
+            )));
         }
         Ok((names, lengths))
     }
@@ -528,7 +511,8 @@ impl Dataset {
             }
         }
         for dim in relevant {
-            if matches!(GenomicAxis::from_dimension(dim), Ok(None))
+            if dim != CONTIG_DIM
+                && matches!(GenomicAxis::from_dimension(dim), Ok(None))
                 && let Err(e) = self.validate_labels(dim)
             {
                 report.error(Some(dim), "D3", e)?;

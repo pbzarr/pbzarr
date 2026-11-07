@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use noodles_bgzf as bgzf;
-use pbzarr::dataset::{Dataset, Role};
+use pbzarr::dataset::Dataset;
 use pbzarr::io::{Dtype, Numeric};
 use pbzarr::{Measurement, PbzError, PbzStore};
 
@@ -114,7 +114,7 @@ impl Store {
             Store::Root(dataset) => dataset
                 .variables()
                 .values()
-                .filter(|v| v.role == Role::Measurement)
+                .filter(|v| v.is_track())
                 .map(|v| v.name.as_str())
                 .collect(),
         };

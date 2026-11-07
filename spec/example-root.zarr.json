@@ -9,11 +9,7 @@
       }
     ],
     "pbz:version": "0.5",
-    "pbz:reference": {
-      "names": "contig",
-      "lengths": "contig_length"
-    },
-    "coordinates": "contig_length",
+    "coordinates": "contig_id contig_length",
     "description": "Example cohort with independent base and binned tracks."
   }
 }

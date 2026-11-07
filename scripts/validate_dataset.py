@@ -22,6 +22,9 @@ def run_probe(probe, store):
     return json.loads(output.stdout)
 
 
+REFERENCE_ARRAYS = {"contig_id", "contig_length", "contig_md5"}
+
+
 def check_rust_imports(writer, probe, destination):
     import zarr
     from dask.callbacks import Callback
@@ -31,10 +34,10 @@ def check_rust_imports(writer, probe, destination):
     assert run_probe(probe, store)["status"] == "valid"
     with xr.open_zarr(store, consolidated=False) as ds:
         assert set(ds.data_vars) == {"depth", "zero", "mask"}
-        assert {"contig", "contig_length", "sample"} <= set(ds.coords)
+        assert {"contig_id", "contig_length", "sample"} <= set(ds.coords)
         assert "position" not in ds.coords
         assert ds.depth.dims == ("position", "sample")
-        np.testing.assert_array_equal(ds.contig.values, ["chr1", "chr2"])
+        np.testing.assert_array_equal(ds.contig_id.values, ["chr1", "chr2"])
         np.testing.assert_array_equal(ds.contig_length.values, [5, 7])
         np.testing.assert_array_equal(ds.sample.values, ["S1", "S2"])
         np.testing.assert_array_equal(ds.depth.values, np.tile([7, 3], (12, 1)))
@@ -100,15 +103,15 @@ def main():
                 for name, info in report["variables"].items():
                     assert info["dims"] == list(raw[name].dims), (relative, name)
                     assert info["shape"] == list(raw[name].shape), (relative, name)
-                    assert info["role"] == ("coordinate" if name in decoded.coords else "measurement")
+                    by_name = name in REFERENCE_ARRAYS or raw[name].dims == (name,)
+                    assert info["role"] == ("coordinate" if by_name else "measurement")
                     expected = decoded[name].values if decoded[name].dtype == bool else raw[name].values
                     actual = report["values"][name]
                     if expected.shape:
                         actual = np.asarray(actual, dtype=expected.dtype).reshape(expected.shape)
                     np.testing.assert_array_equal(actual, expected, err_msg=f"{relative}: {name}")
-                pointers = raw.attrs["pbz:reference"]
-                names = raw[pointers["names"]].values.tolist()
-                lengths = raw[pointers["lengths"]].values.tolist()
+                names = raw["contig_id"].values.tolist()
+                lengths = raw["contig_length"].values.tolist()
                 assert report["reference"] == [
                     {"name": name, "length": length} for name, length in zip(names, lengths)
                 ]

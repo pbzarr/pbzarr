@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PBZ core draft root attributes",
-  "description": "Validates root attributes only. Array geometry and coordinate contents require a store validator. This is an unpublished proposal.",
+  "description": "Validates root attributes only. The reference arrays contig_id and contig_length, array geometry and coordinate contents require a store validator. This is an unpublished proposal.",
   "type": "object",
-  "required": ["zarr_conventions", "pbz:version", "pbz:reference"],
+  "required": ["zarr_conventions", "pbz:version"],
   "properties": {
     "zarr_conventions": {
       "type": "array",
@@ -18,25 +18,10 @@
       "minContains": 1,
       "maxContains": 1
     },
-    "pbz:version": {"const": "0.5"},
-    "pbz:reference": {
-      "type": "object",
-      "required": ["names", "lengths"],
-      "properties": {
-        "names": {"$ref": "#/$defs/rootArrayName"},
-        "lengths": {"$ref": "#/$defs/rootArrayName"}
-      },
-      "additionalProperties": true
-    }
+    "pbz:version": {"const": "0.5"}
   },
   "additionalProperties": true,
   "$defs": {
-    "rootArrayName": {
-      "type": "string",
-      "minLength": 1,
-      "pattern": "^[^/]+$",
-      "description": "Name of an existing direct root array, subject to Zarr node-name rules."
-    },
     "convention": {
       "type": "object",
       "properties": {

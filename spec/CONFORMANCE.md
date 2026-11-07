@@ -1,6 +1,6 @@
 # PBZ core conformance draft
 
-Updated: 2026-09-30. This defines example stores and expected validation results
+Updated: 2026-11-06. This defines example stores and expected validation results
 for the [core proposal](README.md). The additive Rust draft reader and `pixi run validate-dataset` now make
 these expectations executable; see the validation record for actual runs. The examples use `0.5` until
 a release format version is assigned. No conversion is included.
@@ -30,7 +30,7 @@ The small fixture uses reference lengths `[5, 7]`, samples `sample_1` through
 
 | Array | Dimensions | Shape | Logical values/type |
 | --- | --- | --- | --- |
-| `contig` | `contig` | `[2]` | `chr1`, `chr2` |
+| `contig_id` | `contig` | `[2]` | `chr1`, `chr2` |
 | `contig_length` | `contig` | `[2]` | signed 64-bit integers `[5, 7]` |
 | `sample` | `sample` | `[3]` | string dimension labels |
 | `threshold` | `threshold` | `[2]` | integer dimension labels `[5, 10]` |
@@ -42,8 +42,10 @@ The small fixture uses reference lengths `[5, 7]`, samples `sample_1` through
 | `mean_depth` | `sample` | `[3]` | floating summary |
 | `total_callable_count` | none | `[]` | unsigned 64-bit scalar |
 
-Only the first four arrays are coordinates. Their classification uses native
-Xarray encoding. Neither `position`, `bin_4`, nor `bin_6` has a stored coordinate
+Only the first four arrays are coordinates. Readers find them by name
+(`contig_id`, `contig_length`) and by an array name that equals its only
+dimension (`sample`, `threshold`). They do not read the Xarray `coordinates`
+attribute. Neither `position`, `bin_4`, nor `bin_6` has a stored coordinate
 array. Track names and calculations are examples, not reserved schema terms.
 
 For `bin_4`, the ordered intervals are:
@@ -64,7 +66,8 @@ stored numbers were computed from their dimension name.
 | Fixture | Required interpretation |
 | --- | --- |
 | `cohort` | All the canonical variables coexist in one Dataset. Counts, dimensions, labels, and scalar values round-trip. |
-| `renamed-reference` | Reference arrays are `sequence` and `sequence_length`. Resolve the JSON pointers rather than hard-coding array names. |
+| `no-coordinates-attribute` | The canonical store with every `coordinates` attribute removed. It classifies and reads the same as `cohort`. |
+| `with-md5` | The canonical variables plus the optional `contig_md5(contig)` string array. |
 | `non-genomic` | Sample summaries and a scalar retain root reference coordinates even without genomic variables. |
 | `zero-length-contigs` | Lengths `[0,5,0]` contribute five positions and two `bin_4` rows. Zero-length contigs contribute no rows. |
 | `empty-reference` | An empty reference permits zero-length genomic axes; it is distinct from a missing reference. |
@@ -101,16 +104,17 @@ group and array metadata against Zarr separately.
 | Rule | Store check |
 | --- | --- |
 | R1 | Root is a Zarr v3 group with the recognized convention UUID and encoding version. |
-| R2 | `pbz:reference.names` and `.lengths` identify distinct existing direct root arrays with valid Zarr node names. |
-| R3 | Both reference arrays decode as coordinates, not tracks. Test the resulting classification rather than demanding one particular placement of Xarray's `coordinates` attribute. |
+| R2 | The direct root arrays `contig_id` and `contig_length` exist. |
+| R3 | Classification uses array names and dimension names only. The Xarray `coordinates` attribute has no PBZ meaning, and its absence changes nothing. |
 
 ### Reference
 
 | Rule | Store check |
 | --- | --- |
-| R4 | Names are a 1D dimension coordinate; its array and dimension names match. Values are unique, nonempty, nonmissing strings. |
-| R5 | Lengths use a signed/unsigned integer storage encoding, not Boolean or floating storage, on that same dimension. There is one length per name. |
+| R4 | `contig_id` is a 1D string array on the dimension `contig`. Values are unique, nonempty, nonmissing strings. |
+| R5 | `contig_length` uses a signed/unsigned integer storage encoding, not Boolean or floating storage, on the dimension `contig`. There is one length per name. |
 | R6 | Interpreted lengths are exact, nonmissing, nonnegative integers. Each length and the total fit signed 64-bit indexing. Derive offsets in stored contig order. |
+| R7 | If `contig_md5` exists, it is a 1D string array on the dimension `contig`. |
 
 R5 concerns physical encoding; R6 concerns meaning. A decoder promoting an
 integer array because of an unused missing sentinel does not by itself change
@@ -124,12 +128,12 @@ exact without that decoding complication.
 | --- | --- |
 | D1 | Every non-scalar array has one nonempty, distinct, non-null `dimension_names` entry per axis. Scalar shape `[]` permits absent `dimension_names` or `[]`. |
 | D2 | All arrays using a dimension agree on its extent. The root owns one shared coordinate identity for that dimension. |
-| D3 | Every non-genomic dimension has a same-named 1D coordinate of matching length with unique, nonmissing string or numeric labels after supported decoding. |
-| D4 | Other auxiliary coordinates may repeat values; D3's uniqueness rule does not apply to them. Coordinate/measurement names cannot collide. |
+| D3 | Every non-genomic dimension other than `contig` has a same-named 1D coordinate of matching length with unique, nonmissing string or numeric labels after supported decoding. `contig_id` labels `contig` (R4). |
+| D4 | Other non-genomic root arrays may repeat values; D3's uniqueness rule does not apply to them. Names cannot collide. |
 | G1 | Reserved genomic dimensions are `position` and canonical `bin_[1-9][0-9]*`; other uses of the `bin_` prefix are invalid. |
 | G2 | `position` extent is `sum(lengths)`. Each `bin_N` extent is `sum(ceil(length / N))`, computed per contig with checked integer arithmetic. |
-| G3 | A genomic data variable has exactly one genomic dimension, first. Genomic auxiliary coordinates follow the same geometry. |
-| G4 | Do not persist same-named coordinate arrays for `position` or `bin_N`. Runtime indexes must be removed when writing the core layout. Other genomic auxiliary coordinates are allowed. |
+| G3 | A genomic array has exactly one genomic dimension, first. Such an array is a track. |
+| G4 | Do not persist same-named coordinate arrays for `position` or `bin_N`. Runtime indexes must be removed when writing the core layout. |
 
 `bin_1` is valid and remains distinct from `position` as a named dimension even
 though both describe the same base intervals. They may occur on different
@@ -167,12 +171,10 @@ part of the contract.
 
 | Fixture | Expected rejection |
 | --- | --- |
-| `missing-reference` | Required root reference metadata absent. |
-| `same-reference-pointer` | R2: both pointers identify the same array. |
-| `dangling-reference-pointer` | R2: referenced array does not exist. |
+| `missing-reference` | R2: the `contig_id` array is absent. |
+| `reference-wrong-dimension` | R4: `contig_id` is on the dimension `sequence`, not `contig`. |
 | `duplicate-contigs` | R4: contig names are not unique. |
 | `negative-length` | R6: negative reference length. |
-| `lengths-as-track` | R3: native coordinate classification has been removed for the length array. |
 | `short-position` | G2/D2: depth has eleven rows for a twelve-position reference/shared axis. |
 | `unnamed-axis` | D1: a non-scalar dimension name is null. |
 | `duplicate-samples` | D3: sample labels are not unique. |
@@ -193,8 +195,7 @@ format's validity.
 The generated stores are a small starting corpus. The Rust public-interface tests also
 cover checks for missing labels after decoding, reference overflow, malformed
 Zarr metadata, wrong reference dimensions, repeated/empty dimension names,
-ordinary repeated auxiliary coordinates, `bin_1`, and genomic auxiliary
-coordinates. Add cases to this corpus when those validation paths are built.
+ordinary repeated non-genomic root arrays, and `bin_1`. Add cases to this corpus when those validation paths are built.
 
 Store conformance alone does not establish write safety or command behavior.
 Integration cases must also check collision/reference/label preflight before

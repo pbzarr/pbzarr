@@ -21,6 +21,8 @@ FORMAT_VERSION = "0.5"
 _PBZ_UUID = "d5bd7bea-0388-4e0a-9844-707c034e9add"
 _LEGACY_UUID = "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c"
 _STORED_CHUNKS = object()
+# Root arrays that are coordinates by name, whatever the coordinates attribute says.
+_REFERENCE_ARRAYS = ("contig_id", "contig_length", "contig_md5")
 _SUPPORTED_DTYPES = frozenset(
     {"bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32",
      "uint64", "float32", "float64"}
@@ -322,7 +324,8 @@ def open(
         storage_options=_options(storage_options),
     )
     try:
-        reference = _reference(data, root_attrs)
+        data = data.set_coords([name for name in _REFERENCE_ARRAYS if name in data.data_vars])
+        reference = _reference(data)
         _check_genomic_dims(data, reference)
         if chunks is _STORED_CHUNKS:
             data = data.assign(
@@ -433,16 +436,13 @@ def _check_identity(attrs: Mapping) -> None:
         raise PbzError(f"unsupported pbz:version {version!r}; expected {FORMAT_VERSION!r}")
 
 
-def _reference(data: xr.Dataset, attrs: Mapping) -> Reference:
-    pointers = attrs.get("pbz:reference")
-    if not isinstance(pointers, Mapping):
-        raise PbzError("invalid PBZ store: pbz:reference is missing")
-    names_key, lengths_key = pointers.get("names"), pointers.get("lengths")
-    for key in (names_key, lengths_key):
-        if not isinstance(key, str) or key not in data.variables:
-            raise PbzError(f"invalid PBZ store: reference array {key!r} is missing")
-    names = data[names_key].values.tolist()
-    return Reference(names, data[lengths_key].values)
+def _reference(data: xr.Dataset) -> Reference:
+    for name in ("contig_id", "contig_length"):
+        if name not in data.variables:
+            raise PbzError(f"invalid PBZ store: reference array {name!r} is missing")
+        if data[name].dims != ("contig",):
+            raise PbzError(f"invalid PBZ store: {name!r} must have the one dimension 'contig'")
+    return Reference(data["contig_id"].values.tolist(), data["contig_length"].values)
 
 
 def _check_genomic_dims(data: xr.Dataset, reference: Reference) -> None:

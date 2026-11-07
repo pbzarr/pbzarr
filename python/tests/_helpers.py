@@ -9,12 +9,13 @@ PBZ_UUID = "d5bd7bea-0388-4e0a-9844-707c034e9add"
 def write_pbz_store(store, reference: dict[str, int], name: str, values: np.ndarray,
                     *, dims: tuple[str, ...], chunks: tuple[int, ...],
                     shards: tuple[int, ...] | None = None,
-                    labels: dict[str, list[str]] | None = None) -> None:
+                    labels: dict[str, list[str]] | None = None,
+                    coordinates_attr: bool = True) -> None:
     """Write a format 0.5 store with one track, using zarr only."""
     group = zarr.open_group(store, mode="w", zarr_format=3)
     n = len(reference)
     contig = group.create_array(
-        "contig", shape=(n,), chunks=(n,), dtype=str, dimension_names=("contig",)
+        "contig_id", shape=(n,), chunks=(n,), dtype=str, dimension_names=("contig",)
     )
     contig[:] = np.asarray(list(reference))
     group.create_array(
@@ -39,14 +40,10 @@ def write_pbz_store(store, reference: dict[str, int], name: str, values: np.ndar
             dimension_names=(dim,),
         )
         label[:] = np.asarray(names)
-    group.attrs.update(
-        {
-            "zarr_conventions": [{"uuid": PBZ_UUID, "name": "pbz"}],
-            "pbz:version": "0.5",
-            "pbz:reference": {"names": "contig", "lengths": "contig_length"},
-            "coordinates": "contig_length",
-        }
-    )
+    attrs = {"zarr_conventions": [{"uuid": PBZ_UUID, "name": "pbz"}], "pbz:version": "0.5"}
+    if coordinates_attr:
+        attrs["coordinates"] = "contig_id contig_length"
+    group.attrs.update(attrs)
 
 
 def write_bed_bgzip_tabix(dirp: Path, name: str, header: list[str],

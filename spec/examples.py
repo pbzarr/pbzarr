@@ -10,7 +10,6 @@ Run pixi run validate-dataset to check the generated corpus with Rust.
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 from pathlib import Path
 import shutil
@@ -29,7 +28,6 @@ def root_attrs():
             "uuid": "d5bd7bea-0388-4e0a-9844-707c034e9add", "name": "pbz",
         }],
         "pbz:version": "0.5",
-        "pbz:reference": {"names": "contig", "lengths": "contig_length"},
     }
 
 
@@ -38,7 +36,7 @@ def cohort():
     ds = xr.Dataset(
         {"depth": (("position", "sample"), da.from_array(raw, chunks=(4, 3)))},
         coords={
-            "contig": np.asarray(["chr1", "chr2"], dtype=object),
+            "contig_id": ("contig", np.asarray(["chr1", "chr2"], dtype=object)),
             "contig_length": ("contig", np.asarray([5, 7], dtype="int64")),
             "sample": np.asarray(["sample_1", "sample_2", "sample_3"], dtype=object),
             "threshold": np.asarray([5, 10], dtype="int64"),
@@ -88,9 +86,8 @@ def generate(destination):
     def valid(name, ds, *, encoding=None, expected=None):
         path = valid_dir / f"{name}.pbz"
         save(ds, path, encoding=encoding, expected=ds if expected is None else expected)
-        reference = ds.attrs["pbz:reference"]
-        names_metadata = json.loads((path / reference["names"] / "zarr.json").read_text())
-        lengths_metadata = json.loads((path / reference["lengths"] / "zarr.json").read_text())
+        names_metadata = json.loads((path / "contig_id" / "zarr.json").read_text())
+        lengths_metadata = json.loads((path / "contig_length" / "zarr.json").read_text())
         assert names_metadata["data_type"] == "string"
         assert lengths_metadata["data_type"] == "int64"
         manifest["valid"].append(str(path.relative_to(destination)))
@@ -101,17 +98,21 @@ def generate(destination):
         np.testing.assert_array_equal(
             reopened.callable_count.compute(), (raw[:, :, None] >= [5, 10]).sum(axis=1)
         )
-        assert set(reopened.coords) == {"contig", "contig_length", "sample", "threshold"}
+        assert set(reopened.coords) == {"contig_id", "contig_length", "sample", "threshold"}
         assert reopened.callable.dtype == np.dtype("bool")
         assert reopened.callable_count.dtype == np.dtype("uint64")
     scalar_metadata = json.loads((canonical / "total_callable_count/zarr.json").read_text())
     assert scalar_metadata["shape"] == []
     assert scalar_metadata.get("dimension_names") in (None, [])
 
-    renamed = base.rename({"contig": "sequence", "contig_length": "sequence_length"})
-    renamed.attrs = copy.deepcopy(base.attrs)
-    renamed.attrs["pbz:reference"] = {"names": "sequence", "lengths": "sequence_length"}
-    valid("renamed-reference", renamed)
+    plain = valid_dir / "no-coordinates-attribute.pbz"
+    shutil.copytree(canonical, plain)
+    for metadata in plain.glob("**/zarr.json"):
+        edit_metadata(metadata.parent, "", lambda m: m["attributes"].pop("coordinates", None))
+    manifest["valid"].append(str(plain.relative_to(destination)))
+
+    md5 = [f"{i:032x}" for i in (1, 2)]
+    valid("with-md5", base.assign_coords(contig_md5=("contig", np.asarray(md5, dtype=object))))
 
     non_genomic = base.drop_vars(["depth", "callable", "callable_count", "coverage", "signal"])
     valid("non-genomic", non_genomic)
@@ -129,21 +130,21 @@ def generate(destination):
             },
             coords={
                 # An empty object array would otherwise serialize as float64.
-                "contig": np.asarray(names, dtype=np.dtypes.StringDType()),
+                "contig_id": ("contig", np.asarray(names, dtype=np.dtypes.StringDType())),
                 "contig_length": ("contig", np.asarray(lengths, dtype="int64")),
                 "sample": np.asarray(["sample_1"], dtype=object),
             },
             attrs=root_attrs(),
         )
         # This Xarray version reopens variable-length strings as object arrays.
-        decoded_strings = ds.assign_coords(contig=ds.contig.astype(object))
+        decoded_strings = ds.assign_coords(contig_id=ds.contig_id.astype(object))
         valid(name, ds, expected=decoded_strings)
 
     regional = np.zeros(12, dtype="int64")
     regional[2:4] = (raw[2:4] >= 5).sum(axis=1)
     regional_ds = xr.Dataset(
         {"regional_count": ("position", regional)},
-        coords={"contig": base.contig, "contig_length": base.contig_length},
+        coords={"contig_id": base.contig_id, "contig_length": base.contig_length},
         attrs=root_attrs(),
     )
     valid("regional-fill", regional_ds, encoding={"regional_count": {"fill_value": 0}})
@@ -155,7 +156,7 @@ def generate(destination):
             "large_unsigned": xr.DataArray(np.uint64(2**53 + 1)),
             "large_signed": xr.DataArray(np.int64(2**53 + 1)),
         },
-        coords={"contig": base.contig, "contig_length": base.contig_length},
+        coords={"contig_id": base.contig_id, "contig_length": base.contig_length},
         attrs=root_attrs(),
     )
     decoded = missing.copy(deep=True)
@@ -181,19 +182,17 @@ def generate(destination):
         manifest["invalid"].append({"path": str(path.relative_to(destination)), "rule": rule})
 
     metadata_mutations = [
-        ("missing-reference", "R2", "", lambda m: m["attributes"].pop("pbz:reference")),
-        ("same-reference-pointer", "R2", "", lambda m: m["attributes"]["pbz:reference"].update(lengths="contig")),
-        ("dangling-reference-pointer", "R2", "", lambda m: m["attributes"]["pbz:reference"].update(names="absent")),
-        ("lengths-as-track", "R3", "", lambda m: m["attributes"].pop("coordinates")),
+        ("reference-wrong-dimension", "R4", "contig_id", lambda m: m.update(dimension_names=["sequence"])),
         ("short-position", "G2/D2", "depth", lambda m: m.update(shape=[11, 3])),
         ("unnamed-axis", "D1", "depth", lambda m: m.update(dimension_names=["position", None])),
         ("global-binning", "G2", "coverage", lambda m: m.update(shape=[3, 3])),
     ]
     for name, rule, array, change in metadata_mutations:
         invalid_copy(name, rule, lambda path: edit_metadata(path, array, change))
+    invalid_copy("missing-reference", "R2", lambda path: shutil.rmtree(path / "contig_id"))
 
     for name, rule, array, values in [
-        ("duplicate-contigs", "R4", "contig", ["chr1", "chr1"]),
+        ("duplicate-contigs", "R4", "contig_id", ["chr1", "chr1"]),
         ("negative-length", "R6", "contig_length", [5, -7]),
         ("duplicate-samples", "D3", "sample", ["sample_1", "sample_1", "sample_3"]),
     ]:

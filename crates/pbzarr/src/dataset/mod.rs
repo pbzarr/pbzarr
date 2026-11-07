@@ -18,6 +18,15 @@ use zarrs::storage::ReadableWritableListableStorage;
 /// The `pbz:version` value written to, and required of, a root-Dataset store.
 pub const FORMAT_VERSION: &str = "0.5";
 
+/// The dimension of the reference arrays.
+pub const CONTIG_DIM: &str = "contig";
+pub const CONTIG_ID: &str = "contig_id";
+pub const CONTIG_LENGTH: &str = "contig_length";
+pub const CONTIG_MD5: &str = "contig_md5";
+/// Root arrays that are coordinates by name. Offsets come from a prefix sum
+/// of `contig_length`.
+pub const REFERENCE_ARRAYS: [&str; 3] = [CONTIG_ID, CONTIG_LENGTH, CONTIG_MD5];
+
 /// A metadata catalog of the direct arrays in a root Xarray Dataset.
 ///
 /// Opening reads metadata only. Catalog entries do not guarantee that a

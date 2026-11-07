@@ -12,6 +12,8 @@ import zarr
 import pbzarr
 from pbzarr import PbzError, RegionQuery
 
+from _helpers import write_pbz_store
+
 LENGTH = 10_000
 
 
@@ -59,10 +61,25 @@ def test_reference_maps_binned_rows_and_intervals() -> None:
         reference.rows("chr1:5-11")
 
 
+def test_store_without_coordinates_attribute_opens_by_name(tmp_path: Path) -> None:
+    path = tmp_path / "plain.pbz"
+    values = np.arange(12, dtype=np.int16).reshape(6, 2)
+    write_pbz_store(
+        path, {"chr1": 4, "chr2": 2}, "depth", values, dims=("position", "sample"),
+        chunks=(3, 2), labels={"sample": ["a", "b"]}, coordinates_attr=False,
+    )
+    assert "coordinates" not in zarr.open_group(path, mode="r").attrs
+    with pbzarr.open(path, chunks=None) as ds:
+        assert dict(ds.reference) == {"chr1": 4, "chr2": 2}
+        assert list(ds.tracks) == ["depth"]
+        assert {"contig_id", "contig_length", "sample"} <= set(ds.coords)
+        np.testing.assert_array_equal(ds["depth"].values, values)
+
+
 def test_tracks_filter_keeps_the_reference(cohort: Path) -> None:
     with pbzarr.open(cohort, tracks=["depth"]) as ds:
         assert list(ds.tracks) == ["depth"]
-        assert {"contig", "contig_length", "sample"} <= set(ds.coords)
+        assert {"contig_id", "contig_length", "sample"} <= set(ds.coords)
 
 
 def test_reduce_regions_matches_hand_values(cohort: Path) -> None:

@@ -8,11 +8,10 @@ use zarrs::storage::storage_adapter::usage_log::UsageLogStorageAdapter;
 use zarrs::storage::store::MemoryStore;
 use zarrs::storage::{ReadableWritableListableStorage, StoreKey};
 
-fn root(names: &str, lengths: &str) -> Value {
+fn root() -> Value {
     json!({"zarr_format":3,"node_type":"group","attributes":{
         "zarr_conventions":[{"uuid":pbzarr::PBZ_CONVENTION_UUID,"name":pbzarr::PBZ_CONVENTION_NAME}],
-        "pbz:version":FORMAT_VERSION,"pbz:reference":{"names":names,"lengths":lengths},
-        "coordinates":lengths}})
+        "pbz:version":FORMAT_VERSION,"coordinates":"contig_id contig_length"}})
 }
 fn metadata(shape: &[u64], dims: &[&str], dtype: &str) -> Value {
     let chunk: Vec<u64> = shape.iter().map(|&n| n.max(1)).collect();
@@ -33,23 +32,23 @@ fn put(storage: &ReadableWritableListableStorage, key: &str, value: Value) {
         .unwrap();
 }
 type Trace = Arc<Mutex<Vec<u8>>>;
-fn catalog_fixture(names: &str, lengths: &str) -> (ReadableWritableListableStorage, Trace) {
+fn catalog_fixture() -> (ReadableWritableListableStorage, Trace) {
     let log = Arc::new(Mutex::new(Vec::<u8>::new()));
     let storage: ReadableWritableListableStorage = Arc::new(UsageLogStorageAdapter::new(
         Arc::new(MemoryStore::new()),
         log.clone(),
         String::new,
     ));
-    put(&storage, "zarr.json", root(names, lengths));
+    put(&storage, "zarr.json", root());
     put(
         &storage,
-        &format!("{names}/zarr.json"),
-        metadata(&[2], &[names], "string"),
+        "contig_id/zarr.json",
+        metadata(&[2], &["contig"], "string"),
     );
     put(
         &storage,
-        &format!("{lengths}/zarr.json"),
-        metadata(&[2], &[names], "int64"),
+        "contig_length/zarr.json",
+        metadata(&[2], &["contig"], "int64"),
     );
     put(
         &storage,
@@ -65,21 +64,35 @@ fn catalog_fixture(names: &str, lengths: &str) -> (ReadableWritableListableStora
     (storage, log)
 }
 #[test]
-fn catalogs_native_coordinates_without_payload_reads() {
-    for (names, lengths) in [("contig", "contig_length"), ("sequence", "sequence_length")] {
-        let (storage, log) = catalog_fixture(names, lengths);
+fn classifies_by_name_without_the_coordinates_attribute_or_payload_reads() {
+    for declared in [true, false] {
+        let (storage, log) = fixture();
+        if !declared {
+            let mut m = root();
+            m["attributes"]
+                .as_object_mut()
+                .unwrap()
+                .remove("coordinates");
+            put(&storage, "zarr.json", m);
+            log.lock().unwrap().clear();
+        }
         let ds = Dataset::open_with_storage(storage).unwrap();
         assert_eq!(ds.variables()["depth"].role, Role::Measurement);
-        assert_eq!(ds.variables()[names].role, Role::Coordinate);
-        assert_eq!(ds.variables()[lengths].role, Role::Coordinate);
+        assert!(ds.variables()["depth"].is_track());
+        assert_eq!(ds.variables()["contig_id"].role, Role::Coordinate);
+        assert_eq!(ds.variables()["contig_length"].role, Role::Coordinate);
+        assert_eq!(ds.variables()["sample"].role, Role::Coordinate);
+        assert!(!ds.variables()["sample"].is_track());
         assert_eq!(ds.variables()["depth"].dims, ["position", "sample"]);
         let trace = String::from_utf8(log.lock().unwrap().clone()).unwrap();
         assert!(!trace.contains("/c/"), "{trace}");
+        assert_eq!(ds.validate().unwrap().status, ValidationStatus::Valid);
+        assert_eq!(ds.reference().unwrap().contigs()[1].name, "chr2");
     }
 }
 #[test]
-fn catalogs_unsupported_neighbors_scalars_auxiliary_coordinates_and_skips_groups() {
-    let (storage, log) = catalog_fixture("contig", "contig_length");
+fn catalogs_unsupported_neighbors_scalars_and_skips_groups() {
+    let (storage, log) = catalog_fixture();
     let mut unknown = metadata(&[12], &["position"], "uint16");
     unknown["codecs"] = json!([{"name":"unavailable-codec"}]);
     put(&storage, "unsupported/zarr.json", unknown);
@@ -106,7 +119,7 @@ fn catalogs_unsupported_neighbors_scalars_auxiliary_coordinates_and_skips_groups
     );
     log.lock().unwrap().clear();
     let ds = Dataset::open_with_storage(storage).unwrap();
-    assert_eq!(ds.variables()["quality"].role, Role::Coordinate);
+    assert_eq!(ds.variables()["quality"].role, Role::Measurement);
     assert!(ds.variables()["total"].dims.is_empty());
     assert!(!ds.variables().contains_key("extension"));
     assert!(!ds.variables().contains_key("hidden"));
@@ -120,22 +133,22 @@ fn catalogs_unsupported_neighbors_scalars_auxiliary_coordinates_and_skips_groups
 }
 #[test]
 fn unsupported_version_is_distinct_from_bad_identity() {
-    let (storage, _) = catalog_fixture("contig", "contig_length");
-    let mut value = root("contig", "contig_length");
+    let (storage, _) = catalog_fixture();
+    let mut value = root();
     value["attributes"]["pbz:version"] = json!("future");
     put(&storage, "zarr.json", value);
     assert!(matches!(
         Dataset::open_with_storage(storage.clone()),
         Err(PbzError::UnsupportedFormat(_))
     ));
-    let mut value = root("contig", "contig_length");
+    let mut value = root();
     value["attributes"]["zarr_conventions"] = json!([]);
     put(&storage, "zarr.json", value);
     assert!(matches!(
         Dataset::open_with_storage(storage.clone()),
         Err(PbzError::Metadata(_))
     ));
-    let mut value = root("contig", "contig_length");
+    let mut value = root();
     value["attributes"]["zarr_conventions"] = json!([{
         "uuid": pbzarr::PERBASE_CONVENTION_UUID,
         "name": pbzarr::PERBASE_CONVENTION_NAME,
@@ -157,8 +170,8 @@ fn values<T: Element>(storage: &ReadableWritableListableStorage, name: &str, dat
         .unwrap();
 }
 fn fixture() -> (ReadableWritableListableStorage, Trace) {
-    let (s, log) = catalog_fixture("contig", "contig_length");
-    values(&s, "contig", &["chr1".to_owned(), "chr2".to_owned()]);
+    let (s, log) = catalog_fixture();
+    values(&s, "contig_id", &["chr1".to_owned(), "chr2".to_owned()]);
     values(&s, "contig_length", &[5_i64, 7]);
     values(
         &s,
@@ -191,19 +204,16 @@ fn validates_reference_and_coordinates_without_reading_measurements() {
 #[test]
 fn validates_metadata_rules() {
     let cases: Vec<(&str, &str, Value)> = vec![
-        ("R2", "zarr.json", {
-            let mut m = root("contig", "contig");
-            m["attributes"]["coordinates"] = json!("contig_length");
-            m
-        }),
-        ("R3", "zarr.json", {
-            let mut m = root("contig", "contig_length");
-            m["attributes"]
-                .as_object_mut()
-                .unwrap()
-                .remove("coordinates");
-            m
-        }),
+        (
+            "R2",
+            "contig_id/zarr.json",
+            json!({"zarr_format":3,"node_type":"group","attributes":{}}),
+        ),
+        (
+            "R4",
+            "contig_id/zarr.json",
+            metadata(&[2], &["sequence"], "string"),
+        ),
         (
             "R5",
             "contig_length/zarr.json",
@@ -269,7 +279,7 @@ fn validates_metadata_rules() {
 #[test]
 fn rejects_bad_reference_values_and_missing_dimension_labels() {
     let (s, _) = fixture();
-    values(&s, "contig", &["chr1".to_owned(), "chr1".to_owned()]);
+    values(&s, "contig_id", &["chr1".to_owned(), "chr1".to_owned()]);
     has_rule(s, "R4");
     let (s, _) = fixture();
     values(&s, "contig_length", &[5_i64, -1]);
@@ -304,9 +314,6 @@ fn numeric_labels_stay_exact_and_auxiliary_labels_may_repeat() {
         "sample",
         &[1_u64 << 53, (1_u64 << 53) + 1, (1_u64 << 53) + 2],
     );
-    let mut m = root("contig", "contig_length");
-    m["attributes"]["coordinates"] = json!("contig_length population");
-    put(&s, "zarr.json", m);
     put(
         &s,
         "population/zarr.json",
@@ -380,7 +387,7 @@ fn reference_order_is_preserved_and_unused_missing_sentinels_are_valid() {
     put(&s, "contig_length/zarr.json", m);
     let ds = Dataset::open_with_storage(s.clone()).unwrap();
     assert_eq!(ds.reference().unwrap().contigs()[0].name, "chr1");
-    values(&s, "contig", &["chr2".to_owned(), "chr1".to_owned()]);
+    values(&s, "contig_id", &["chr2".to_owned(), "chr1".to_owned()]);
     let other = Dataset::open_with_storage(s).unwrap();
     assert_eq!(other.reference().unwrap().contigs()[0].name, "chr2");
     assert_eq!(other.validate().unwrap().status, ValidationStatus::Valid);
@@ -389,7 +396,7 @@ fn reference_order_is_preserved_and_unused_missing_sentinels_are_valid() {
 #[test]
 fn convention_identity_uses_uuid_and_rejects_duplicate_markers() {
     let (s, _) = fixture();
-    let mut m = root("contig", "contig_length");
+    let mut m = root();
     m["attributes"]["zarr_conventions"][0]
         .as_object_mut()
         .unwrap()
@@ -661,16 +668,16 @@ fn infinite_labels_keep_identity_but_nan_and_declared_infinity_are_missing() {
 }
 #[test]
 fn mandatory_extensions_block_interpretation_without_blocking_neighbors() {
-    for name in ["depth", "contig", ""] {
+    for name in ["depth", "contig_id", ""] {
         let (s, log) = read_fixture();
         let (key, mut m) = match name {
-            "" => ("zarr.json".to_owned(), root("contig", "contig_length")),
+            "" => ("zarr.json".to_owned(), root()),
             "depth" => (
                 "depth/zarr.json".into(),
                 metadata(&[12, 3], &["position", "sample"], "uint16"),
             ),
             _ => (
-                "contig/zarr.json".into(),
+                "contig_id/zarr.json".into(),
                 metadata(&[2], &["contig"], "string"),
             ),
         };

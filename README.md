@@ -157,15 +157,16 @@ A `.pbz` store is one Zarr v3 group. Tracks and coordinates are arrays directly 
 
 ```text
 cohort.pbz/
-├── zarr.json        root attributes: pbz:version, pbz:reference
-├── contig           contig names
-├── contig_length    contig lengths
+├── zarr.json        root attributes: zarr_conventions, pbz:version
+├── contig_id        contig names     (contig)
+├── contig_length    contig lengths   (contig)
 ├── sample           column labels
 ├── depth            (position, sample)
 └── over_10          (position,)
 ```
 
-- The root attribute `pbz:reference` names the two reference arrays. Their order defines the genome: the `position` dimension is all contigs concatenated in that order.
+- The reference is the two root arrays `contig_id` and `contig_length`, over the dimension `contig`. The names are fixed. Their order defines the genome: the `position` dimension is all contigs concatenated in that order. An optional `contig_md5` array can hold a checksum for each contig.
+- Readers find arrays by name and dimension names. A track is an array whose first dimension is `position` or `bin_N`. The `coordinates` attribute that pbzarr writes is only for xarray; a store without it opens the same way.
 - Offsets are not stored. The first row of contig `i` is the sum of the lengths before it, so the rows for `chr2:10-20` are that sum plus 10 up to that sum plus 20. All coordinates are zero-based and half-open.
 - A column axis such as `sample` has a label array of the same name. Tracks that share it share its labels.
 - Binned tracks use a `bin_N` dimension. Bins restart at each contig, so a contig's last bin can be short.

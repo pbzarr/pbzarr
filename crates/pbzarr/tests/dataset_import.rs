@@ -25,7 +25,18 @@ fn creates_shared_reference() {
     let ds = Dataset::create_with_storage(storage.clone(), reference()).unwrap();
     assert_eq!(ds.reference().unwrap().contigs(), reference().contigs());
     assert_eq!(ds.variables()["contig_length"].role, Role::Coordinate);
+    assert_eq!(ds.variables()["contig_id"].dims, ["contig"]);
+    assert!(!ds.variables().contains_key("contig"));
     assert_eq!(ds.validate().unwrap().status, ValidationStatus::Valid);
+    let root: serde_json::Value = serde_json::from_slice(
+        &storage
+            .get(&StoreKey::new("zarr.json").unwrap())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(root["attributes"].get("pbz:reference").is_none());
+    assert_eq!(root["attributes"]["coordinates"], "contig_id contig_length");
     let reopened = Dataset::open_with_storage(storage).unwrap();
     assert_eq!(
         reopened

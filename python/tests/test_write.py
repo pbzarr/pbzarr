@@ -68,7 +68,9 @@ def test_import_d4_cohort_opens_as_one_xarray_dataset(tmp_path, cohort_fixtures)
         assert dataset["depth"].dims == ("position", "sample")
         assert dataset["depth"].sizes["position"] == 10000
         assert dataset["sample"].values.tolist() == ["s0", "s1"]
-        np.testing.assert_array_equal(dataset["contig"].values, ["chr1"])
+        assert "pbz:reference" not in dataset.attrs
+        assert dataset["contig_id"].dims == ("contig",)
+        np.testing.assert_array_equal(dataset["contig_id"].values, ["chr1"])
         np.testing.assert_array_equal(dataset["contig_length"].values, [10000])
         expected = np.repeat((np.arange(1000) % 50) + 1, 10)
         np.testing.assert_array_equal(dataset["depth"].values[:, 0], expected)

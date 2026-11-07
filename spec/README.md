@@ -1,6 +1,6 @@
 # PBZ format specification
 
-Status: draft, updated 2026-10-22. This directory is the home of the PBZ
+Status: draft, updated 2026-11-06. This directory is the home of the PBZ
 specification. It describes format `0.5`, which imports write and the Python
 `pbzarr.Dataset` handle reads. The rules can still change before the 1.0
 release candidate; `0.5` is not a published, stable format version. Format
@@ -19,25 +19,29 @@ Milestone B's [writing contract](../docs/proposals/format-05/WRITING.md) records
 ## Model
 
 A PBZ store is a Zarr v3 root group that opens as one ordinary Xarray Dataset.
-Root data variables are tracks. Root coordinate arrays provide reference
-sequences, dimension labels, and annotations. A track may have a genomic
-dimension, or be a non-genomic result such as a sample-level mean or scalar.
+The reference is a set of root arrays with fixed names. A track is a root array
+whose first dimension is `position` or `bin_N`. Other root arrays are dimension
+labels or non-genomic results, such as a sample-level mean or a scalar.
 
-The core adds three root attributes:
+The core adds two root attributes:
 
 | Attribute | Purpose |
 | --- | --- |
 | zarr_conventions | Identify the PBZ convention using its UUID. |
 | pbz:version | Identify this encoding independently of package versions. |
-| pbz:reference | Point to root arrays containing ordered sequence names and lengths. |
 
 No PBZ attributes are required on individual tracks. Native Zarr metadata owns
-shape, dimension names, dtype, fill, chunks, and codecs. Native Xarray coordinate
-encoding distinguishes coordinates from data variables. Descriptions, units,
-notes, and user-defined JSON attributes are optional.
+shape, dimension names, dtype, fill, chunks, and codecs. Readers classify arrays
+by name and dimension names only. Descriptions, units, notes, and user-defined
+JSON attributes are optional.
 
-Pyramids, multiscales, automatic operation capture, provenance graphs, reference
-sequence checksums, and transactional storage are outside this proposal.
+The Xarray `coordinates` attribute has no PBZ meaning. Writers MAY emit it, so
+that Xarray shows the reference arrays as coordinates. Readers MUST NOT depend
+on it. A store without the attribute is the same PBZ store.
+
+Pyramids, multiscales, automatic operation capture, provenance graphs, and
+transactional storage are outside this proposal. The optional `contig_md5`
+array is the only checksum this draft defines.
 Sample/column grouping uses ordinary Xarray coordinates and operations; its
 workflows belong in API documentation and tutorials, not the core schema.
 
@@ -45,7 +49,7 @@ workflows belong in API documentation and tutorials, not the core schema.
 
     example.pbz/
       zarr.json
-      contig                 (contig)                       ["chr1", "chr2"]
+      contig_id              (contig)                       ["chr1", "chr2"]
       contig_length          (contig)                       [1500, 2200]
       sample                 (sample)                       ["sample_1", "sample_2", "sample_3"]
       threshold              (threshold)                    [5, 10]
@@ -57,9 +61,10 @@ workflows belong in API documentation and tutorials, not the core schema.
       mean_depth             (sample)                       shape [3]
       total_callable_count   ()                             scalar
 
-Each entry other than zarr.json is an ordinary Zarr array. Array names shown
-here are examples. Reference pointers allow other reference-array names.
-The genomic dimension names are the reserved names described below.
+Each entry other than zarr.json is an ordinary Zarr array. The names
+`contig_id` and `contig_length` and the dimension `contig` are fixed. The other
+array names are examples. The genomic dimension names are the reserved names
+described below.
 
 Both bin widths are independent user choices. Neither binned track needs a
 base-resolution source, an aggregation declaration, or a relation to another track.
@@ -69,25 +74,28 @@ threshold. Summing it over sample produces callable_count. These names and
 calculations illustrate ordinary tracks; the schema does not prescribe them.
 
 [example-root.zarr.json](example-root.zarr.json) contains the example root
-metadata. Its ordinary coordinates attribute is Xarray's encoding for an
-auxiliary reference coordinate, not a PBZ field. Python writers should put arrays
-in Dataset.coords and let Xarray generate coordinate metadata. Rust writers must
-emit an equivalent encoding.
+metadata. Its `coordinates` attribute is Xarray's encoding for the reference
+arrays, not a PBZ field. Python writers can put the reference arrays in
+Dataset.coords and let Xarray write that attribute. The Rust writer emits the
+same attribute.
 
 ## Reference
 
-The reference object contains names and lengths, each a path to a direct root
-array. They must point to distinct arrays.
+The reference is the ordered list of contig names and lengths. It lives in
+direct root arrays with fixed names over the dimension `contig`.
 
-1. The names array is a one-dimensional dimension coordinate: its sole dimension
-   has the same name as the array.
-2. Names are unique, nonempty strings. Missing names are invalid.
-3. The lengths array is an auxiliary coordinate on that same dimension, with
-   one nonnegative integer length per name. Boolean and floating dtypes are not
-   integer length encodings.
-4. Their order defines concatenation order. Readers derive offsets by prefix sum.
-5. Reference arrays are coordinates, not measurement tracks, after normal
-   Xarray decoding.
+1. `contig_id` MUST exist, with the single dimension `contig` and a string
+   dtype. Names are unique, nonempty strings. Missing names are invalid.
+2. `contig_length` MUST exist, with the single dimension `contig` and an
+   integer dtype. It has one nonnegative length per name. Boolean and floating
+   dtypes are not integer length encodings.
+3. `contig_md5` is optional. If it exists, it has the single dimension `contig`
+   and a string dtype.
+4. Index `i` in every reference array refers to the same contig. The order is
+   the concatenation order. Readers derive offsets by prefix sum over
+   `contig_length`.
+5. The reference arrays are coordinates by name, not tracks. The dimension
+   `contig` has no array named `contig`; `contig_id` holds its labels.
 
 This draft permits zero-length contigs and an empty reference. Lengths and the
 total reference extent must fit signed 64-bit indexing. Integer storage and
@@ -129,21 +137,24 @@ has a single authority.
 A genomic data variable has exactly one genomic dimension, and it is first.
 Any number of labeled non-genomic dimensions may follow. Non-genomic results
 and scalars are valid data variables without this first-axis requirement.
-Auxiliary coordinates that vary over genomic positions follow the same geometry.
+Every array with a genomic dimension follows the same geometry, so it is a track.
 
 Different bin_N dimensions need not divide one another. The spelling bin_1 is
 allowed under the positive-width rule; it describes the same locations as
 position but remains a different named dimension to Xarray. Writers must not
 silently equate or rename those dimensions.
 
-## Dimension labels and auxiliary coordinates
+## Dimension labels and other root arrays
 
-Every non-genomic dimension has a one-dimensional coordinate array with the same
-name, matching length, and unique, nonmissing labels. Labels can be strings or
-numbers; they are not restricted to sample identifiers.
+Every non-genomic dimension other than `contig` has a one-dimensional
+coordinate array with the same name, matching length, and unique, nonmissing
+labels. Labels can be strings or numbers; they are not restricted to sample
+identifiers. The labels of `contig` are in `contig_id`.
 
-Other auxiliary coordinates follow ordinary Xarray encoding and may contain
-repeated values. PBZ assigns no application-specific meaning to them.
+Other root arrays without a genomic dimension, such as a
+`sample_group(sample)` array, may contain repeated values. PBZ assigns no
+application-specific meaning to them. A writer MAY declare them as Xarray
+coordinates; PBZ readers treat them the same either way.
 
 Tracks and coordinates share one root namespace. Measurement names must not
 collide with coordinate or dimension names.
@@ -189,7 +200,7 @@ The proposed wrappers and accessors use the same stored Dataset:
 
 | Workflow | Information already available |
 | --- | --- |
-| Open and list tracks | Convention marker, reference pointers, native coordinate/data-variable encoding. |
+| Open and list tracks | Convention marker, the reference arrays by name, and the first dimension of each array. |
 | Select a region | Ordered lengths plus position/bin_N; retained view-to-source mapping. |
 | Select samples or thresholds | Ordinary dimension coordinates. |
 | Compute | Native array operations; no expression schema is required. |
@@ -261,9 +272,9 @@ format.
 No schema URL is invented; a versioned schema/spec URL should be added when
 published. Names in zarr_conventions are descriptive, not the identity check.
 
-A store validator must additionally resolve the arrays and check the reference,
-coordinate classification, shared dimensions, uniqueness, genomic extents, and
-axis ordering above. JSON Schema alone cannot validate array contents or perform
+A store validator must additionally find the reference arrays by name and
+check the reference, shared dimensions, uniqueness, genomic extents, and axis
+ordering above. JSON Schema alone cannot validate array contents or perform
 the required cross-array arithmetic.
 
 ## References

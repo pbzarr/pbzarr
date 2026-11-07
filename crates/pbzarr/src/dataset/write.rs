@@ -1,5 +1,5 @@
 //! Minimal creation and import support for the root Dataset convention.
-use super::{Dataset, FORMAT_VERSION, Reference};
+use super::{CONTIG_DIM, CONTIG_ID, CONTIG_LENGTH, Dataset, FORMAT_VERSION, Reference};
 use crate::{PbzError, Result};
 use std::{path::Path, sync::Arc};
 use zarrs::{
@@ -51,12 +51,12 @@ impl Dataset {
         }
         let n = reference.contigs().len() as u64;
         let names = ArrayBuilder::new(vec![n], vec![n.max(1)], data_type::string(), "")
-            .dimension_names(["contig"].into())
-            .build(storage.clone(), "/contig")
+            .dimension_names([CONTIG_DIM].into())
+            .build(storage.clone(), &format!("/{CONTIG_ID}"))
             .map_err(storage_error)?;
         let lengths = ArrayBuilder::new(vec![n], vec![n.max(1)], data_type::int64(), 0_i64)
-            .dimension_names(["contig"].into())
-            .build(storage.clone(), "/contig_length")
+            .dimension_names([CONTIG_DIM].into())
+            .build(storage.clone(), &format!("/{CONTIG_LENGTH}"))
             .map_err(storage_error)?;
         if n > 0 {
             let values: Vec<String> = reference.contigs().iter().map(|c| c.name.clone()).collect();
@@ -85,8 +85,7 @@ impl Dataset {
                         "name":crate::PBZ_CONVENTION_NAME,
                     }],
                     "pbz:version":FORMAT_VERSION,
-                    "pbz:reference":{"names":"contig","lengths":"contig_length"},
-                    "coordinates":"contig_length"
+                    "coordinates":format!("{CONTIG_ID} {CONTIG_LENGTH}")
                 }),
             )
             .expect("literal attribute object"),
@@ -151,17 +150,10 @@ impl Dataset {
                     "import: destination {name:?} is occupied or conflicts with a dimension"
                 )));
             }
-            for attrs in std::iter::once(&self.root["attributes"])
-                .chain(self.variables.values().map(|v| v.attrs()))
-            {
-                if attrs["coordinates"]
-                    .as_str()
-                    .is_some_and(|s| s.split_whitespace().any(|v| v == name))
-                {
-                    return Err(PbzError::Metadata(format!(
-                        "import: {name:?} is declared as a coordinate"
-                    )));
-                }
+            if super::REFERENCE_ARRAYS.contains(&name.as_str()) {
+                return Err(PbzError::Metadata(format!(
+                    "import: {name:?} is reserved for the reference"
+                )));
             }
         }
         let mut shared_labels: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -504,9 +496,9 @@ impl Dataset {
         let info = self.variables.get(name).ok_or_else(|| {
             PbzError::Metadata(format!("append: {name:?} is not a variable of this store"))
         })?;
-        if info.role == Role::Coordinate {
+        if !info.is_track() {
             return Err(PbzError::Metadata(format!(
-                "append: {name:?} is a coordinate, not a track"
+                "append: {name:?} is not a track: its first dimension is not position or bin_N"
             )));
         }
         if let Support::Unsupported { reason } = &info.logical_support {
