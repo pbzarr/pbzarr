@@ -10,7 +10,8 @@ import xarray as xr
 import zarr
 
 import pbzarr
-from pbzarr import PbzError, RegionQuery
+from pbzarr import PbzError, Reference, RegionQuery
+from pbzarr._coord import NAME, ReferenceIndex, attach, same_reference
 
 from _helpers import write_pbz_store
 
@@ -175,3 +176,67 @@ def test_failed_write_leaves_no_track(cohort: Path) -> None:
     assert "bad" not in zarr.open_group(cohort, mode="r")
     with pbzarr.open(cohort) as ds:
         assert "bad" not in ds
+
+
+def test_opened_arrays_carry_the_reference_coordinate(cohort: Path) -> None:
+    with pbzarr.open(cohort) as ds:
+        for obj in (ds["depth"], ds.tracks["depth"], ds.to_xarray()):
+            assert isinstance(obj.xindexes[NAME], ReferenceIndex)
+            assert same_reference(Reference.from_xarray(obj), ds.reference)
+
+
+def test_write_checks_the_reference_and_drops_it(cohort: Path) -> None:
+    other = Reference(["chrX"], [LENGTH])
+    with pbzarr.open(cohort, mode="r+") as ds:
+        first = ds["depth"].isel(sample=0)
+        ds.write({"indexed": first, "plain": first.drop_indexes(NAME)})
+        foreign = attach(first.drop_vars(NAME), other)
+        with pytest.raises(xr.AlignmentError, match="another reference"):
+            ds.write({"foreign": foreign})
+        with pytest.raises(xr.AlignmentError, match="another reference"):
+            ds.write({"foreign": foreign.drop_indexes(NAME)})
+    group = zarr.open_group(cohort, mode="r")
+    assert {"indexed", "plain"} <= set(group.array_keys())
+    assert NAME not in group
+
+
+def test_string_metadata_variable_round_trips(cohort: Path) -> None:
+    status = xr.DataArray(
+        np.array(["case", "control"]), dims=("sample",), coords={"sample": ["s0", "s1"]}
+    )
+    with pbzarr.open(cohort, mode="r+") as ds:
+        ds.write({"status": status})
+    with pbzarr.open(cohort, chunks=None) as ds:
+        assert ds["status"].values.tolist() == ["case", "control"]
+
+
+def test_write_saves_a_non_dimension_coordinate(cohort: Path) -> None:
+    with pbzarr.open(cohort, mode="r+") as ds:
+        mean = ds["depth"].astype("float32").mean("position")
+        ds.write({"mean_depth": mean.assign_coords(sample_group=("sample", ["g1", "g2"]))})
+    stored = zarr.open_group(cohort, mode="r")["sample_group"]
+    assert stored.metadata.dimension_names == ("sample",)
+    assert stored[:].tolist() == ["g1", "g2"]
+
+
+def test_write_refuses_misplaced_coordinates(cohort: Path) -> None:
+    with pbzarr.open(cohort, mode="r+") as ds:
+        pos = ds["depth"].isel(sample=0).assign_coords(pos=("position", np.arange(LENGTH)))
+        with pytest.raises(ValueError, match="'pos' lies on a genomic dimension"):
+            ds.write({"with_pos": pos})
+        wrong = xr.DataArray(
+            np.zeros((2, 3)),
+            dims=("sample", "cohort"),
+            coords={"sample": ["s0", "s1"], "cohort": ("sample", ["a", "b"])},
+        )
+        with pytest.raises(ValueError, match="label coordinate 'cohort' lies on"):
+            ds.write({"wrong": wrong})
+
+
+def test_write_compares_a_0d_coordinate_with_a_0d_store_array(cohort: Path) -> None:
+    with pbzarr.open(cohort, mode="r+") as ds:
+        depth = ds["depth"].astype("float64")
+        ds.write({"q50": depth.quantile(0.5, "position")})
+        ds.write({"q50_again": depth.quantile(0.5, "position")})
+        with pytest.raises(ValueError, match="'quantile' differs from the store array"):
+            ds.write({"q90": depth.quantile(0.9, "position")})

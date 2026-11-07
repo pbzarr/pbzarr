@@ -10,9 +10,10 @@ import os
 
 import numpy as np
 import xarray as xr
+from xarray import AlignmentError
 import zarr
 
-from . import _native
+from . import _coord, _native
 from ._native import PbzError
 from ._reference import Reference, bin_width
 from ._regions import _PBZ_SOURCE_ATTR, reduce_regions_dataset, regions_dataset
@@ -155,13 +156,13 @@ class Dataset:
         for name, value in tracks.items():
             variable, new_coords = self._check_track(name, value)
             variables[name] = variable
-            for dim, (_, labels) in new_coords.items():
-                if dim in coords and not np.array_equal(coords[dim][1], labels):
-                    raise ValueError(f"tracks give different labels for new dimension {dim!r}")
+            for coord_name, coord in new_coords.items():
+                if coord_name in coords and not coords[coord_name].equals(coord):
+                    raise ValueError(f"tracks give different values for coordinate {coord_name!r}")
             coords.update(new_coords)
         for name in variables:
             if name in coords:
-                raise ValueError(f"{name!r} is both a track and a new dimension")
+                raise ValueError(f"{name!r} is both a track and a coordinate")
         unknown = set(encoding) - set(variables)
         if unknown:
             raise ValueError(f"encoding names tracks not being written: {sorted(unknown)}")
@@ -194,20 +195,23 @@ class Dataset:
             if name not in self._catalog and name in group:
                 del group[name]
 
-    def _check_track(self, name, value) -> tuple[xr.Variable, dict]:
+    def _check_track(self, name, value) -> tuple[xr.Variable, dict[str, xr.Variable]]:
         if not isinstance(name, str) or not name or "/" in name:
             raise ValueError(f"track name must be a nonempty string without '/': {name!r}")
         if bin_width(name) is not None:
             raise ValueError(f"{name!r} is a genomic dimension name and cannot name a track")
+        if name == _coord.NAME:
+            raise ValueError(f"{name!r} is the in-memory reference coordinate, not a track name")
         stored_dims = {dim for entry in self._catalog.values() for dim in entry.dims}
         if name in self._catalog or name in stored_dims:
             raise ValueError(f"{name!r} already exists in the store")
         if not isinstance(value, xr.DataArray):
             raise TypeError(f"track {name!r} must be an xarray DataArray")
-        if np.dtype(value.dtype).name not in _SUPPORTED_DTYPES:
-            raise TypeError(f"track {name!r} has unsupported dtype {value.dtype}")
+        value = self._drop_reference(name, value)
 
         for axis, dim in enumerate(value.dims):
+            if dim == _coord.NAME:
+                raise ValueError(f"track {name!r}: {dim!r} cannot name a dimension")
             if bin_width(dim) is None:
                 continue
             if dim in self._catalog:
@@ -220,10 +224,19 @@ class Dataset:
                     f"{name!r} has {value.sizes[dim]} rows on {dim!r}; "
                     f"the reference has {expected}"
                 )
+        genomic = bool(value.ndim) and bin_width(value.dims[0]) is not None
+        data = _checked_data(f"track {name!r}", value, strings=not genomic)
 
         new_coords = {}
-        for dim in value.dims[1:] if value.ndim and bin_width(value.dims[0]) else value.dims:
-            labels = value.coords[dim].values if dim in value.coords else None
+        for dim in value.dims[1:] if genomic else value.dims:
+            labels = None
+            if dim in value.coords:
+                if value.coords[dim].dims != (dim,):
+                    raise ValueError(
+                        f"track {name!r}: the label coordinate {dim!r} lies on "
+                        f"{value.coords[dim].dims}; it must lie on ({dim!r},)"
+                    )
+                labels = value.coords[dim].values
             stored = self._catalog.get(dim)
             if stored is not None:
                 if value.sizes[dim] != stored.shape[0]:
@@ -246,27 +259,56 @@ class Dataset:
                 raise ValueError(f"track {name!r}: {dim!r} labels must be unique")
             if labels.dtype.kind == "U":
                 labels = labels.astype(object)
-            new_coords[dim] = (dim, labels)
+            new_coords[dim] = xr.Variable((dim,), labels)
 
-        # pbz:summary and the zarrs provenance note describe the source array,
-        # and Xarray keeps attributes through arithmetic.
-        attrs = {k: v for k, v in value.attrs.items() if k not in {"pbz:summary", "_zarrs"}}
-        for key in attrs:
-            if key.startswith("pbz:") or key in {"zarr_conventions", "coordinates"}:
-                raise ValueError(f"track {name!r}: attribute {key!r} is reserved")
-            units = attrs[key] if key == "units" else None
-            if key in _DECODING_ATTRS or (
-                isinstance(units, str) and (" since " in units or units in _TIME_UNITS)
-            ):
+        for coord_name, coord in value.coords.items():
+            where = f"track {name!r}: coordinate {coord_name!r}"
+            if any(bin_width(dim) is not None for dim in coord.dims):
                 raise ValueError(
-                    f"track {name!r}: attribute {key!r} changes decoding; "
-                    "pass _FillValue through encoding= instead"
+                    f"{where} lies on a genomic dimension; the format stores no "
+                    "coordinate over position or bin_N. Drop it before write"
                 )
-        try:
-            json.dumps(attrs)
-        except TypeError as error:
-            raise TypeError(f"track {name!r}: attributes must be JSON-serializable") from error
-        return xr.Variable(value.dims, value.data, attrs=attrs), new_coords
+            if coord_name in value.dims:
+                continue
+            in_store = coord_name in self._catalog or coord_name in stored_dims
+            stored = self._catalog.get(coord_name)
+            if coord.ndim == 0 and in_store and (stored is None or stored.dims):
+                # What isel or sel leaves of a stored dimension, such as sample.
+                continue
+            if bin_width(coord_name) is not None:
+                raise ValueError(f"{where} has a genomic dimension name")
+            if in_store:
+                if (
+                    stored is None
+                    or stored.dims != coord.dims
+                    or not np.array_equal(coord.values, self._labels(coord_name))
+                ):
+                    raise ValueError(
+                        f"{where} differs from the store array of that name; "
+                        "drop it or rename it before write"
+                    )
+                continue
+            new_coords[coord_name] = xr.Variable(
+                coord.dims,
+                _checked_data(where, coord, strings=True),
+                attrs=_checked_attrs(where, coord.attrs),
+            )
+
+        attrs = _checked_attrs(f"track {name!r}", value.attrs)
+        return xr.Variable(value.dims, data, attrs=attrs), new_coords
+
+    def _drop_reference(self, name: str, value: xr.DataArray) -> xr.DataArray:
+        if _coord.NAME not in value.coords:
+            return value
+        index = value.xindexes.get(_coord.NAME)
+        if isinstance(index, _coord.ReferenceIndex):
+            same = _coord.same_reference(index.reference, self._reference)
+        else:
+            coord = value.coords[_coord.NAME]
+            same = coord.ndim == 0 and str(coord.values) == _coord.digest(self._reference)
+        if not same:
+            raise AlignmentError(f"track {name!r} uses another reference than this store")
+        return value.drop_vars(_coord.NAME)
 
     def _labels(self, dim: str) -> np.ndarray:
         if dim in self._data.coords:
@@ -327,6 +369,7 @@ def open(
         data = data.set_coords([name for name in _REFERENCE_ARRAYS if name in data.data_vars])
         reference = _reference(data)
         _check_genomic_dims(data, reference)
+        data = _coord.attach(data, reference)
         if chunks is _STORED_CHUNKS:
             data = data.assign(
                 {name: _stored_chunks(value) for name, value in data.data_vars.items()}
@@ -379,6 +422,46 @@ def create(
         contigs.append((name, int(length)))
     _native.create_store(path, contigs)
     return open(path, mode="r+")
+
+
+def _checked_data(where: str, value: xr.DataArray, *, strings: bool):
+    dtype = np.dtype(value.dtype)
+    if dtype.name in _SUPPORTED_DTYPES:
+        return value.data
+    if strings and dtype.kind in "UT":
+        return value.data.astype(object)
+    if strings and dtype.kind == "O" and all(
+        isinstance(item, str) for item in np.asarray(value.values).ravel().tolist()
+    ):
+        return value.data
+    if strings:
+        raise TypeError(f"{where} has unsupported dtype {value.dtype}; use numeric, bool, or str")
+    raise TypeError(
+        f"{where} has unsupported dtype {value.dtype}; a track is numeric or bool. "
+        "Strings are allowed only on variables with no genomic dimension"
+    )
+
+
+def _checked_attrs(where: str, attrs: Mapping) -> dict:
+    # pbz:summary and the zarrs provenance note describe the source array,
+    # and Xarray keeps attributes through arithmetic.
+    attrs = {k: v for k, v in attrs.items() if k not in {"pbz:summary", "_zarrs"}}
+    for key in attrs:
+        if key.startswith("pbz:") or key in {"zarr_conventions", "coordinates"}:
+            raise ValueError(f"{where}: attribute {key!r} is reserved")
+        units = attrs[key] if key == "units" else None
+        if key in _DECODING_ATTRS or (
+            isinstance(units, str) and (" since " in units or units in _TIME_UNITS)
+        ):
+            raise ValueError(
+                f"{where}: attribute {key!r} changes decoding; "
+                "pass _FillValue through encoding= instead"
+            )
+    try:
+        json.dumps(attrs)
+    except TypeError as error:
+        raise TypeError(f"{where}: attributes must be JSON-serializable") from error
+    return attrs
 
 
 def _options(storage_options):
