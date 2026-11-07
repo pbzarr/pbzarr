@@ -16,7 +16,8 @@ import zarr
 from . import _coord, _native
 from ._native import PbzError
 from ._reference import Reference, bin_width
-from ._regions import _PBZ_SOURCE_ATTR, reduce_regions_dataset, regions_dataset
+from ._genome import reduce_regions as _reduce_regions
+from ._regions import _PBZ_SOURCE_ATTR, regions_dataset
 
 FORMAT_VERSION = "0.5"
 _PBZ_UUID = "d5bd7bea-0388-4e0a-9844-707c034e9add"
@@ -130,9 +131,7 @@ class Dataset:
 
     def reduce_regions(self, intervals, reducer: str, /, **kwargs) -> xr.Dataset:
         """One statistic per region and track, on a ``region`` dimension."""
-        return reduce_regions_dataset(
-            _position_tracks(self._data), self._reference, intervals, reducer, **kwargs
-        )
+        return _reduce_regions(self._data, intervals, reducer, reference=self._reference, **kwargs)
 
     def write(self, tracks: Mapping[str, xr.DataArray], *, encoding=None) -> None:
         """Add new tracks to the store.
