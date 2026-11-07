@@ -1,8 +1,8 @@
-"""The PBZ store handle: one format 0.5 store, opened as one Xarray Dataset."""
+"""Open, create, and write a format 0.5 PBZ store as one Xarray Dataset."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -16,8 +16,7 @@ import zarr
 from . import _coord, _native
 from ._native import PbzError
 from ._reference import Reference, bin_width
-from ._genome import reduce_regions as _reduce_regions
-from ._regions import _PBZ_SOURCE_ATTR, regions_dataset
+from ._regions import _PBZ_SOURCE_ATTR
 
 FORMAT_VERSION = "0.5"
 _PBZ_UUID = "d5bd7bea-0388-4e0a-9844-707c034e9add"
@@ -53,156 +52,35 @@ class _Stored:
     token: str
 
 
-class Dataset:
-    """A handle on one PBZ store.
+class _Store:
+    """The metadata of one store, read when a call starts."""
 
-    The handle owns the store and its reference. Values are ordinary Xarray
-    objects: ``ds["depth"]`` is a lazy ``xr.DataArray``. Select a region with
-    ``ds["depth"].isel(position=ds.reference.rows("chr1:1000-2000"))``.
-    """
+    def __init__(self, source, *, data, root_attrs, reference, storage_options, catalog) -> None:
+        self.source = source
+        self.data = data
+        self.root_attrs = root_attrs
+        self.reference = reference
+        self.storage_options = storage_options
+        self.catalog = catalog
 
-    def __init__(self, source, *, mode, data, root_attrs, reference,
-                 storage_options, chunks, selected, catalog) -> None:
-        self._source = source
-        self._mode = mode
-        self._chunks = chunks
-        self._selected = selected
-        self._data = data
-        self._root_attrs = root_attrs
-        self._reference = reference
-        self._storage_options = storage_options
-        self._catalog = catalog
-
-    @property
-    def reference(self) -> Reference:
-        return self._reference
-
-    @property
-    def tracks(self) -> Mapping[str, xr.DataArray]:
-        return dict(self._data.data_vars)
-
-    @property
-    def coords(self) -> Mapping[str, xr.DataArray]:
-        return dict(self._data.coords)
-
-    @property
-    def sizes(self) -> Mapping[str, int]:
-        return dict(self._data.sizes)
-
-    @property
-    def attrs(self) -> Mapping[str, object]:
-        return dict(self._data.attrs)
-
-    def __getitem__(self, name: str) -> xr.DataArray:
-        if name not in self._data.data_vars:
-            raise KeyError(f"unknown track {name!r}")
-        return self._data[name]
-
-    def __contains__(self, name: object) -> bool:
-        return name in self._data.data_vars
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._data.data_vars)
-
-    def __repr__(self) -> str:
-        return f"<pbzarr.Dataset mode={self._mode!r}>\n{self._data!r}"
-
-    def to_xarray(self) -> xr.Dataset:
-        """The opened store as an ordinary Xarray Dataset."""
-        return self._data
-
-    def close(self) -> None:
-        self._data.close()
-
-    def __enter__(self) -> Dataset:
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
-
-    def regions(self, intervals) -> xr.Dataset:
-        """Raw values of several regions, packed along ``position``.
-
-        The result has a ``region`` dimension that keeps each interval's
-        contig, start and stop. Tracks without a leading ``position``
-        dimension are skipped.
-        """
-        return regions_dataset(_position_tracks(self._data), self._reference, intervals)
-
-    def reduce_regions(self, intervals, reducer: str, /, **kwargs) -> xr.Dataset:
-        """One statistic per region and track, on a ``region`` dimension."""
-        return _reduce_regions(self._data, intervals, reducer, reference=self._reference, **kwargs)
-
-    def write(self, tracks: Mapping[str, xr.DataArray], *, encoding=None) -> None:
-        """Add new tracks to the store.
-
-        Each value is a plain ``xr.DataArray``. A genomic dimension
-        (``position`` or ``bin_N``) must come first and span the reference.
-        Shared non-genomic dimensions must match the store's labels. If the
-        write fails, the arrays it created are removed; it is not atomic
-        against a crash.
-        """
-        if self._mode != "r+":
-            raise PbzError("write() needs a store opened with mode='r+'")
-        if _catalog(self._source, self._storage_options) != self._catalog:
-            raise PbzError("store changed since open; reopen it before writing")
-        if not isinstance(tracks, Mapping) or not tracks:
-            raise TypeError("tracks must be a nonempty mapping of name to DataArray")
-        encoding = dict(encoding or {})
-
-        variables = {}
-        coords = {}
-        for name, value in tracks.items():
-            variable, new_coords = self._check_track(name, value)
-            variables[name] = variable
-            for coord_name, coord in new_coords.items():
-                if coord_name in coords and not coords[coord_name].equals(coord):
-                    raise ValueError(f"tracks give different values for coordinate {coord_name!r}")
-            coords.update(new_coords)
-        for name in variables:
-            if name in coords:
-                raise ValueError(f"{name!r} is both a track and a coordinate")
-        unknown = set(encoding) - set(variables)
-        if unknown:
-            raise ValueError(f"encoding names tracks not being written: {sorted(unknown)}")
-
-        new = xr.Dataset(variables, coords=coords, attrs=self._root_attrs)
-        var_encoding = {}
-        for name in variables:
-            entry = dict(encoding.get(name, {}))
-            entry.setdefault("_FillValue", None)
-            var_encoding[name] = entry
-        try:
-            new.to_zarr(
-                self._source,
-                mode="a",
-                consolidated=False,
-                encoding=var_encoding,
-                storage_options=_options(self._storage_options),
-            )
-        except BaseException:
-            self._remove([*variables, *coords])
-            raise
-        self._reopen(list(variables))
-
-    def _remove(self, names: list[str]) -> None:
+    def remove(self, names: list[str]) -> None:
         group = zarr.open_group(
-            self._source, mode="r+", use_consolidated=False,
-            **_storage_kwargs(self._storage_options),
+            self.source, mode="r+", use_consolidated=False,
+            **_storage_kwargs(self.storage_options),
         )
         for name in names:
-            if name not in self._catalog and name in group:
+            if name not in self.catalog and name in group:
                 del group[name]
 
-    def _check_track(self, name, value) -> tuple[xr.Variable, dict[str, xr.Variable]]:
+    def check(self, name, value) -> tuple[xr.Variable, dict[str, xr.Variable]]:
         if not isinstance(name, str) or not name or "/" in name:
             raise ValueError(f"track name must be a nonempty string without '/': {name!r}")
         if bin_width(name) is not None:
             raise ValueError(f"{name!r} is a genomic dimension name and cannot name a track")
         if name == _coord.NAME:
             raise ValueError(f"{name!r} is the in-memory reference coordinate, not a track name")
-        stored_dims = {dim for entry in self._catalog.values() for dim in entry.dims}
-        if name in self._catalog or name in stored_dims:
+        stored_dims = {dim for entry in self.catalog.values() for dim in entry.dims}
+        if name in self.catalog or name in stored_dims:
             raise ValueError(f"{name!r} already exists in the store")
         if not isinstance(value, xr.DataArray):
             raise TypeError(f"track {name!r} must be an xarray DataArray")
@@ -213,11 +91,11 @@ class Dataset:
                 raise ValueError(f"track {name!r}: {dim!r} cannot name a dimension")
             if bin_width(dim) is None:
                 continue
-            if dim in self._catalog:
+            if dim in self.catalog:
                 raise ValueError(f"track {name!r}: {dim!r} is already an array in the store")
             if axis != 0:
                 raise ValueError(f"track {name!r}: genomic dimension {dim!r} must come first")
-            expected = self._reference.size(dim)
+            expected = self.reference.size(dim)
             if value.sizes[dim] != expected:
                 raise ValueError(
                     f"{name!r} has {value.sizes[dim]} rows on {dim!r}; "
@@ -236,7 +114,7 @@ class Dataset:
                         f"{value.coords[dim].dims}; it must lie on ({dim!r},)"
                     )
                 labels = value.coords[dim].values
-            stored = self._catalog.get(dim)
+            stored = self.catalog.get(dim)
             if stored is not None:
                 if value.sizes[dim] != stored.shape[0]:
                     raise ValueError(
@@ -269,8 +147,8 @@ class Dataset:
                 )
             if coord_name in value.dims:
                 continue
-            in_store = coord_name in self._catalog or coord_name in stored_dims
-            stored = self._catalog.get(coord_name)
+            in_store = coord_name in self.catalog or coord_name in stored_dims
+            stored = self.catalog.get(coord_name)
             if coord.ndim == 0 and in_store and (stored is None or stored.dims):
                 # What isel or sel leaves of a stored dimension, such as sample.
                 continue
@@ -301,57 +179,165 @@ class Dataset:
             return value
         index = value.xindexes.get(_coord.NAME)
         if isinstance(index, _coord.ReferenceIndex):
-            same = _coord.same_reference(index.reference, self._reference)
+            same = _coord.same_reference(index.reference, self.reference)
         else:
             coord = value.coords[_coord.NAME]
-            same = coord.ndim == 0 and str(coord.values) == _coord.digest(self._reference)
+            same = coord.ndim == 0 and str(coord.values) == _coord.digest(self.reference)
         if not same:
             raise AlignmentError(f"track {name!r} uses another reference than this store")
         return value.drop_vars(_coord.NAME)
 
     def _labels(self, dim: str) -> np.ndarray:
-        if dim in self._data.coords:
-            return self._data[dim].values
+        if dim in self.data.coords:
+            return self.data[dim].values
         group = zarr.open_group(
-            self._source, mode="r", use_consolidated=False,
-            **_storage_kwargs(self._storage_options),
+            self.source, mode="r", use_consolidated=False,
+            **_storage_kwargs(self.storage_options),
         )
         return np.asarray(group[dim][:])
-
-    def _reopen(self, written: list[str]) -> None:
-        selected = None if self._selected is None else [*self._selected, *written]
-        self._data.close()
-        reopened = open(
-            self._source,
-            mode=self._mode,
-            tracks=selected,
-            chunks=self._chunks,
-            storage_options=self._storage_options,
-        )
-        self._data = reopened._data
-        self._root_attrs = reopened._root_attrs
-        self._catalog = reopened._catalog
-        self._selected = selected
 
 
 def open(
     source,
     *,
-    mode: str = "r",
     tracks: Sequence[str] | None = None,
     chunks=_STORED_CHUNKS,
     storage_options: Mapping[str, object] | None = None,
-) -> Dataset:
-    """Open a PBZ store as a ``pbzarr.Dataset`` handle.
+) -> xr.Dataset:
+    """Open a PBZ store as one ``xr.Dataset``.
 
-    ``mode="r"`` is read-only; ``mode="r+"`` allows ``write``. ``tracks=``
-    limits which tracks the handle exposes. By default each track is a Dask
-    array chunked by its stored shard (or chunk) shape; ``chunks=None``
-    gives lazy NumPy-backed arrays, and any other value goes to
-    ``xr.open_zarr``.
+    Every array carries the 0-d ``reference`` coordinate. ``tracks=`` limits
+    the data variables and keeps the reference and label coordinates. By
+    default each track is a Dask array chunked by its stored shard (or chunk)
+    shape; ``chunks=None`` gives lazy NumPy-backed arrays, and any other value
+    goes to ``xr.open_zarr``. The Dataset is a snapshot: a change in memory
+    does not reach the store.
     """
-    if mode not in {"r", "r+"}:
-        raise ValueError("mode must be 'r' or 'r+'")
+    data = _read(source, storage_options, chunks).data
+    if tracks is not None:
+        try:
+            data = _select(data, [tracks] if isinstance(tracks, str) else list(tracks))
+        except Exception:
+            data.close()
+            raise
+    return data
+
+
+def create(
+    destination,
+    *,
+    reference: Mapping[str, int],
+    storage_options: Mapping[str, object] | None = None,
+) -> xr.Dataset:
+    """Create an empty PBZ store and return it opened.
+
+    ``reference`` is the ordered mapping of contig name to length that
+    every track shares. The destination must be a local path that does
+    not exist. Remote stores are not supported yet, so ``storage_options``
+    must be None.
+    """
+    path = os.fspath(destination)
+    if not path:
+        raise ValueError("destination must not be empty")
+    if "://" in path or storage_options is not None:
+        raise ValueError(
+            "create makes local stores only; give a local path and no storage_options"
+        )
+    if os.path.lexists(path):
+        raise FileExistsError(f"destination already exists: {path}")
+    if not isinstance(reference, Mapping) or not reference:
+        raise TypeError("reference must be a nonempty mapping of contig name to length")
+    contigs = []
+    for name, length in reference.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"contig name must be a nonempty string; got {name!r}")
+        if isinstance(length, bool) or not isinstance(length, (int, np.integer)) or length < 0:
+            raise ValueError(f"length of contig {name!r} must be a nonnegative integer")
+        contigs.append((name, int(length)))
+    _native.create_store(path, contigs)
+    return open(path, storage_options=storage_options)
+
+
+def write(
+    target,
+    variables: Mapping[str, xr.DataArray],
+    *,
+    encoding=None,
+    storage_options: Mapping[str, object] | None = None,
+) -> xr.Dataset:
+    """Add new variables to a store and return the store reopened.
+
+    ``target`` is a path, a URL, or a Dataset from ``open`` (its
+    ``encoding["source"]`` names the store). ``variables`` maps names to
+    ``xr.DataArray`` values; an ``xr.Dataset`` is such a mapping. The checks
+    use the store metadata of now. A genomic dimension (``position`` or
+    ``bin_N``) must come first and span the reference. Shared non-genomic
+    dimensions must match the store's labels. ``write`` never changes an
+    existing variable, and the Dataset passed as ``target`` does not change.
+    If the write fails, the arrays it created are removed; it is not atomic
+    against a crash.
+    """
+    source = _target_source(target)
+    if not isinstance(variables, Mapping) or not variables:
+        raise TypeError("variables must be a nonempty mapping of name to DataArray")
+    encoding = dict(encoding or {})
+
+    store = _read(source, storage_options, None)
+    try:
+        values = {}
+        coords = {}
+        for name, value in variables.items():
+            variable, new_coords = store.check(name, value)
+            values[name] = variable
+            for coord_name, coord in new_coords.items():
+                if coord_name in coords and not coords[coord_name].equals(coord):
+                    raise ValueError(
+                        f"variables give different values for coordinate {coord_name!r}"
+                    )
+            coords.update(new_coords)
+    finally:
+        store.data.close()
+    for name in values:
+        if name in coords:
+            raise ValueError(f"{name!r} is both a variable and a coordinate")
+    unknown = set(encoding) - set(values)
+    if unknown:
+        raise ValueError(f"encoding names variables not being written: {sorted(unknown)}")
+
+    new = xr.Dataset(values, coords=coords, attrs=store.root_attrs)
+    var_encoding = {}
+    for name in values:
+        entry = dict(encoding.get(name, {}))
+        entry.setdefault("_FillValue", None)
+        var_encoding[name] = entry
+    try:
+        new.to_zarr(
+            store.source,
+            mode="a",
+            consolidated=False,
+            encoding=var_encoding,
+            storage_options=_options(storage_options),
+        )
+    except BaseException:
+        store.remove([*values, *coords])
+        raise
+    return open(store.source, storage_options=storage_options)
+
+
+def _target_source(target):
+    if isinstance(target, xr.Dataset):
+        source = target.encoding.get("source")
+        if source is None:
+            raise ValueError(
+                "this Dataset has no encoding['source']; pass the store path or URL"
+            )
+        return source
+    if isinstance(target, xr.DataArray):
+        raise TypeError("target must be a path, a URL, or a Dataset from pbzarr.open")
+    return target
+
+
+def _read(source, storage_options, chunks) -> _Store:
     if isinstance(source, (str, os.PathLike)):
         source = os.fspath(source)
     root_attrs = _root_attrs(source, storage_options)
@@ -375,52 +361,17 @@ def open(
             )
         for name, value in data.data_vars.items():
             _attach_source(value, source, name, catalog[name], storage_options)
-        selected = None
-        if tracks is not None:
-            selected = [tracks] if isinstance(tracks, str) else list(tracks)
-            data = _select(data, selected)
     except Exception:
         data.close()
         raise
-    return Dataset(
+    return _Store(
         source,
-        mode=mode,
         data=data,
         root_attrs=root_attrs,
         reference=reference,
         storage_options=storage_options,
-        chunks=chunks,
-        selected=selected,
         catalog=catalog,
     )
-
-
-def create(
-    destination,
-    *,
-    reference: Mapping[str, int],
-) -> Dataset:
-    """Create an empty PBZ store and open it with ``mode="r+"``.
-
-    ``reference`` is the ordered mapping of contig name to length that
-    every track shares. The destination must not exist.
-    """
-    path = os.fspath(destination)
-    if not path:
-        raise ValueError("destination must not be empty")
-    if os.path.lexists(path):
-        raise FileExistsError(f"destination already exists: {path}")
-    if not isinstance(reference, Mapping) or not reference:
-        raise TypeError("reference must be a nonempty mapping of contig name to length")
-    contigs = []
-    for name, length in reference.items():
-        if not isinstance(name, str) or not name:
-            raise ValueError(f"contig name must be a nonempty string; got {name!r}")
-        if isinstance(length, bool) or not isinstance(length, (int, np.integer)) or length < 0:
-            raise ValueError(f"length of contig {name!r} must be a nonnegative integer")
-        contigs.append((name, int(length)))
-    _native.create_store(path, contigs)
-    return open(path, mode="r+")
 
 
 def _checked_data(where: str, value: xr.DataArray, *, strings: bool):
@@ -581,17 +532,3 @@ def _select(data: xr.Dataset, names: list[str]) -> xr.Dataset:
     if unknown:
         raise PbzError(f"unknown track {unknown[0]!r}")
     return data.drop_vars([name for name in data.data_vars if name not in names])
-
-
-def _position_tracks(data: xr.Dataset) -> xr.Dataset:
-    keep = []
-    for name, value in data.data_vars.items():
-        if not value.ndim or value.dims[0] != "position":
-            continue
-        if value.ndim > 2:
-            raise PbzError(
-                f"track {name!r} has {value.ndim} dimensions; region operations "
-                "handle position plus at most one more"
-            )
-        keep.append(name)
-    return data[keep]

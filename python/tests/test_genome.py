@@ -30,8 +30,8 @@ def store(tmp_path: Path) -> Path:
 
 
 def test_output_type_is_input_type(store: Path) -> None:
-    with pbzarr.open(store) as handle:
-        ds = handle.to_xarray().assign(status=("sample", ["case", "control"]))
+    with pbzarr.open(store) as opened:
+        ds = opened.assign(status=("sample", ["case", "control"]))
         array = pbzarr.reduce_regions(ds["depth"], INTERVALS, "mean")
         dataset = pbzarr.reduce_regions(ds, INTERVALS, "mean")
     assert isinstance(array, xr.DataArray)
@@ -44,16 +44,16 @@ def test_output_type_is_input_type(store: Path) -> None:
 
 
 def test_position_in_any_order_gives_the_same_values(store: Path) -> None:
-    with pbzarr.open(store) as handle:
-        depth = handle["depth"]
+    with pbzarr.open(store) as ds:
+        depth = ds["depth"]
         first = pbzarr.reduce_regions(depth, INTERVALS, "mean")
         last = pbzarr.reduce_regions(depth.transpose("sample", "position"), INTERVALS, "mean")
     np.testing.assert_allclose(last.values, first.values)
 
 
 def test_sliced_input_is_refused(store: Path) -> None:
-    with pbzarr.open(store) as handle:
-        part = handle["depth"].isel(position=slice(0, 4))
+    with pbzarr.open(store) as ds:
+        part = ds["depth"].isel(position=slice(0, 4))
         with pytest.raises(ValueError, match=r"region\(\)"):
             pbzarr.reduce_regions(part, INTERVALS, "mean")
 
@@ -69,16 +69,16 @@ def test_plain_xarray_input_takes_reference(store: Path) -> None:
 
 
 def test_position_coordinates_are_dropped(store: Path) -> None:
-    with pbzarr.open(store) as handle:
-        ds = handle.to_xarray().assign_coords(pos=("position", np.arange(10)))
+    with pbzarr.open(store) as opened:
+        ds = opened.assign_coords(pos=("position", np.arange(10)))
         result = pbzarr.reduce_regions(ds["depth"], INTERVALS, "mean")
     np.testing.assert_allclose(result.values, EXPECTED)
     assert "pos" not in result.coords
 
 
 def test_region_of_a_data_array(store: Path) -> None:
-    with pbzarr.open(store) as handle:
-        depth = handle["depth"]
+    with pbzarr.open(store) as ds:
+        depth = ds["depth"]
         locus = pbzarr.region(depth, "chr2:1-4")
         whole = pbzarr.region(depth, ("chr1", None, None))
     np.testing.assert_array_equal(locus.values, VALUES[7:10])
@@ -92,8 +92,8 @@ def test_region_of_a_data_array(store: Path) -> None:
 
 
 def test_region_of_a_dataset_slices_every_genomic_dimension(store: Path) -> None:
-    with pbzarr.open(store) as handle:
-        ds = handle.to_xarray().assign(binned=("bin_2", np.arange(5)))
+    with pbzarr.open(store) as opened:
+        ds = opened.assign(binned=("bin_2", np.arange(5)))
         view = pbzarr.region(ds, "chr2:1-4")
     np.testing.assert_array_equal(view["depth"].values, VALUES[7:10])
     np.testing.assert_array_equal(view["binned"].values, [3, 4])
@@ -101,8 +101,8 @@ def test_region_of_a_dataset_slices_every_genomic_dimension(store: Path) -> None
 
 
 def test_a_view_is_refused(store: Path) -> None:
-    with pbzarr.open(store) as handle:
-        view = pbzarr.region(handle["depth"], "chr1")
+    with pbzarr.open(store) as ds:
+        view = pbzarr.region(ds["depth"], "chr1")
         with pytest.raises(ValueError, match=r"region\(\)"):
             pbzarr.region(view, "chr1:0-2")
         with pytest.raises(ValueError, match=r"region\(\)"):

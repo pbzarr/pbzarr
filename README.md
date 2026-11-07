@@ -65,7 +65,7 @@ brain = window.sel(sample="brain")
 values = window.compute()
 ```
 
-`ds["depth"]` is a lazy `xarray.DataArray` of the whole genome. `pbzarr.region` gives a view of one locus. The view labels each base as `"contig:pos"`, and its numeric `pos` coordinate holds the contig-local positions. pbz uses zero-based, half-open coordinates.
+`pbzarr.open` returns an ordinary `xarray.Dataset`, and `ds["depth"]` is a lazy `xarray.DataArray` of the whole genome. `pbzarr.region` gives a view of one locus. The view labels each base as `"contig:pos"`, and its numeric `pos` coordinate holds the contig-local positions. pbz uses zero-based, half-open coordinates.
 
 ### Calculate statistics over regions
 
@@ -76,7 +76,7 @@ peaks = [
     ("chr2", 200000, 200150),
 ]
 
-peak_means = ds.reduce_regions(peaks, "mean")
+peak_means = pbzarr.reduce_regions(ds, peaks, "mean")
 result = peak_means.compute()
 ```
 
@@ -87,11 +87,11 @@ Dask keeps reads and calculations lazy until `compute()`. The computed result mu
 ### Write a derived track
 
 ```python
-ds = pbzarr.open("depth.pbz", mode="r+")
-ds.write({"over_10": (ds["depth"] >= 10).mean("sample")})
+ds = pbzarr.open("depth.pbz")
+ds = pbzarr.write(ds, {"over_10": (ds["depth"] >= 10).mean("sample")})
 ```
 
-A derived track must cover the whole reference on `position`, or have no genomic dimension. The write adds the track to the same store, with the default Zarr codecs unless `encoding=` says otherwise.
+A derived track must cover the whole reference on `position`, or have no genomic dimension. `pbzarr.write` takes a path, a URL, or a Dataset from `pbzarr.open`. It adds the track to the store, with the default Zarr codecs unless `encoding=` says otherwise, and returns the store opened again. It does not change the Dataset that you give it.
 
 ### Import other files
 

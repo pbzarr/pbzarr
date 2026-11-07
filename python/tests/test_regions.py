@@ -14,6 +14,7 @@ from pbzarr._regions import (
     _resolve_one,
     _resolve_regions,
     reduce_regions_dataset,
+    regions_dataset,
 )
 from _helpers import write_pbz_store
 
@@ -209,13 +210,17 @@ def test_resolve_one_fills_bounds_and_offsets_onto_the_flat_axis(
     assert _resolve_one(REFERENCE, _normalize_one(query)) == (resolved, flat)
 
 
+def _regions(dataset: xr.Dataset, intervals) -> xr.Dataset:
+    return regions_dataset(dataset, pbzarr.Reference.from_xarray(dataset), intervals)
+
+
 def test_single_region_is_lazy_and_reads_only_intersecting_chunks():
     store, expected = _store_track()
     dataset = pbzarr.open(store)
     assert not _value_reads(store)
     store.reads.clear()
 
-    result = dataset.regions("chr2:1-5")
+    result = _regions(dataset, "chr2:1-5")
 
     assert result["depth"].dims == ("position",)
     assert result["depth"].dtype == expected.dtype
@@ -241,7 +246,7 @@ def test_regions_returns_stable_packed_dataset_without_indexes(intervals):
     dataset = pbzarr.open(store)
     store.reads.clear()
 
-    result = dataset.regions(intervals)
+    result = _regions(dataset, intervals)
 
     assert list(result.data_vars) == ["depth"]
     assert result["depth"].dims == ("position",)
@@ -275,7 +280,7 @@ def test_regions_preserves_sharded_two_dimensional_non_position_chunks():
     dataset = pbzarr.open(store)
     store.reads.clear()
 
-    result = dataset.regions([("chr2", 1, 3), ("chr1", 1, 4)])
+    result = _regions(dataset, [("chr2", 1, 3), ("chr1", 1, 4)])
 
     assert result["depth"].dims == ("position", "context")
     assert result["depth"].chunks == ((5,), (2, 1))
@@ -293,7 +298,7 @@ def test_regions_chunks_none_reads_only_selected_pieces_eagerly():
     dataset = pbzarr.open(store, chunks=None)
     store.reads.clear()
 
-    result = dataset.regions([("chr2", 1, 3)])
+    result = _regions(dataset, [("chr2", 1, 3)])
 
     assert result["depth"].chunks is None
     assert isinstance(result["depth"].data, np.ndarray)
@@ -308,11 +313,11 @@ def test_reduce_regions_falls_back_after_an_xarray_value_transformation(tmp_path
     path = tmp_path / "track.pbz"
     _store_track(store=path)
     dataset = pbzarr.open(path)
-    transformed = dataset.to_xarray().assign(depth=dataset["depth"] + 1)
+    transformed = dataset.assign(depth=dataset["depth"] + 1)
 
     reduced = reduce_regions_dataset(
         transformed,
-        dataset.reference,
+        pbzarr.Reference.from_xarray(dataset),
         [("chr1", 0, 2), ("chr2", 0, 3)],
         "mean",
     )
@@ -325,7 +330,8 @@ def test_reduce_regions_builds_compact_self_contained_pbz_tasks(tmp_path):
     _, expected = _store_track(store=path)
     dataset = pbzarr.open(path)
 
-    reduced = dataset.reduce_regions(
+    reduced = pbzarr.reduce_regions(
+        dataset,
         [("chr1", 0, 2), ("chr2", 0, 3)],
         "mean",
     )

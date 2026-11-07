@@ -18,9 +18,9 @@ def test_create_opens_an_empty_store_and_refuses_an_existing_destination(tmp_pat
     destination = tmp_path / "empty.pbz"
 
     with pbzarr.create(destination, reference={"chr1": 1000}) as dataset:
-        assert isinstance(dataset, pbzarr.Dataset)
-        assert not dataset.tracks
-        assert dict(dataset.reference) == {"chr1": 1000}
+        assert isinstance(dataset, xr.Dataset)
+        assert not dataset.data_vars
+        assert dict(pbzarr.Reference.from_xarray(dataset)) == {"chr1": 1000}
 
     with pytest.raises(FileExistsError):
         pbzarr.create(destination, reference={"chr1": 1000})
@@ -142,7 +142,7 @@ def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
     assert report["contigs_written"] == 1
 
     with pbzarr.open(destination, chunks=None) as dataset:
-        assert set(dataset.tracks) == {"coverage", "score", "is_max"}
+        assert set(dataset.data_vars) == {"coverage", "score", "is_max"}
         assert dataset["coverage"].dtype == np.dtype("int32")
         assert dataset["score"].dtype == np.dtype("float32")
         assert dataset["is_max"].dtype == np.dtype("bool")

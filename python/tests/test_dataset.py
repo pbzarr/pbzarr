@@ -1,4 +1,4 @@
-"""The format 0.5 store handle: open, select, reduce, write."""
+"""Open, select, reduce, and write a format 0.5 store."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import zarr
 import pbzarr
 from pbzarr import PbzError, Reference, RegionQuery
 from pbzarr._coord import NAME, ReferenceIndex, attach, same_reference
+from pbzarr._regions import regions_dataset
 
 from _helpers import write_pbz_store
 
@@ -42,8 +43,10 @@ def cohort(tmp_path: Path, cohort_fixtures: list[Path]) -> Path:
 
 def test_open_selects_a_region_through_reference_rows(cohort: Path) -> None:
     with pbzarr.open(cohort) as ds:
-        assert dict(ds.reference) == {"chr1": LENGTH}
-        rows = ds.reference.rows("chr1:100-110")
+        assert isinstance(ds, xr.Dataset)
+        reference = Reference.from_xarray(ds)
+        assert dict(reference) == {"chr1": LENGTH}
+        rows = reference.rows("chr1:100-110")
         assert rows == slice(100, 110)
         view = ds["depth"].isel(position=rows).sel(sample="s1")
         np.testing.assert_array_equal(view.values, _expected(1, np.arange(100, 110)))
@@ -71,21 +74,21 @@ def test_store_without_coordinates_attribute_opens_by_name(tmp_path: Path) -> No
     )
     assert "coordinates" not in zarr.open_group(path, mode="r").attrs
     with pbzarr.open(path, chunks=None) as ds:
-        assert dict(ds.reference) == {"chr1": 4, "chr2": 2}
-        assert list(ds.tracks) == ["depth"]
+        assert dict(Reference.from_xarray(ds)) == {"chr1": 4, "chr2": 2}
+        assert list(ds.data_vars) == ["depth"]
         assert {"contig_id", "contig_length", "sample"} <= set(ds.coords)
         np.testing.assert_array_equal(ds["depth"].values, values)
 
 
 def test_tracks_filter_keeps_the_reference(cohort: Path) -> None:
     with pbzarr.open(cohort, tracks=["depth"]) as ds:
-        assert list(ds.tracks) == ["depth"]
+        assert list(ds.data_vars) == ["depth"]
         assert {"contig_id", "contig_length", "sample"} <= set(ds.coords)
 
 
 def test_reduce_regions_matches_hand_values(cohort: Path) -> None:
     with pbzarr.open(cohort) as ds:
-        result = ds.reduce_regions(["chr1:0-50", "chr1:100-110"], "mean")
+        result = pbzarr.reduce_regions(ds, ["chr1:0-50", "chr1:100-110"], "mean")
     expected = [
         [_expected(s, np.arange(0, 50)).mean() for s in (0, 1)],
         [_expected(s, np.arange(100, 110)).mean() for s in (0, 1)],
@@ -95,10 +98,9 @@ def test_reduce_regions_matches_hand_values(cohort: Path) -> None:
 
 
 def test_derived_write_round_trips(cohort: Path) -> None:
-    with pbzarr.open(cohort, mode="r+") as ds:
+    with pbzarr.open(cohort) as ds:
         callable_count = (ds["depth"] >= 120).sum("sample")
-        ds.write({"callable_count": callable_count})
-        assert "callable_count" in ds
+        pbzarr.write(cohort, {"callable_count": callable_count}).close()
     with pbzarr.open(cohort) as ds:
         positions = np.arange(LENGTH)
         expected = (_expected(0, positions) >= 120).astype(int) + (
@@ -108,20 +110,28 @@ def test_derived_write_round_trips(cohort: Path) -> None:
         assert ds.attrs["pbz:version"] == "0.5"
 
 
+def test_write_returns_the_reopened_store_and_leaves_the_input(cohort: Path) -> None:
+    with pbzarr.open(cohort) as ds:
+        first = ds["depth"].isel(sample=0)
+        with pbzarr.write(cohort, {"first": first}) as by_path:
+            np.testing.assert_array_equal(by_path["first"].values, first.values)
+        with pbzarr.write(ds, {"second": first + 1}) as by_dataset:
+            assert {"first", "second"} <= set(by_dataset.data_vars)
+            assert isinstance(by_dataset.xindexes[NAME], ReferenceIndex)
+        assert list(ds.data_vars) == ["depth"]
+
+
 def test_write_refusals_name_the_problem(cohort: Path) -> None:
     with pbzarr.open(cohort) as ds:
-        with pytest.raises(PbzError, match="mode='r\\+'"):
-            ds.write({"x": ds["depth"].isel(sample=0)})
-    with pbzarr.open(cohort, mode="r+") as ds:
         short = ds["depth"].isel(position=slice(0, 10), sample=0)
         with pytest.raises(ValueError, match="has 10 rows on 'position'"):
-            ds.write({"short": short})
+            pbzarr.write(ds, {"short": short})
         with pytest.raises(ValueError, match="genomic dimension name"):
-            ds.write({"position": ds["depth"].isel(sample=0)})
-        with pbzarr.open(cohort, mode="r+") as other:
-            other.write({"first": other["depth"].isel(sample=0)})
-        with pytest.raises(PbzError, match="store changed since open"):
-            ds.write({"second": ds["depth"].isel(sample=0)})
+            pbzarr.write(ds, {"position": ds["depth"].isel(sample=0)})
+        pbzarr.write(cohort, {"first": ds["depth"].isel(sample=0)}).close()
+        # The checks read the store of now, not the snapshot that ds holds.
+        with pytest.raises(ValueError, match="'first' already exists"):
+            pbzarr.write(ds, {"first": ds["depth"].isel(sample=0)})
 
 
 def test_legacy_store_is_refused(tmp_path: Path) -> None:
@@ -134,8 +144,8 @@ def test_legacy_store_is_refused(tmp_path: Path) -> None:
 
 
 def test_xarray_reads_a_python_written_store(cohort: Path) -> None:
-    with pbzarr.open(cohort, mode="r+") as ds:
-        ds.write({"mean_depth": ds["depth"].astype("float32").mean("sample")})
+    with pbzarr.open(cohort) as ds:
+        pbzarr.write(ds, {"mean_depth": ds["depth"].astype("float32").mean("sample")}).close()
     native = xr.open_zarr(cohort, consolidated=False)
     assert native["mean_depth"].dims == ("position",)
     assert "_zarrs" not in native["mean_depth"].attrs
@@ -145,18 +155,20 @@ def test_xarray_reads_a_python_written_store(cohort: Path) -> None:
 def test_boolean_track_regions_keep_logical_values(cohort: Path) -> None:
     # Xarray stores a bool track as int8 with dtype="bool"; region reads must
     # decode it the same way plain reads do.
-    with pbzarr.open(cohort, mode="r+") as ds:
-        ds.write({"high": ds["depth"].isel(sample=1) >= 110})
     with pbzarr.open(cohort) as ds:
-        direct = ds["high"].isel(position=ds.reference.rows("chr1:95-115")).values
-        packed = ds.regions(["chr1:95-115"])["high"].values
+        pbzarr.write(ds, {"high": ds["depth"].isel(sample=1) >= 110}).close()
+    with pbzarr.open(cohort) as ds:
+        direct = pbzarr.region(ds["high"], "chr1:95-115").values
+        packed = regions_dataset(ds[["high"]], Reference.from_xarray(ds), ["chr1:95-115"])[
+            "high"
+        ].values
     assert packed.dtype == bool
     np.testing.assert_array_equal(packed, direct)
 
 
-def test_summit_reduces_through_the_handle(cohort: Path) -> None:
+def test_summit_reduces_an_opened_dataset(cohort: Path) -> None:
     with pbzarr.open(cohort) as ds:
-        result = ds.reduce_regions(["chr1:95-115"], "summit", by=("depth",))
+        result = pbzarr.reduce_regions(ds, ["chr1:95-115"], "summit", by=("depth",))
     assert result["summit_position"].values.tolist() == [[110, 110]]
     assert result["depth"].values.tolist() == [[12, 112]]
 
@@ -167,34 +179,35 @@ def test_failed_write_leaves_no_track(cohort: Path) -> None:
     def fail(block):
         raise RuntimeError("compute failed")
 
-    with pbzarr.open(cohort, mode="r+") as ds:
+    with pbzarr.open(cohort) as ds:
         bad = ds["depth"].isel(sample=0).copy(
             data=da.map_blocks(fail, ds["depth"].isel(sample=0).data, dtype="int32")
         )
         with pytest.raises(RuntimeError, match="compute failed"):
-            ds.write({"bad": bad})
+            pbzarr.write(ds, {"bad": bad})
     assert "bad" not in zarr.open_group(cohort, mode="r")
     with pbzarr.open(cohort) as ds:
-        assert "bad" not in ds
+        assert "bad" not in ds.data_vars
 
 
 def test_opened_arrays_carry_the_reference_coordinate(cohort: Path) -> None:
     with pbzarr.open(cohort) as ds:
-        for obj in (ds["depth"], ds.tracks["depth"], ds.to_xarray()):
+        reference = Reference.from_xarray(ds)
+        for obj in (ds["depth"], ds.data_vars["depth"], ds):
             assert isinstance(obj.xindexes[NAME], ReferenceIndex)
-            assert same_reference(Reference.from_xarray(obj), ds.reference)
+            assert same_reference(Reference.from_xarray(obj), reference)
 
 
 def test_write_checks_the_reference_and_drops_it(cohort: Path) -> None:
     other = Reference(["chrX"], [LENGTH])
-    with pbzarr.open(cohort, mode="r+") as ds:
+    with pbzarr.open(cohort) as ds:
         first = ds["depth"].isel(sample=0)
-        ds.write({"indexed": first, "plain": first.drop_indexes(NAME)})
+        pbzarr.write(ds, {"indexed": first, "plain": first.drop_indexes(NAME)}).close()
         foreign = attach(first.drop_vars(NAME), other)
         with pytest.raises(xr.AlignmentError, match="another reference"):
-            ds.write({"foreign": foreign})
+            pbzarr.write(ds, {"foreign": foreign})
         with pytest.raises(xr.AlignmentError, match="another reference"):
-            ds.write({"foreign": foreign.drop_indexes(NAME)})
+            pbzarr.write(ds, {"foreign": foreign.drop_indexes(NAME)})
     group = zarr.open_group(cohort, mode="r")
     assert {"indexed", "plain"} <= set(group.array_keys())
     assert NAME not in group
@@ -204,39 +217,39 @@ def test_string_metadata_variable_round_trips(cohort: Path) -> None:
     status = xr.DataArray(
         np.array(["case", "control"]), dims=("sample",), coords={"sample": ["s0", "s1"]}
     )
-    with pbzarr.open(cohort, mode="r+") as ds:
-        ds.write({"status": status})
+    pbzarr.write(cohort, {"status": status}).close()
     with pbzarr.open(cohort, chunks=None) as ds:
         assert ds["status"].values.tolist() == ["case", "control"]
 
 
 def test_write_saves_a_non_dimension_coordinate(cohort: Path) -> None:
-    with pbzarr.open(cohort, mode="r+") as ds:
+    with pbzarr.open(cohort) as ds:
         mean = ds["depth"].astype("float32").mean("position")
-        ds.write({"mean_depth": mean.assign_coords(sample_group=("sample", ["g1", "g2"]))})
+        grouped = mean.assign_coords(sample_group=("sample", ["g1", "g2"]))
+        pbzarr.write(ds, {"mean_depth": grouped}).close()
     stored = zarr.open_group(cohort, mode="r")["sample_group"]
     assert stored.metadata.dimension_names == ("sample",)
     assert stored[:].tolist() == ["g1", "g2"]
 
 
 def test_write_refuses_misplaced_coordinates(cohort: Path) -> None:
-    with pbzarr.open(cohort, mode="r+") as ds:
+    with pbzarr.open(cohort) as ds:
         pos = ds["depth"].isel(sample=0).assign_coords(pos=("position", np.arange(LENGTH)))
         with pytest.raises(ValueError, match="'pos' lies on a genomic dimension"):
-            ds.write({"with_pos": pos})
+            pbzarr.write(ds, {"with_pos": pos})
         wrong = xr.DataArray(
             np.zeros((2, 3)),
             dims=("sample", "cohort"),
             coords={"sample": ["s0", "s1"], "cohort": ("sample", ["a", "b"])},
         )
         with pytest.raises(ValueError, match="label coordinate 'cohort' lies on"):
-            ds.write({"wrong": wrong})
+            pbzarr.write(ds, {"wrong": wrong})
 
 
 def test_write_compares_a_0d_coordinate_with_a_0d_store_array(cohort: Path) -> None:
-    with pbzarr.open(cohort, mode="r+") as ds:
+    with pbzarr.open(cohort) as ds:
         depth = ds["depth"].astype("float64")
-        ds.write({"q50": depth.quantile(0.5, "position")})
-        ds.write({"q50_again": depth.quantile(0.5, "position")})
+        pbzarr.write(ds, {"q50": depth.quantile(0.5, "position")}).close()
+        pbzarr.write(ds, {"q50_again": depth.quantile(0.5, "position")}).close()
         with pytest.raises(ValueError, match="'quantile' differs from the store array"):
-            ds.write({"q90": depth.quantile(0.9, "position")})
+            pbzarr.write(ds, {"q90": depth.quantile(0.9, "position")})

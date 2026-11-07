@@ -31,23 +31,22 @@ def main() -> int:
         )
 
         released = xr.open_zarr(out, consolidated=False)
-        with pbzarr.open(out, chunks=None) as ds:
-            opened = ds.to_xarray()
-            assert set(released.variables) == set(opened.variables)
+        with pbzarr.open(out, chunks=None) as opened:
+            assert set(released.variables) - set(opened.variables) == set()
+            assert set(opened.variables) - set(released.variables) == {"reference"}
             assert dict(released.attrs) == dict(opened.attrs)
             for name in released.variables:
                 assert released[name].dims == opened[name].dims, name
                 assert released[name].dtype == opened[name].dtype, name
                 np.testing.assert_equal(released[name].values, opened[name].values)
-            rows = ds.reference.rows("chr1:9990-10000")
             np.testing.assert_equal(
-                ds["depth"].isel(position=rows).sel(sample="s1").values,
+                pbzarr.region(opened["depth"], "chr1:9990-10000").sel(sample="s1").values,
                 np.full(10, 100 + (999 % 50) + 1),
             )
         released.close()
 
-        with pbzarr.open(out, mode="r+") as ds:
-            ds.write({"mean_depth": ds["depth"].astype("float32").mean("sample")})
+        with pbzarr.open(out) as ds:
+            pbzarr.write(ds, {"mean_depth": ds["depth"].astype("float32").mean("sample")}).close()
 
         subprocess.run(
             ["cargo", "build", "--quiet", "-p", "pbzarr", "--example", "check_dataset"],
@@ -74,13 +73,9 @@ def main() -> int:
         pbzarr.import_d4(multi, "depth", MULTI_CONTIG)
         with pbzarr.open(multi) as ds:
             depth = ds["depth"]
-            assert ds.reference.rows("chr1:0-1") == slice(500, 501)
-            np.testing.assert_equal(
-                depth.isel(position=ds.reference.rows("chr2:499-500")).values, [100]
-            )
-            np.testing.assert_equal(
-                depth.isel(position=ds.reference.rows("chr1:0-1")).values, [7]
-            )
+            assert pbzarr.Reference.from_xarray(ds).rows("chr1:0-1") == slice(500, 501)
+            np.testing.assert_equal(pbzarr.region(depth, "chr2:499-500").values, [100])
+            np.testing.assert_equal(pbzarr.region(depth, "chr1:0-1").values, [7])
 
     print("round-trip OK")
     return 0

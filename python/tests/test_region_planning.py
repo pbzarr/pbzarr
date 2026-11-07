@@ -239,7 +239,7 @@ class _CountingStore(MemoryStore):
         )
 
 
-def _eager_track() -> tuple[_CountingStore, pbzarr.Dataset]:
+def _eager_track() -> tuple[_CountingStore, xr.Dataset]:
     store = _CountingStore()
     write_pbz_store(
         store,
