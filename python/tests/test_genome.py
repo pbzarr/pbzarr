@@ -74,3 +74,36 @@ def test_position_coordinates_are_dropped(store: Path) -> None:
         result = pbzarr.reduce_regions(ds["depth"], INTERVALS, "mean")
     np.testing.assert_allclose(result.values, EXPECTED)
     assert "pos" not in result.coords
+
+
+def test_region_of_a_data_array(store: Path) -> None:
+    with pbzarr.open(store) as handle:
+        depth = handle["depth"]
+        locus = pbzarr.region(depth, "chr2:1-4")
+        whole = pbzarr.region(depth, ("chr1", None, None))
+    np.testing.assert_array_equal(locus.values, VALUES[7:10])
+    np.testing.assert_array_equal(locus["pos"].values, [1, 2, 3])
+    assert list(locus["position"].values) == ["chr2:1", "chr2:2", "chr2:3"]
+    assert (locus.region_contig.item(), locus.region_start.item(), locus.region_stop.item()) == (
+        "chr2", 1, 4,
+    )
+    assert Reference.from_xarray(locus).lengths.tolist() == [6, 4]
+    np.testing.assert_array_equal(whole.values, VALUES[0:6])
+
+
+def test_region_of_a_dataset_slices_every_genomic_dimension(store: Path) -> None:
+    with pbzarr.open(store) as handle:
+        ds = handle.to_xarray().assign(binned=("bin_2", np.arange(5)))
+        view = pbzarr.region(ds, "chr2:1-4")
+    np.testing.assert_array_equal(view["depth"].values, VALUES[7:10])
+    np.testing.assert_array_equal(view["binned"].values, [3, 4])
+    assert view["contig_id"].variable.identical(ds["contig_id"].variable)
+
+
+def test_a_view_is_refused(store: Path) -> None:
+    with pbzarr.open(store) as handle:
+        view = pbzarr.region(handle["depth"], "chr1")
+        with pytest.raises(ValueError, match=r"region\(\)"):
+            pbzarr.region(view, "chr1:0-2")
+        with pytest.raises(ValueError, match=r"region\(\)"):
+            pbzarr.reduce_regions(view, ["chr1:0-2"], "mean")

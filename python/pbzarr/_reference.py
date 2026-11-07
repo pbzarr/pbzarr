@@ -97,6 +97,24 @@ class Reference(Mapping[str, int]):
         """Extent of a genomic dimension: ``position`` or ``bin_N``."""
         return int(self._axis_offsets(dim)[1][-1])
 
+    def resolve(self, query) -> RegionQuery:
+        """One region with contig-local ``start`` and ``stop`` filled in.
+
+        ``query`` takes the forms of ``rows``. An open start is 0 and an open
+        stop is the contig end. Empty and out-of-range regions are refused.
+        """
+        region = _query(query)
+        if region.contig not in self._index:
+            raise KeyError(f"unknown contig {region.contig!r}")
+        length = int(self._lengths[self._index[region.contig]])
+        start = 0 if region.start is None else region.start
+        stop = length if region.stop is None else region.stop
+        if start < 0 or start >= stop or stop > length:
+            raise ValueError(
+                f"{region.contig}:[{start},{stop}) is empty or outside length {length}"
+            )
+        return RegionQuery(region.contig, start, stop)
+
     def rows(self, query, dim: str = "position") -> slice:
         """Flat rows of ``dim`` covering one region.
 
@@ -105,20 +123,10 @@ class Reference(Mapping[str, int]):
         tuple. On ``bin_N`` the rows are the bins that intersect the region.
         Empty and out-of-range regions are refused.
         """
-        region = _query(query)
-        if region.contig not in self._index:
-            raise KeyError(f"unknown contig {region.contig!r}")
-        index = self._index[region.contig]
-        length = int(self._lengths[index])
-        start = 0 if region.start is None else region.start
-        stop = length if region.stop is None else region.stop
-        if start < 0 or start >= stop or stop > length:
-            raise ValueError(
-                f"{region.contig}:[{start},{stop}) is empty or outside length {length}"
-            )
+        region = self.resolve(query)
         width, offsets = self._axis_offsets(dim)
-        base = int(offsets[index])
-        return slice(base + start // width, base + -(-stop // width))
+        base = int(offsets[self._index[region.contig]])
+        return slice(base + region.start // width, base + -(-region.stop // width))
 
     def interval(self, row: int, dim: str = "position") -> RegionQuery:
         """The contig-local interval one row of ``dim`` covers."""

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import TypeVar
 
+import numpy as np
 import xarray as xr
 
 from . import _coord
 from ._coord import _check_full
 from ._native import PbzError
-from ._reference import Reference
+from ._reference import Reference, bin_width
+from ._region import RegionQuery
 from ._regions import reduce_regions_dataset
 
 T = TypeVar("T", xr.DataArray, xr.Dataset)
@@ -46,6 +48,44 @@ def reduce_regions(
     result = _reduce_dataset(obj.to_dataset(name=name), ref, intervals, reducer, kwargs)[name]
     result.name = obj.name
     return result
+
+
+def region(
+    obj: T,
+    query: str | RegionQuery | tuple[str, int | None, int | None],
+    *,
+    reference: Reference | None = None,
+) -> T:
+    """A view of one locus of a whole-genome DataArray or Dataset.
+
+    Every genomic dimension present (``position`` and each ``bin_N``) is
+    sliced to the locus, and variables with no genomic dimension pass through.
+    The view carries the 0-d coordinates ``region_contig``, ``region_start``
+    and ``region_stop``. With ``position``, it also carries a numeric ``pos``
+    coordinate and ``"contig:pos"`` labels as the ``position`` coordinate.
+    Positions are 0-based and contig-local, like ``region_start``.
+    """
+    if not isinstance(obj, (xr.DataArray, xr.Dataset)):
+        raise TypeError("region needs an xarray DataArray or Dataset")
+    ref = reference if reference is not None else Reference.from_xarray(obj)
+    _check_full(obj, ref)
+    genomic = [dim for dim in obj.dims if bin_width(dim) is not None]
+    if not genomic:
+        raise ValueError("region needs a 'position' or 'bin_N' dimension")
+    locus = ref.resolve(query)
+    view = obj.isel({dim: ref.rows(locus, dim) for dim in genomic})
+    coords = {
+        "region_contig": ((), np.array(locus.contig, dtype=object)),
+        "region_start": ((), locus.start),
+        "region_stop": ((), locus.stop),
+    }
+    if "position" in view.dims:
+        local = np.arange(locus.start, locus.stop, dtype=np.int64)
+        labels = np.array([f"{locus.contig}:{p}" for p in local.tolist()], dtype=object)
+        coords["pos"] = ("position", local)
+        coords["position"] = ("position", labels)
+    view = view.drop_vars(_coord.NAME, errors="ignore").assign_coords(coords)
+    return _coord.attach(view, ref)
 
 
 def _reduce_dataset(

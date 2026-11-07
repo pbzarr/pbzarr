@@ -1273,10 +1273,9 @@ def _normalize_coordinate(value, name: str) -> int | None:
 def _resolve_one(
     reference, normalized: RegionQuery
 ) -> tuple[RegionQuery, slice]:
-    """One region's contig-local bounds and flat rows, by ``Reference.rows``."""
-    flat = reference.rows(normalized)
-    base = int(reference.offsets[reference.names.index(normalized.contig)])
-    return RegionQuery(normalized.contig, flat.start - base, flat.stop - base), flat
+    """One region's contig-local bounds and flat rows."""
+    resolved = reference.resolve(normalized)
+    return resolved, reference.rows(resolved)
 
 
 def _resolve_regions(ds: xr.Dataset, reference, intervals) -> RegionLayout:

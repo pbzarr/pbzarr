@@ -59,14 +59,13 @@ This creates a `depth` track with one row per genomic position and one column pe
 ```python
 ds = pbzarr.open("depth.pbz")
 
-rows = ds.reference.rows("chr1:100000-101000")
-window = ds["depth"].isel(position=rows)
+window = pbzarr.region(ds["depth"], "chr1:100000-101000")
 brain = window.sel(sample="brain")
 
 values = window.compute()
 ```
 
-`ds["depth"]` is a lazy `xarray.DataArray`. pbz uses zero-based, half-open coordinates. Use `isel` with `ds.reference.rows(...)` for genomic regions; `sel(position=...)` is reserved for a later genomic index.
+`ds["depth"]` is a lazy `xarray.DataArray` of the whole genome. `pbzarr.region` gives a view of one locus. The view labels each base as `"contig:pos"`, and its numeric `pos` coordinate holds the contig-local positions. pbz uses zero-based, half-open coordinates.
 
 ### Calculate statistics over regions
 
