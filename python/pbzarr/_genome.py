@@ -9,6 +9,7 @@ import xarray as xr
 
 from . import _coord
 from ._coord import _check_full
+from ._locus import locus_coords
 from ._native import PbzError
 from ._reference import Reference, bin_width
 from ._region import RegionQuery
@@ -79,12 +80,9 @@ def region(
         "region_start": ((), locus.start),
         "region_stop": ((), locus.stop),
     }
-    if "position" in view.dims:
-        local = np.arange(locus.start, locus.stop, dtype=np.int64)
-        labels = np.array([f"{locus.contig}:{p}" for p in local.tolist()], dtype=object)
-        coords["pos"] = ("position", local)
-        coords["position"] = ("position", labels)
     view = view.drop_vars(_coord.NAME, errors="ignore").assign_coords(coords)
+    if "position" in view.dims:
+        view = view.assign_coords(locus_coords(locus.contig, locus.start, locus.stop))
     return _coord.attach(view, ref)
 
 
