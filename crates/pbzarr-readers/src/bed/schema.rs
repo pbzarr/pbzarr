@@ -58,6 +58,8 @@ pub struct BedImportOptions {
     pub track: Option<String>,
     /// Value dtype for headerless BED4 input (skips inference).
     pub dtype: Option<Dtype>,
+    /// Grow the existing `track`: one BED column fills it, as `dtype` when given.
+    pub append: bool,
 }
 
 impl Default for BedImportOptions {
@@ -68,6 +70,7 @@ impl Default for BedImportOptions {
             infer_rows: InferRows::Sample(1_000),
             track: None,
             dtype: None,
+            append: false,
         }
     }
 }
@@ -185,6 +188,9 @@ pub(super) fn resolve_sources(
         }
     }
     let labels = sources.iter().map(Source::label).collect::<Vec<_>>();
+    if options.append {
+        return resolve_append(sources, &layout, options, labels);
+    }
 
     if layout.n_cols == 3 {
         if options.fields.is_some() {
@@ -262,17 +268,7 @@ pub(super) fn resolve_sources(
     }
     let columns = selected
         .iter()
-        .map(|name| {
-            header
-                .iter()
-                .position(|field| field == name)
-                .filter(|index| *index >= 3)
-                .ok_or_else(|| {
-                    PbzError::Metadata(format!(
-                        "bed import: BED column {name:?} is not a value BED column of the header"
-                    ))
-                })
-        })
+        .map(|name| value_column(header, name))
         .collect::<Result<Vec<_>>>()?;
 
     if sources.len() == 1 && selected.len() > 1 {
@@ -336,6 +332,88 @@ pub(super) fn resolve_sources(
         columns,
         labels,
     })
+}
+
+/// Resolve an append into one existing track: BED3 presence, headerless BED4,
+/// or the one selected BED column of a headered file.
+fn resolve_append(
+    sources: &[Source],
+    layout: &BedLayout,
+    options: &BedImportOptions,
+    labels: Vec<String>,
+) -> Result<ResolvedImport> {
+    let track = required_track(options, "to append")?;
+    reject_overrides(options)?;
+    if layout.n_cols == 3 {
+        if options.fields.is_some() {
+            return Err(PbzError::Metadata(
+                "bed append: BED3 input has no BED value columns to select".into(),
+            ));
+        }
+        return Ok(ResolvedImport::SingleTrack {
+            track,
+            dtype: Dtype::Bool,
+            column: None,
+            labels,
+        });
+    }
+    let column = match &layout.header {
+        None if layout.n_cols > 4 => {
+            return Err(PbzError::Metadata(format!(
+                "bed append: input has {} BED value columns and no header; add a header line",
+                layout.n_cols - 3
+            )));
+        }
+        None if options.fields.is_some() => {
+            return Err(PbzError::Metadata(
+                "bed append: `--field` selection requires a #-prefixed header".into(),
+            ));
+        }
+        None => 3,
+        Some(header) => {
+            let selected = options
+                .fields
+                .clone()
+                .unwrap_or_else(|| header[3..].to_vec());
+            let [name] = selected.as_slice() else {
+                return Err(PbzError::Metadata(format!(
+                    "bed append: {track:?} takes one BED column but {} are selected; select one with `--field`",
+                    selected.len()
+                )));
+            };
+            value_column(header, name)?
+        }
+    };
+    let dtype = match options.dtype {
+        Some(dtype) => dtype,
+        None => {
+            let (mut states, exact) = infer_states(sources, &[column], options.infer_rows)?;
+            states
+                .pop()
+                .ok_or_else(|| {
+                    PbzError::Metadata("bed append: inference produced no dtype".into())
+                })?
+                .finish(exact)?
+        }
+    };
+    Ok(ResolvedImport::SingleTrack {
+        track,
+        dtype,
+        column: Some(column),
+        labels,
+    })
+}
+
+fn value_column(header: &[String], name: &str) -> Result<usize> {
+    header
+        .iter()
+        .position(|field| field == name)
+        .filter(|index| *index >= 3)
+        .ok_or_else(|| {
+            PbzError::Metadata(format!(
+                "bed import: BED column {name:?} is not a value BED column of the header"
+            ))
+        })
 }
 
 fn required_track(options: &BedImportOptions, context: &str) -> Result<String> {

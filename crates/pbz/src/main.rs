@@ -251,13 +251,10 @@ struct AppendBedArgs {
     append: AppendOptions,
     #[command(flatten)]
     target: AppendTarget,
-    /// BED header column to decode (requires a `#`-prefixed header). Omit to
-    /// decode all BED value columns.
+    /// BED header column that fills --track (requires a `#`-prefixed header).
+    /// Omit when the header has one BED value column.
     #[arg(long = "field")]
     fields: Vec<String>,
-    /// Records sampled for dtype inference, or `all`.
-    #[arg(long, default_value = "1000", value_name = "N|all")]
-    infer_rows: String,
 }
 
 #[derive(Debug, Args)]
@@ -1249,11 +1246,18 @@ fn append_bed(args: AppendBedArgs) -> Result<()> {
     let sources = append_sources(&args.target.input)?;
     let (mut dataset, dim) = open_append(&args.target.output, &args.target.track)?;
     let genome = Genome::new(dataset.reference()?.contigs().to_vec())?;
+    let dtype = Dtype::from_str(
+        dataset.variables()[&args.target.track].metadata["data_type"]
+            .as_str()
+            .unwrap_or(""),
+    )
+    .with_context(|| format!("read the dtype of track {:?}", args.target.track))?;
     let config = args.append.config(&args.target.track, dim);
     let options = BedImportOptions {
         fields: (!args.fields.is_empty()).then_some(args.fields),
         track: Some(args.target.track.clone()),
-        infer_rows: parse_infer_rows(&args.infer_rows)?,
+        dtype: Some(dtype),
+        append: true,
         ..BedImportOptions::default()
     };
     let report = from_bed_matrix(

@@ -7,7 +7,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use pbzarr::dataset::{Dataset, Reference, ValidationStatus};
-use pbzarr::import::{Config, Source};
+use pbzarr::import::{Config, Source, Target};
 use pbzarr::io::ValueReader as _;
 use pbzarr::{Contig, Genome, PbzStore, Region};
 use pbzarr_readers::{
@@ -189,6 +189,64 @@ fn bed_wide_track_imports_into_a_dataset() {
         };
         assert_eq!(row.to_vec(), expected);
     }
+}
+
+#[test]
+fn headered_bed_appends_into_its_track() {
+    let dir = TempDir::new().unwrap();
+    let header = ["chrom", "start", "end", "score"];
+    let a = common::write_bed_bgzip_tabix(dir.path(), "a", &header, &[("chr1", 0, 4, vec!["3"])]);
+    let b = common::write_bed_bgzip_tabix(dir.path(), "b", &header, &[("chr1", 2, 6, vec!["5"])]);
+    let contigs = vec![Contig {
+        name: "chr1".to_owned(),
+        length: 8,
+    }];
+    let config = || Config {
+        column_dim: Some("sample".to_owned()),
+        ..Config::default()
+    };
+    let path = dir.path().join("score.pbz");
+    let mut dataset = Dataset::create(&path, Reference::new(contigs.clone()).unwrap()).unwrap();
+    from_bed_matrix(
+        &mut dataset,
+        &[Source::labeled(a, "s0")],
+        Genome::new(contigs.clone()).unwrap(),
+        &BedImportOptions::default(),
+        config(),
+    )
+    .unwrap();
+
+    let mut dataset = Dataset::open(&path).unwrap();
+    from_bed_matrix(
+        Target::Append(&mut dataset),
+        &[Source::labeled(b, "s1")],
+        Genome::new(contigs).unwrap(),
+        &BedImportOptions {
+            track: Some("score".to_owned()),
+            dtype: Some(pbzarr::io::Dtype::U8),
+            append: true,
+            ..BedImportOptions::default()
+        },
+        config(),
+    )
+    .unwrap();
+
+    let dataset = Dataset::open(&path).unwrap();
+    assert_eq!(
+        dataset
+            .read_raw::<String>("sample", &[0..2])
+            .unwrap()
+            .as_slice()
+            .unwrap(),
+        &["s0", "s1"]
+    );
+    let score = dataset
+        .read_raw::<u8>("score", &[0..8, 0..2])
+        .unwrap()
+        .into_dimensionality::<ndarray::Ix2>()
+        .unwrap();
+    assert_eq!(score.column(0).to_vec(), [3, 3, 3, 3, 0, 0, 0, 0]);
+    assert_eq!(score.column(1).to_vec(), [0, 0, 5, 5, 5, 5, 0, 0]);
 }
 
 #[test]
