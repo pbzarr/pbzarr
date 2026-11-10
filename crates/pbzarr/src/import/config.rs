@@ -9,10 +9,12 @@ use crate::import::progress::make_sink;
 /// Hook for callers to observe import progress. Implementations must be
 /// `Send + Sync` because workers call `tick` concurrently.
 pub trait ProgressSink: Send + Sync {
-    /// Total bytes the run will write, reported once before any `tick`. The
-    /// engine knows the exact figure (positions x columns x element width),
-    /// so callers build a sink without sizing it themselves.
+    /// Total bytes the run covers (positions x columns x element width),
+    /// reported once before any `tick`. Callers build a sink without sizing
+    /// it themselves.
     fn set_total(&self, _bytes: u64) {}
+    /// Bytes of one closed buffer, written or skipped. The ticks of a run
+    /// sum to the `set_total` figure.
     fn tick(&self, _bytes: u64) {}
     fn done(&self) {}
 }

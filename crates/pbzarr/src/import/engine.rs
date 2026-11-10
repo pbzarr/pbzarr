@@ -364,6 +364,18 @@ impl TargetGeom<'_> {
         }
     }
 
+    /// Bytes one closed buffer adds to the progress total: its rows times
+    /// its columns inside the target range, so a run's ticks sum to the
+    /// `set_total` figure whether the buffer is written or skipped.
+    fn progress_bytes(&self, chunk: &Range<u64>, cc: u64) -> u64 {
+        let cols = self.buffer_columns(cc);
+        let width = cols
+            .end
+            .min(self.columns.end)
+            .saturating_sub(cols.start.max(self.columns.start));
+        (chunk.end - chunk.start) * width * self.dtype.size() as u64
+    }
+
     fn col_shard(&self, cc: u64) -> u64 {
         cc / (self.shard_col / self.col_chunk.max(1)).max(1)
     }
@@ -748,9 +760,6 @@ impl RunCtx<'_> {
             (chunk.end - chunk.start) * (columns.end - columns.start) * geom.dtype.size() as u64;
         self.state.bytes_written.fetch_add(bytes, Ordering::Relaxed);
         self.state.chunks_written.fetch_add(1, Ordering::Relaxed);
-        if let Some(p) = self.progress {
-            p.tick(bytes);
-        }
     }
 
     /// Write, batch, or elide one closed buffer.
@@ -769,18 +778,21 @@ impl RunCtx<'_> {
             ));
         }
         let geom = &self.geoms[t_idx];
+        let progress_bytes = geom.progress_bytes(&chunk, cc);
         if geom.sharded {
-            return self.close_sharded(t_idx, chunk_idx, chunk, cc, data);
-        }
-        let Some(data) = data else {
+            self.close_sharded(t_idx, chunk_idx, chunk, cc, data)?;
+        } else if let Some(data) = data {
+            let columns = geom.buffer_columns(cc);
+            let write_start = Instant::now();
+            data.write_unsharded(geom.track, chunk.clone(), columns.clone())?;
+            self.state.timings.write.record(write_start.elapsed());
+            self.record_written(geom, chunk, columns);
+        } else {
             self.record_skipped();
-            return Ok(());
-        };
-        let columns = geom.buffer_columns(cc);
-        let write_start = Instant::now();
-        data.write_unsharded(geom.track, chunk.clone(), columns.clone())?;
-        self.state.timings.write.record(write_start.elapsed());
-        self.record_written(geom, chunk, columns);
+        }
+        if let Some(p) = self.progress {
+            p.tick(progress_bytes);
+        }
         Ok(())
     }
 
@@ -2070,6 +2082,62 @@ mod tests {
         }
         for p in 40..len as usize {
             assert_eq!(values[p], -1);
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingSink {
+        total: AtomicU64,
+        ticked: AtomicU64,
+    }
+
+    impl ProgressSink for CountingSink {
+        fn set_total(&self, bytes: u64) {
+            self.total.store(bytes, Ordering::Relaxed);
+        }
+        fn tick(&self, bytes: u64) {
+            self.ticked.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Skipped buffers tick too, so the progress count ends at its total on
+    /// unsharded, sharded and sharded cohort tracks.
+    #[test]
+    fn progress_reaches_total_with_skipped_buffers() {
+        let len = 80u64;
+        let genome = one_contig(len);
+        let labels: Vec<String> = (0..3).map(|i| format!("s{i}")).collect();
+        let cases = [
+            TrackConfig::new(Dtype::I32).chunk_size(16),
+            TrackConfig::new(Dtype::I32).chunk_size(16).shard_size(48),
+            TrackConfig::new(Dtype::I32)
+                .columns(labels.clone())
+                .chunk_size(16)
+                .column_chunk_size(2)
+                .shard_size(48)
+                .shard_column_size(2),
+        ];
+        let dir = TempDir::new().unwrap();
+        for (i, cfg) in cases.into_iter().enumerate() {
+            let n = if i == 2 { labels.len() } else { 1 };
+            let readers: Vec<SynthReader> = (0..n)
+                .map(|_| SynthReader::new(genome.clone(), Dtype::I32, 0..20, 7))
+                .collect();
+            let mut ds = dataset(&dir.path().join(format!("p{i}.pbz")), &genome);
+            let sink = Arc::new(CountingSink::default());
+            let report = import(&mut ds, "v", cfg, readers)
+                .config(Config {
+                    workers: 2,
+                    decode_chunks: 1,
+                    progress: Some(sink.clone()),
+                    ..Config::default()
+                })
+                .run()
+                .unwrap();
+            assert!(report.chunks_skipped > 0, "case {i}");
+            let total = sink.total.load(Ordering::Relaxed);
+            assert_eq!(total, len * n as u64 * 4, "case {i}");
+            assert_eq!(sink.ticked.load(Ordering::Relaxed), total, "case {i}");
         }
     }
 
