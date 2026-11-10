@@ -15,8 +15,6 @@ def import_d4(
     shard_column_size: int | None = ...,
     progress: bool = ...,
     codecs: str | None = ...,
-    scales: Sequence[int] | None = ...,
-    in_flight: int | None = ...,
     decode_chunks: int | None = ...,
 ) -> dict[str, int | float]: ...
 def import_bigwig(
@@ -31,8 +29,6 @@ def import_bigwig(
     shard_column_size: int | None = ...,
     progress: bool = ...,
     codecs: str | None = ...,
-    scales: Sequence[int] | None = ...,
-    in_flight: int | None = ...,
     decode_chunks: int | None = ...,
 ) -> dict[str, int | float]: ...
 def import_bed(
@@ -51,8 +47,6 @@ def import_bed(
     shard_column_size: int | None = ...,
     progress: bool = ...,
     codecs: str | None = ...,
-    scales: Sequence[int] | None = ...,
-    in_flight: int | None = ...,
     decode_chunks: int | None = ...,
 ) -> dict[str, int | float]: ...
 def import_bam(
@@ -74,8 +68,6 @@ def import_bam(
     shard_column_size: int | None = ...,
     progress: bool = ...,
     codecs: str | None = ...,
-    scales: Sequence[int] | None = ...,
-    in_flight: int | None = ...,
     decode_chunks: int | None = ...,
 ) -> dict[str, int | float]: ...
 def create_store(store_path: str, reference: Sequence[tuple[str, int]]) -> None: ...

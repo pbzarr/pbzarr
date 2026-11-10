@@ -138,20 +138,15 @@ pub trait ValueReader: Send + Sized {
         outputs: &mut [OutputSinkMut<'_>],
     ) -> Result<(), ReaderError>;
 
-    /// Cheap pre-check: could this reader have any data in `[start, end)`?
-    /// A sparse source returns `false` so the engine can skip whole buffers.
-    fn may_have_data(&self, _contig: &str, _start: u64, _end: u64) -> bool {
-        true
-    }
-
     /// A worker-local handle. Shared state (index, header) is reused through
     /// `Arc`; per-thread state (file handle, decode buffers) is reallocated.
     fn fork(&self) -> Result<Self, ReaderError>;
 
     /// Decode `[start, end)` as consecutive windows split at `cuts`
     /// (ascending, strictly inside the range), calling `sink` per window in
-    /// order. The default probes and reads one window at a time; a reader
-    /// that can open the range once and stream should override it.
+    /// order. The default reads one window at a time and reports each one
+    /// as covered. A reader that can open the range once and stream, or
+    /// that knows which windows hold no data, should override it.
     fn read_windows(
         &mut self,
         contig: &str,
@@ -165,12 +160,9 @@ pub trait ValueReader: Send + Sized {
             if hi <= lo {
                 continue;
             }
-            let covered = self.may_have_data(contig, lo, hi);
-            if covered {
-                let mut outputs = sink.sinks(lo, hi)?;
-                self.read_into(contig, lo, hi, &mut outputs)?;
-            }
-            sink.done(lo, hi, covered)?;
+            let mut outputs = sink.sinks(lo, hi)?;
+            self.read_into(contig, lo, hi, &mut outputs)?;
+            sink.done(lo, hi, true)?;
             lo = hi;
         }
         Ok(())
@@ -196,8 +188,7 @@ mod tests {
         assert_eq!(buf[2], 7);
     }
 
-    /// The default `read_windows` visits every window in order, probes each
-    /// one, and reads only the covered ones.
+    /// The default `read_windows` reads every window once, in order.
     #[test]
     fn default_read_windows_visits_each_window_once() {
         struct Log(Vec<(u64, u64, bool)>, Vec<i32>);
@@ -217,8 +208,8 @@ mod tests {
                 Ok(())
             }
         }
-        struct Half; // covers [0, 10) only
-        impl ValueReader for Half {
+        struct Ones;
+        impl ValueReader for Ones {
             fn contigs(&self) -> &Genome {
                 unimplemented!()
             }
@@ -228,35 +219,23 @@ mod tests {
             fn read_into(
                 &mut self,
                 _: &str,
-                start: u64,
-                end: u64,
+                _start: u64,
+                _end: u64,
                 outputs: &mut [OutputSinkMut<'_>],
             ) -> Result<(), ReaderError> {
-                assert!(
-                    end <= 10,
-                    "read_into called on an uncovered window {start}..{end}"
-                );
                 outputs[0].as_i32_mut()?.fill(1);
                 Ok(())
             }
-            fn may_have_data(&self, _: &str, start: u64, _end: u64) -> bool {
-                start < 10
-            }
             fn fork(&self) -> Result<Self, ReaderError> {
-                Ok(Half)
+                Ok(Ones)
             }
         }
         let mut log = Log(Vec::new(), Vec::new());
-        Half.read_windows("c", 2, 18, &[5, 10, 15], &mut log)
+        Ones.read_windows("c", 2, 18, &[5, 10, 15], &mut log)
             .unwrap();
         assert_eq!(
             log.0,
-            vec![
-                (2, 5, true),
-                (5, 10, true),
-                (10, 15, false),
-                (15, 18, false)
-            ]
+            vec![(2, 5, true), (5, 10, true), (10, 15, true), (15, 18, true)]
         );
     }
 }

@@ -684,7 +684,6 @@ pub fn execute_bed_schema_plan<'t>(
                 vec![reader],
                 Axes::default().fields_as_columns(column_labels),
                 options,
-                &config,
             )
         }
     }
@@ -775,7 +774,6 @@ pub fn from_bed_matrix<'t>(
                 vec![reader],
                 Axes::default().fields_as_columns(column_labels),
                 options,
-                &config,
             )
         }
         ResolvedImport::PerField {
@@ -826,9 +824,7 @@ fn open_readers(
 fn pipeline_options(config: &Config) -> PipelineOptions {
     PipelineOptions {
         workers: config.workers,
-        in_flight_spans: config.in_flight_spans,
         decode_chunks: config.decode_chunks,
-        handle_budget: config.handle_budget,
         progress: config.progress.clone(),
     }
 }
@@ -849,5 +845,5 @@ fn run_field_tracks(
     if let Some(labels) = column_labels {
         axes = axes.readers_as_columns(labels);
     }
-    target.import(specs, readers, axes, options, config)
+    target.import(specs, readers, axes, options)
 }

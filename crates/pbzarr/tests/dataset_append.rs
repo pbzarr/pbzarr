@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use pbzarr::dataset::{Dataset, Reference};
-use pbzarr::import::{Axes, Config, Import, PipelineOptions, Target};
+use pbzarr::import::{Axes, Import, PipelineOptions, Target};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, Genome, TrackConfig};
 use zarrs::storage::store::MemoryStore;
@@ -105,7 +105,6 @@ fn append(
         readers,
         Axes::default().readers_as_columns(owned),
         PipelineOptions::default(),
-        &Config::default(),
     )
 }
 

@@ -6,13 +6,10 @@
 //! window.
 //!
 //! A `Backend` and its decode scratch (`Accumulators`, `MateBuffer`) are only
-//! ever driven by one worker thread at a time, each fork getting its own. The
-//! `Mutex` around them exists because `may_have_data` probes the index
-//! through `&self` while `Backend::has_records` needs `&mut`; `read_into`
-//! takes `&mut self` and goes through `get_mut` instead.
+//! ever driven by one worker thread at a time, each fork getting its own.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ndarray::ArrayView1;
 
@@ -49,7 +46,7 @@ struct Scratch {
 /// walk (per [`ImportMode`]) into per-fork scratch buffers.
 pub struct BamReader {
     shared: Arc<Shared>,
-    scratch: Mutex<Scratch>,
+    scratch: Scratch,
 }
 
 impl BamReader {
@@ -101,11 +98,11 @@ impl BamReader {
                 fields,
                 schema: schema_for(mode),
             }),
-            scratch: Mutex::new(Scratch {
+            scratch: Scratch {
                 backend,
                 acc: Accumulators::new(n_fields, 0),
                 mates: MateBuffer::default(),
-            }),
+            },
         })
     }
 
@@ -118,25 +115,12 @@ impl BamReader {
         let n_fields = self.shared.mode.n_fields();
         Ok(Self {
             shared: Arc::clone(&self.shared),
-            scratch: Mutex::new(Scratch {
+            scratch: Scratch {
                 backend,
                 acc: Accumulators::new(n_fields, 0),
                 mates: MateBuffer::default(),
-            }),
+            },
         })
-    }
-
-    fn probe(&self, contig_name: &str, start: u64, end: u64) -> bool {
-        // Same poisoned-lock recovery as `read_into`: this fn only returns a
-        // bool, so there's no error path to propagate a poisoned mutex into.
-        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
-        // A probe failure (e.g. a transient query error) shouldn't silently
-        // skip a task; fall back to "assume data present" so the pipeline
-        // still reads (and surfaces the real error there).
-        scratch
-            .backend
-            .has_records(contig_name, start, end)
-            .unwrap_or(true)
     }
 }
 
@@ -242,17 +226,14 @@ impl ValueReader for BamReader {
             return Ok(());
         }
         let Self { shared, scratch } = self;
-        // Scratch is per-window and fully reset by `accumulate`, so a poisoned
-        // lock (from a panic mid-window on another call) is safe to reuse.
-        let scratch = scratch.get_mut().unwrap_or_else(|e| e.into_inner());
         accumulate(shared, scratch, contig, start, end, |_, _| {})?;
         copy_fields(&scratch.acc, 0, (end - start) as usize, outputs)
     }
 
     /// One `fetch` over the whole span, then one sink per window out of the
     /// single accumulator. Coverage comes from the visited records' reference
-    /// spans rather than one index probe per window, which matches what
-    /// `may_have_data` reports and costs no extra seek.
+    /// spans, so a window that no record reaches is reported as uncovered
+    /// with no extra seek.
     fn read_windows(
         &mut self,
         contig: &str,
@@ -271,7 +252,6 @@ impl ValueReader for BamReader {
         let mut covered = vec![false; bounds.len() - 1];
 
         let Self { shared, scratch } = self;
-        let scratch = scratch.get_mut().unwrap_or_else(|e| e.into_inner());
         accumulate(shared, scratch, contig, start, end, |lo, hi| {
             let lo = lo.max(start);
             let hi = hi.min(end);
@@ -303,10 +283,6 @@ impl ValueReader for BamReader {
             sink.done(lo, hi, covered[window])?;
         }
         Ok(())
-    }
-
-    fn may_have_data(&self, contig: &str, start: u64, end: u64) -> bool {
-        self.probe(contig, start, end)
     }
 
     fn fork(&self) -> Result<Self> {

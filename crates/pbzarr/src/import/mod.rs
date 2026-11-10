@@ -9,7 +9,6 @@ mod builder;
 mod config;
 pub(crate) mod destination;
 mod engine;
-mod estimate;
 pub mod progress;
 mod routing;
 mod source;
@@ -17,13 +16,7 @@ mod target;
 
 pub use builder::{Import, ImportBuilder};
 pub use config::{Config, ProgressSink, Report};
-pub use engine::{
-    CostModel, PipelineOptions, TapMessage, auto_decode_chunks, auto_handle_budget,
-    auto_in_flight_spans,
-};
-pub use estimate::{
-    GenomeGeometry, LayoutEstimate, LayoutKnobs, LevelEstimate, TrackEstimate, TrackShape,
-};
+pub use engine::PipelineOptions;
 pub use routing::{ImportRouting, SourceAxis, TrackTarget};
 pub use source::Source;
 pub use target::{Axes, Target};

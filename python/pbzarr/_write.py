@@ -106,7 +106,6 @@ def import_d4(
     *,
     column_dim: str | None = None,
     workers: int | None = None,
-    in_flight: int | None = None,
     decode_chunks: int | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
@@ -118,10 +117,8 @@ def import_d4(
     """Import one or more D4 sources into an existing PBZ store.
 
     The destination must be a format 0.5 store from `pbzarr.create`.
-    `in_flight=` caps the position spans the
-    engine holds open at once (`None` = auto). `decode_chunks=` sets the
-    position chunks each reader decodes per pass (default auto). Returns
-    the import report dict.
+    `decode_chunks=` sets the position chunks each reader decodes per pass
+    (default auto). Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
 
@@ -139,8 +136,6 @@ def import_d4(
         shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
-        scales=None,
-        in_flight=in_flight,
         decode_chunks=decode_chunks,
     )
 
@@ -152,7 +147,6 @@ def import_bigwig(
     *,
     column_dim: str | None = None,
     workers: int | None = None,
-    in_flight: int | None = None,
     decode_chunks: int | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
@@ -164,10 +158,8 @@ def import_bigwig(
     """Import one or more bigWig sources into an existing PBZ store.
 
     The destination must be a format 0.5 store from `pbzarr.create`.
-    `in_flight=` caps the position spans the
-    engine holds open at once (`None` = auto). `decode_chunks=` sets the
-    position chunks each reader decodes per pass (default auto). Returns
-    the import report dict.
+    `decode_chunks=` sets the position chunks each reader decodes per pass
+    (default auto). Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
 
@@ -185,8 +177,6 @@ def import_bigwig(
         shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
-        scales=None,
-        in_flight=in_flight,
         decode_chunks=decode_chunks,
     )
 
@@ -222,7 +212,6 @@ def import_bed(
     shard_column_size: int | None = None,
     codecs: list | dict | None = None,
     workers: int | None = None,
-    in_flight: int | None = None,
     decode_chunks: int | None = None,
     progress: bool = False,
 ) -> dict[str, int | float]:
@@ -245,10 +234,8 @@ def import_bed(
     Output is 2D when there are several sources, or when one track holds
     several BED columns. Every 2D output requires `column_dim=`.
     The destination must be a format 0.5 store from `pbzarr.create`.
-    `in_flight=` caps the position spans the
-    engine holds open at once (`None` = auto). `decode_chunks=` sets the
-    position chunks each reader decodes per pass (default auto). Returns
-    the import report dict.
+    `decode_chunks=` sets the position chunks each reader decodes per pass
+    (default auto). Returns the import report dict.
     """
     destination_path = _path(destination, "destination")
 
@@ -285,8 +272,6 @@ def import_bed(
         shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
-        scales=None,
-        in_flight=in_flight,
         decode_chunks=decode_chunks,
     )
 
@@ -310,7 +295,6 @@ def import_bam(
     shard_size: int | None = None,
     shard_column_size: int | None = None,
     workers: int | None = None,
-    in_flight: int | None = None,
     decode_chunks: int | None = None,
     progress: bool = False,
     codecs: list | dict | None = None,
@@ -328,10 +312,9 @@ def import_bam(
     `"all"` matches riker/samtools-mpileup-style unconditional dedup of any
     overlapping mate pair; `"none"` disables dedup, double-counting every
     overlapping pair's shared span. The destination must be a format 0.5
-    store from `pbzarr.create`. `in_flight=`
-    caps the position spans the engine holds open at once (`None` = auto).
-    `decode_chunks=` sets the position chunks each reader decodes per pass
-    (default auto). Returns the import report dict.
+    store from `pbzarr.create`. `decode_chunks=` sets the position chunks
+    each reader decodes per pass (default auto). Returns the import report
+    dict.
     """
     destination_path = _path(destination, "destination")
 
@@ -371,7 +354,5 @@ def import_bam(
         shard_column_size,
         progress,
         codecs=_codecs_json(codecs),
-        scales=None,
-        in_flight=in_flight,
         decode_chunks=decode_chunks,
     )

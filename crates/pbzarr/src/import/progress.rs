@@ -17,7 +17,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use super::ProgressSink;
 
 /// Format a byte count with a binary unit (e.g. "12.3 GiB").
-fn human_bytes(n: u64) -> String {
+pub(crate) fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
     let mut i = 0;

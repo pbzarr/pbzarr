@@ -21,15 +21,9 @@ pub trait ProgressSink: Send + Sync {
 pub struct Config {
     /// Number of reader/writer worker threads.
     pub workers: usize,
-    /// Open decode spans allowed at once in the engine; `0` = auto (see
-    /// `PipelineOptions::in_flight_spans`).
-    pub in_flight_spans: usize,
     /// Inner chunks each reader decodes per piece; 0 = auto (see
     /// `PipelineOptions::decode_chunks`).
     pub decode_chunks: usize,
-    /// Reader handle budget across all readers; 0 = auto (see
-    /// `PipelineOptions::handle_budget`).
-    pub handle_budget: usize,
     /// Position chunk size for the track being imported. Consumed by the
     /// format entry points when they create the track; the engine always
     /// steps by the track's on-disk chunk grid.
@@ -52,11 +46,6 @@ pub struct Config {
     /// Consumed at track creation; replaces the default pipeline and the
     /// chunk/shard sizing above.
     pub codecs: Option<ExplicitArraySpec>,
-    /// Downsampling factors for an opt-in multiscale pyramid, built on every
-    /// track the import creates once its base data is published. Empty builds
-    /// no pyramid. The scale engine validates the factors (unique, ascending,
-    /// `>= 2`).
-    pub scales: Vec<u64>,
     /// Optional progress observer.
     pub progress: Option<Arc<dyn ProgressSink>>,
 }
@@ -65,16 +54,13 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             workers: 4,
-            in_flight_spans: 0,
             decode_chunks: 0,
-            handle_budget: 0,
             chunk_size: None,
             column_chunk_size: None,
             shard_size: None,
             shard_column_size: None,
             column_dim: None,
             codecs: None,
-            scales: Vec::new(),
             progress: None,
         }
     }
@@ -120,25 +106,6 @@ impl Config {
         }
         cfg
     }
-
-    /// Build the configured pyramid on each of `tracks`, in order. A no-op
-    /// when `scales` is empty. The factors and worker count pass to the scale
-    /// engine unchanged; it owns factor validation and publication ordering.
-    /// Format entry points call this after their tracks are published.
-    pub fn scale_tracks(&self, store: &crate::PbzStore, tracks: &[String]) -> crate::Result<()> {
-        if self.scales.is_empty() {
-            return Ok(());
-        }
-        let config = crate::ScaleConfig {
-            factors: Some(self.scales.clone()),
-            workers: self.workers,
-            ..crate::ScaleConfig::default()
-        };
-        for track in tracks {
-            crate::scale(store, track, &config)?;
-        }
-        Ok(())
-    }
 }
 
 /// Summary of a finished import.
@@ -149,24 +116,20 @@ pub struct Report {
     pub bytes_written: u64,
     /// Number of buffers written.
     pub tasks_completed: usize,
-    /// Number of buffers elided because no reader covered them
-    /// (`may_have_data` was false for every overlapping contig).
+    /// Number of buffers elided because no reader covered them.
     pub tasks_skipped: usize,
     /// Wall-clock duration of the engine run.
     pub wall_seconds: f64,
-    /// Summed per-piece decode time across workers: the coverage probe, the
-    /// source read, and the merges and chunk writes the stream runs inside
-    /// it.
+    /// Summed per-piece decode time across workers: the source read, and
+    /// the merges and chunk writes the stream runs inside it.
     pub decode_seconds: f64,
-    /// Summed `may_have_data` probe time across workers.
-    pub probe_seconds: f64,
     /// Summed encode+write time across workers.
     pub write_seconds: f64,
     /// Summed worker time spent processing pieces.
     pub worker_busy_seconds: f64,
     /// Summed worker time spent blocked on the piece channel.
     pub worker_idle_seconds: f64,
-    /// Producer time blocked on the in-flight span gate.
+    /// Producer time blocked on the span gate.
     pub gate_wait_seconds: f64,
     /// Summed time workers spent blocked on reader handle checkout.
     pub handle_wait_seconds: f64,

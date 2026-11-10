@@ -155,9 +155,7 @@ pub fn from_bam<'t>(
 
     let options = PipelineOptions {
         workers: config.workers,
-        in_flight_spans: config.in_flight_spans,
         decode_chunks: config.decode_chunks,
-        handle_budget: config.handle_budget,
         progress: config.progress.clone(),
     };
     let mut axes = match mode {
@@ -167,7 +165,7 @@ pub fn from_bam<'t>(
     if let Some(labels) = column_labels {
         axes = axes.readers_as_columns(labels);
     }
-    target.into().import(specs, readers, axes, options, &config)
+    target.into().import(specs, readers, axes, options)
 }
 
 /// The genome shared by every source, taken from the first and required to

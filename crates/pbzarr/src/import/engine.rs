@@ -18,8 +18,8 @@
 //! through the partial encoder, which appends subchunks under a per-shard
 //! mutex because every append rewrites the shard.
 //!
-//! When no reader `may_have_data` over any of a buffer's pieces, the buffer is
-//! never allocated. An unsharded buffer with no data elides its write; a whole
+//! When no reader reports coverage for any of a buffer's pieces, the buffer
+//! is never allocated. An unsharded buffer with no data elides its write; a whole
 //! shard with no data elides its file; the fallback path elides per column
 //! shard. An absent chunk already reads back as the fill value.
 
@@ -31,7 +31,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::bounded;
 use log::{debug, info, warn};
 use ndarray::{Array2, ArrayViewMut1, ArrayViewMut2, Axis, s};
 use zarrs::array::{Array, ArrayShardedExt, ArraySubset, CodecOptions, FillValue};
@@ -42,7 +42,7 @@ use crate::Result;
 use crate::error::PbzError;
 use crate::genome::Genome;
 use crate::import::config::{ProgressSink, Report};
-use crate::import::estimate::human_bytes;
+use crate::import::progress::human_bytes;
 use crate::import::routing::{ImportRouting, SourceAxis, TrackTarget};
 use crate::io::{Dtype, OutputSinkMut, ReaderError, ValueReader, WindowSink};
 
@@ -50,23 +50,12 @@ pub struct PipelineOptions {
     /// Worker thread count: the size of the one pool that runs both source
     /// decoding and zarrs encoding, so at most this many threads are busy.
     pub workers: usize,
-    /// Open decode spans allowed at once. Bounds the open chunk buffers:
-    /// each span holds up to `decode_chunks` buffers per track, and the
-    /// merge scratch is bounded by the worker count instead. `0` = auto:
-    /// `ceil(3 * workers / readers)`, so the runnable pieces target 3x the
-    /// worker count, clamped to `[8, 256]` and to the span count.
-    pub in_flight_spans: usize,
     /// Inner position chunks each reader decodes per piece. `0` = auto, see
     /// `auto_decode_chunks`; an explicit value is clamped to
     /// `[1, chunk count]`, and either is snapped to the shard grid of
     /// sharded targets. Larger values cut per-piece fixed cost (one index
     /// seek per piece); buffers still close per chunk.
     pub decode_chunks: usize,
-    /// Reader handles (forks) allowed across all readers at once. `0` = auto:
-    /// derived from the soft fd limit with a margin for the store and
-    /// indexes, see `auto_handle_budget`. Each reader's pool gets
-    /// `budget / readers`, at least 1, at most `workers`.
-    pub handle_budget: usize,
     pub progress: Option<Arc<dyn ProgressSink>>,
 }
 
@@ -74,17 +63,17 @@ impl Default for PipelineOptions {
     fn default() -> Self {
         Self {
             workers: 4,
-            in_flight_spans: 0,
             decode_chunks: 0,
-            handle_budget: 0,
             progress: None,
         }
     }
 }
 
-/// The auto rule for `PipelineOptions::in_flight_spans` = 0, before the span
-/// count cap the engine applies.
-pub fn auto_in_flight_spans(workers: usize, n_readers: usize) -> usize {
+/// Open decode spans allowed at once, before the span count cap the engine
+/// applies. This bounds the open chunk buffers: each span holds up to
+/// `decode_chunks` buffers per track. The runnable pieces target 3x the
+/// worker count.
+fn auto_in_flight_spans(workers: usize, n_readers: usize) -> usize {
     (3 * workers.max(1))
         .div_ceil(n_readers.max(1))
         .clamp(8, 256)
@@ -96,7 +85,7 @@ const DECODE_SPAN_CAP: u64 = 4 << 20;
 
 /// Auto rule for `PipelineOptions::decode_chunks` = 0: as many chunks as the
 /// 4M cap allows, reduced so every worker sees about eight pieces.
-pub fn auto_decode_chunks(total: u64, chunk_len: u64, n_readers: usize, workers: usize) -> usize {
+fn auto_decode_chunks(total: u64, chunk_len: u64, n_readers: usize, workers: usize) -> usize {
     let chunk_len = chunk_len.max(1);
     let n_chunks = total.div_ceil(chunk_len).max(1);
     let cap = (DECODE_SPAN_CAP / chunk_len).max(1);
@@ -135,10 +124,11 @@ fn gcd(a: u64, b: u64) -> u64 {
     if a == 0 { b } else { gcd(b % a, a) }
 }
 
-/// The auto rule for `PipelineOptions::handle_budget` = 0. Two fds per handle
-/// (data + index); a quarter of the limit plus 128 fds stay free for the
-/// store, shard files, and the base readers.
-pub fn auto_handle_budget(soft_fd_limit: u64, n_readers: usize) -> usize {
+/// Reader handles (forks) allowed across all readers at once. Two fds per
+/// handle (data + index); a quarter of the limit plus 128 fds stay free for
+/// the store, shard files, and the base readers. Each reader's pool gets
+/// `budget / readers`, at least 1, at most `workers`.
+fn auto_handle_budget(soft_fd_limit: u64, n_readers: usize) -> usize {
     let usable = (soft_fd_limit * 3 / 4).saturating_sub(128) / 2;
     usize::try_from(usable)
         .unwrap_or(usize::MAX)
@@ -167,28 +157,6 @@ pub(crate) fn soft_fd_limit() -> u64 {
 #[cfg(not(unix))]
 pub(crate) fn soft_fd_limit() -> u64 {
     1024
-}
-
-/// When attached, spans are opened in descending order of summed cost
-/// (longest-first) instead of genome order.
-pub trait CostModel: Send + Sync {
-    fn span_cost(&self, contig: &str, start: u64, end: u64) -> u64;
-}
-
-/// One message per closed buffer, emitted on the optional tap channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TapMessage {
-    Filled {
-        track: String,
-        position: Range<u64>,
-        columns: Range<u64>,
-    },
-    /// The write was elided: no reader covered any of the buffer's pieces.
-    Skipped {
-        track: String,
-        position: Range<u64>,
-        columns: Range<u64>,
-    },
 }
 
 fn dtype_bytes(d: Dtype) -> u64 {
@@ -666,11 +634,9 @@ impl StageTimer {
 
 #[derive(Default)]
 struct RunTimings {
-    /// Per piece: the coverage probe, the source read, and the merges and
-    /// chunk closes the stream runs inside it.
+    /// Per piece: the source read, and the merges and chunk closes the
+    /// stream runs inside it.
     decode: StageTimer,
-    /// Per piece: the `may_have_data` probe alone (also inside `decode`).
-    probe: StageTimer,
     /// Per piece: time blocked checking a reader handle out of its pool.
     handle_wait: StageTimer,
     /// Per touched buffer: time blocked acquiring the slot's lock at merge.
@@ -684,7 +650,7 @@ struct RunTimings {
     write: StageTimer,
     worker_busy_ns: AtomicU64,
     worker_idle_ns: AtomicU64,
-    /// Producer time blocked on the in-flight span gate.
+    /// Producer time blocked on the span gate.
     gate_wait_ns: AtomicU64,
 }
 
@@ -733,7 +699,6 @@ struct RunCtx<'a> {
     /// Per reader index: the buffers a piece for that reader touches.
     touch_plan: &'a [Vec<TouchEntry>],
     progress: Option<&'a dyn ProgressSink>,
-    tap: Option<&'a Sender<TapMessage>>,
     partial_opts: CodecOptions,
     shard_locks: Mutex<ShardLockMap>,
     /// Sharded `(target, chunk)` groups awaiting their last buffer (the
@@ -789,16 +754,8 @@ impl RunCtx<'_> {
         Arc::clone(map.entry(key).or_default())
     }
 
-    fn record_skipped(&self, geom: &TargetGeom<'_>, chunk: Range<u64>, columns: Range<u64>) {
+    fn record_skipped(&self) {
         self.state.tasks_skipped.fetch_add(1, Ordering::Relaxed);
-        if let Some(tap) = self.tap {
-            // A dropped receiver detaches the tap; not an error.
-            let _ = tap.send(TapMessage::Skipped {
-                track: geom.track.name().to_owned(),
-                position: chunk,
-                columns,
-            });
-        }
     }
 
     fn record_written(&self, geom: &TargetGeom<'_>, chunk: Range<u64>, columns: Range<u64>) {
@@ -808,13 +765,6 @@ impl RunCtx<'_> {
         self.state.tasks_completed.fetch_add(1, Ordering::Relaxed);
         if let Some(p) = self.progress {
             p.tick(bytes);
-        }
-        if let Some(tap) = self.tap {
-            let _ = tap.send(TapMessage::Filled {
-                track: geom.track.name().to_owned(),
-                position: chunk,
-                columns,
-            });
         }
     }
 
@@ -837,11 +787,11 @@ impl RunCtx<'_> {
         if geom.sharded {
             return self.close_sharded(t_idx, chunk_idx, chunk, cc, data);
         }
-        let columns = geom.buffer_columns(cc);
         let Some(data) = data else {
-            self.record_skipped(geom, chunk, columns);
+            self.record_skipped();
             return Ok(());
         };
+        let columns = geom.buffer_columns(cc);
         let write_start = Instant::now();
         data.write_unsharded(geom.track, chunk.clone(), columns.clone())?;
         self.state.timings.write.record(write_start.elapsed());
@@ -913,8 +863,8 @@ impl RunCtx<'_> {
             // That trades a little elision for the batched write: fill
             // columns encode to almost nothing.
             if parts[lo..hi].iter().all(|(_, data)| data.is_none()) {
-                for &(cc, _) in &parts[lo..hi] {
-                    self.record_skipped(geom, chunk.clone(), geom.buffer_columns(cc));
+                for _ in lo..hi {
+                    self.record_skipped();
                 }
                 lo = hi;
                 continue;
@@ -1074,7 +1024,7 @@ impl RunCtx<'_> {
             if covered {
                 self.record_written(geom, chunk_range(chunk_idx), geom.buffer_columns(cc));
             } else {
-                self.record_skipped(geom, chunk_range(chunk_idx), geom.buffer_columns(cc));
+                self.record_skipped();
             }
         }
         Ok(())
@@ -1250,13 +1200,6 @@ impl WindowSink for PieceSink<'_, '_> {
 
 fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece) -> Result<()> {
     let windows = contig_windows(ctx.genome, piece.start, piece.end);
-    let probe_start = Instant::now();
-    let covered = windows
-        .iter()
-        .any(|w| reader.may_have_data(w.name, w.local_lo, w.local_hi));
-    let mut decode = probe_start.elapsed();
-    ctx.state.timings.probe.record(decode);
-
     let entries = &ctx.touch_plan[piece.reader];
     let chunk_len = ctx.geoms[0].array_chunk_len.max(1);
     let first_chunk = piece.start / chunk_len;
@@ -1270,37 +1213,34 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
         current: None,
     };
 
-    if covered {
-        let read_start = Instant::now();
-        // One chunk of scratch per touched entry, reused window after window.
-        // Peak scratch memory gains one such set per active worker.
-        for entry in entries {
-            let geom = &ctx.geoms[entry.t_idx];
-            sink.scratch.push(TileBuffer::filled(
-                geom.dtype,
-                chunk_len as usize,
-                entry.fields.len(),
-                &geom.fill,
-            )?);
-        }
-        for w in &windows {
-            let flat_lo = piece.start + w.row_lo as u64;
-            let flat_hi = piece.start + w.row_hi as u64;
-            sink.window_flat_base = flat_lo;
-            sink.window_local_base = w.local_lo;
-            let mut cuts = Vec::new();
-            let mut boundary = (flat_lo / chunk_len + 1) * chunk_len;
-            while boundary < flat_hi {
-                cuts.push(w.local_lo + (boundary - flat_lo));
-                boundary += chunk_len;
-            }
-            reader
-                .read_windows(w.name, w.local_lo, w.local_hi, &cuts, &mut sink)
-                .map_err(PbzError::Reader)?;
-        }
-        decode += read_start.elapsed();
+    let read_start = Instant::now();
+    // One chunk of scratch per touched entry, reused window after window.
+    // Peak scratch memory gains one such set per active worker.
+    for entry in entries {
+        let geom = &ctx.geoms[entry.t_idx];
+        sink.scratch.push(TileBuffer::filled(
+            geom.dtype,
+            chunk_len as usize,
+            entry.fields.len(),
+            &geom.fill,
+        )?);
     }
-    ctx.state.timings.decode.record(decode);
+    for w in &windows {
+        let flat_lo = piece.start + w.row_lo as u64;
+        let flat_hi = piece.start + w.row_hi as u64;
+        sink.window_flat_base = flat_lo;
+        sink.window_local_base = w.local_lo;
+        let mut cuts = Vec::new();
+        let mut boundary = (flat_lo / chunk_len + 1) * chunk_len;
+        while boundary < flat_hi {
+            cuts.push(w.local_lo + (boundary - flat_lo));
+            boundary += chunk_len;
+        }
+        reader
+            .read_windows(w.name, w.local_lo, w.local_hi, &cuts, &mut sink)
+            .map_err(PbzError::Reader)?;
+    }
+    ctx.state.timings.decode.record(read_start.elapsed());
 
     // Finish the last streamed chunk, then every chunk the stream never
     // reached, so an uncovered chunk inside a covered span still elides.
@@ -1457,8 +1397,7 @@ pub(crate) fn run_import<R: ValueReader>(
     tracks: &[Destination<'_>],
     routing: &ImportRouting,
     options: &PipelineOptions,
-    cost_model: Option<&dyn CostModel>,
-    tap: Option<&Sender<TapMessage>>,
+    handle_budget: usize,
 ) -> Result<Report> {
     let n_readers = readers.len();
     let n_fields = readers[0].output_schema().len();
@@ -1483,22 +1422,6 @@ pub(crate) fn run_import<R: ValueReader>(
     let spans: Vec<(u64, u64)> = (0..n_spans as u64)
         .map(|i| (i * span_len, ((i + 1) * span_len).min(total)))
         .collect();
-
-    // The gate and its counters key on the span INDEX, so the open order is
-    // free to change.
-    let mut span_order: Vec<usize> = (0..n_spans).collect();
-    if let Some(model) = cost_model {
-        let costs: Vec<u64> = spans
-            .iter()
-            .map(|&(s, e)| {
-                contig_windows(&genome, s, e)
-                    .iter()
-                    .map(|w| model.span_cost(w.name, w.local_lo, w.local_hi))
-                    .sum()
-            })
-            .collect();
-        span_order.sort_by(|&a, &b| costs[b].cmp(&costs[a]));
-    }
 
     if let Some(progress) = &options.progress {
         let total_bytes: u64 = geoms
@@ -1533,11 +1456,8 @@ pub(crate) fn run_import<R: ValueReader>(
         (ccs.into_iter().map(|set| set.len()).collect(), per_shard)
     };
 
-    let in_flight = match options.in_flight_spans {
-        0 => auto_in_flight_spans(workers, n_readers).min(n_spans.max(1)),
-        n => n,
-    };
-    let handle_budget = match options.handle_budget {
+    let in_flight = auto_in_flight_spans(workers, n_readers).min(n_spans.max(1));
+    let handle_budget = match handle_budget {
         0 => auto_handle_budget(soft_fd_limit(), n_readers),
         n => n,
     };
@@ -1598,7 +1518,6 @@ pub(crate) fn run_import<R: ValueReader>(
         genome: &genome,
         touch_plan: &touch_plan,
         progress: options.progress.as_deref(),
-        tap,
         partial_opts,
         shard_locks: Mutex::new(HashMap::new()),
         chunk_groups: Mutex::new(HashMap::new()),
@@ -1695,7 +1614,7 @@ pub(crate) fn run_import<R: ValueReader>(
         });
 
         let mut gate_wait = Duration::ZERO;
-        'produce: for &span_idx in &span_order {
+        'produce: for (span_idx, &(start, end)) in spans.iter().enumerate() {
             if state.has_err() {
                 break;
             }
@@ -1705,7 +1624,6 @@ pub(crate) fn run_import<R: ValueReader>(
             if state.has_err() {
                 break;
             }
-            let (start, end) = spans[span_idx];
             for reader in 0..n_readers {
                 let piece = Piece {
                     reader,
@@ -1757,7 +1675,6 @@ pub(crate) fn run_import<R: ValueReader>(
     info!(
         "import timing: wall {wall:.1}s workers {workers}\n\
          decode (incl. merge+write): total {:.1}s  pieces {}  mean {:.2}s  max {:.2}s\n\
-         probe  : total {:.1}s\n\
          slot wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s\n\
          merge  : total {:.1}s  copies {}  mean {:.2}s  max {:.2}s\n\
          shard wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s\n\
@@ -1769,7 +1686,6 @@ pub(crate) fn run_import<R: ValueReader>(
         timings.decode.count(),
         timings.decode.mean_secs(),
         timings.decode.max_secs(),
-        timings.probe.total_secs(),
         timings.slot_wait.total_secs(),
         timings.slot_wait.count(),
         timings.slot_wait.mean_secs(),
@@ -1825,7 +1741,6 @@ pub(crate) fn run_import<R: ValueReader>(
         tasks_skipped: skipped,
         wall_seconds: wall,
         decode_seconds: timings.decode.total_secs(),
-        probe_seconds: timings.probe.total_secs(),
         write_seconds: timings.write.total_secs(),
         worker_busy_seconds: busy,
         worker_idle_seconds: idle,
@@ -1919,8 +1834,27 @@ mod tests {
             Ok(())
         }
 
-        fn may_have_data(&self, _contig: &str, start: u64, end: u64) -> bool {
-            self.ranges().any(|r| start < r.end && end > r.start)
+        /// Reports a window as uncovered when no range reaches it, as a
+        /// sparse source does.
+        fn read_windows(
+            &mut self,
+            contig: &str,
+            start: u64,
+            end: u64,
+            cuts: &[u64],
+            sink: &mut dyn WindowSink,
+        ) -> std::result::Result<(), crate::io::ReaderError> {
+            let mut lo = start;
+            for &hi in cuts.iter().chain(std::iter::once(&end)) {
+                let covered = self.ranges().any(|r| lo < r.end && hi > r.start);
+                if covered {
+                    let mut outputs = sink.sinks(lo, hi)?;
+                    self.read_into(contig, lo, hi, &mut outputs)?;
+                }
+                sink.done(lo, hi, covered)?;
+                lo = hi;
+            }
+            Ok(())
         }
 
         fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
@@ -1957,10 +1891,6 @@ mod tests {
                 rayon::current_num_threads(),
             ));
             self.inner.read_into(contig, start, end, outputs)
-        }
-
-        fn may_have_data(&self, contig: &str, start: u64, end: u64) -> bool {
-            self.inner.may_have_data(contig, start, end)
         }
 
         fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
@@ -2284,12 +2214,10 @@ mod tests {
             )
             .unwrap();
 
-        let (tap_tx, tap_rx) = bounded::<TapMessage>(16);
         let reader = SynthReader::new(genome, Dtype::F32, 16..26, 0);
         let report = Import::from_readers(vec![reader])
             .unwrap()
             .into_track(store.track("signal").unwrap())
-            .with_tap(tap_tx)
             .run()
             .unwrap();
         // Chunks 16,16,8: only the middle has coverage.
@@ -2315,74 +2243,6 @@ mod tests {
             chunk_file_count(&dir.path().join("fill.pbz/signal/values")),
             1
         );
-
-        let messages: Vec<TapMessage> = tap_rx.try_iter().collect();
-        let filled: Vec<_> = messages
-            .iter()
-            .filter(|m| matches!(m, TapMessage::Filled { .. }))
-            .collect();
-        let skipped: Vec<_> = messages
-            .iter()
-            .filter(|m| matches!(m, TapMessage::Skipped { .. }))
-            .collect();
-        assert_eq!(filled.len(), 1);
-        assert_eq!(skipped.len(), 2);
-        assert_eq!(
-            filled[0],
-            &TapMessage::Filled {
-                track: "signal".into(),
-                position: 16..32,
-                columns: 0..1,
-            }
-        );
-    }
-
-    /// `ReverseCost` reverses decode span open order, so buffers complete out
-    /// of genome order; the written data must be unaffected.
-    #[test]
-    fn out_of_order_buffer_completion() {
-        struct ReverseCost;
-        impl CostModel for ReverseCost {
-            fn span_cost(&self, _contig: &str, start: u64, _end: u64) -> u64 {
-                start
-            }
-        }
-
-        let dir = TempDir::new().unwrap();
-        let genome = one_contig(64);
-        let mut store = PbzStore::create(dir.path().join("order.pbz")).unwrap();
-        store
-            .create_track(
-                "depth",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32).chunk_size(16),
-            )
-            .unwrap();
-
-        let reader = SynthReader::new(genome, Dtype::I32, 0..64, 100);
-        let report = Import::from_readers(vec![reader])
-            .unwrap()
-            .into_track(store.track("depth").unwrap())
-            .with_cost_model(Arc::new(ReverseCost))
-            .options(PipelineOptions {
-                workers: 2,
-                ..PipelineOptions::default()
-            })
-            .run()
-            .unwrap();
-        assert_eq!(report.tasks_completed, 4);
-        assert_eq!(report.tasks_skipped, 0);
-
-        let values = store
-            .track("depth")
-            .unwrap()
-            .read_region::<i32>(&whole(&store, "depth", 64))
-            .unwrap()
-            .into_dimensionality::<Ix1>()
-            .unwrap();
-        for pos in 0..64 {
-            assert_eq!(values[pos], 100 + pos as i32);
-        }
     }
 
     /// Reader whose `read_into` records how many decodes run at once. Each
@@ -2432,10 +2292,6 @@ mod tests {
                 _ => panic!("probe reader supports i32 sinks only"),
             }
             Ok(())
-        }
-
-        fn may_have_data(&self, _contig: &str, _start: u64, _end: u64) -> bool {
-            true
         }
 
         fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
@@ -2751,9 +2607,9 @@ mod tests {
             .into_track(store.track("v").unwrap())
             .options(PipelineOptions {
                 workers: 8,
-                handle_budget: 2,
                 ..PipelineOptions::default()
             })
+            .handle_budget(2)
             .run()
             .unwrap();
         let peak = peak.load(Ordering::SeqCst);
@@ -2805,9 +2661,9 @@ mod tests {
             .expect_column_labels(labels)
             .options(PipelineOptions {
                 workers: 4,
-                handle_budget: 1,
                 ..PipelineOptions::default()
             })
+            .handle_budget(1)
             .run()
             .unwrap();
 

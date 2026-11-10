@@ -51,9 +51,7 @@ pub fn from_d4<'t>(
     let track_config = config.track_config(Dtype::I32, None, labels.clone(), "sample");
     let options = PipelineOptions {
         workers: config.workers,
-        in_flight_spans: config.in_flight_spans,
         decode_chunks: config.decode_chunks,
-        handle_budget: config.handle_budget,
         progress: config.progress.clone(),
     };
     let mut axes = Axes::default();
@@ -65,7 +63,6 @@ pub fn from_d4<'t>(
         readers,
         axes,
         options,
-        &config,
     )
 }
 

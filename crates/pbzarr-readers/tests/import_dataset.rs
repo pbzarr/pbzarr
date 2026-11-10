@@ -248,33 +248,3 @@ fn headered_bed_appends_into_its_track() {
     assert_eq!(score.column(0).to_vec(), [3, 3, 3, 3, 0, 0, 0, 0]);
     assert_eq!(score.column(1).to_vec(), [0, 0, 5, 5, 5, 5, 0, 0]);
 }
-
-#[test]
-fn dataset_import_rejects_scales() {
-    let dir = TempDir::new().unwrap();
-    let source = d4_fixture("cohort_s0.d4");
-    let (reference, _) = d4_reference(&source);
-    let path = dir.path().join("dataset.pbz");
-    let mut dataset = Dataset::create(&path, reference).unwrap();
-
-    let error = from_d4(
-        &mut dataset,
-        "depth",
-        &[Source::new(source)],
-        Config {
-            scales: vec![16],
-            ..Config::default()
-        },
-    )
-    .err()
-    .expect("a format-0.5 import must reject scales")
-    .to_string();
-
-    assert!(error.contains("scales are not supported"), "{error}");
-    assert!(
-        !Dataset::open(&path)
-            .unwrap()
-            .variables()
-            .contains_key("depth")
-    );
-}

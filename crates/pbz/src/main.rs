@@ -2,7 +2,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -13,7 +12,7 @@ use pbzarr::import::Config;
 use pbzarr::import::Target;
 use pbzarr::import::progress::{self, make_sink};
 use pbzarr::io::{Dtype, ValueReader as _};
-use pbzarr::{Contig, ExplicitArraySpec, Genome, PbzError, PbzStore, ScaleConfig};
+use pbzarr::{Contig, ExplicitArraySpec, Genome, PbzError, PbzStore};
 use pbzarr_readers::{
     BamReader, BedColumnSpec, BedImportOptions, BedSchema, BigWigReader, ColumnSelector, D4Reader,
     DepthFilter, ImportMode, InferRows, OverlapMode, column_index_by_name, execute_bed_schema_plan,
@@ -42,8 +41,6 @@ enum Command {
     Import(Box<ImportArgs>),
     /// Append columns to a track of a format-0.5 PBZ store.
     Append(Box<AppendArgs>),
-    /// Compute and publish a multiscale pyramid for a track.
-    Scale(ScaleArgs),
 }
 
 #[derive(Debug, Args)]
@@ -164,18 +161,11 @@ struct AppendOptions {
     /// Number of append workers.
     #[arg(short = 't', long, default_value_t = 4)]
     threads: usize,
-    /// Position spans open at once in the import engine. Default: auto.
-    #[arg(long = "in-flight", value_name = "N")]
-    in_flight: Option<usize>,
     /// Position chunks each reader decodes per read pass. Default: auto.
     #[arg(long = "decode-chunks", value_name = "N")]
     decode_chunks: Option<usize>,
-    /// Show append progress on stderr. This is the default; the flag is
-    /// accepted so scripts can be explicit.
-    #[arg(long)]
-    progress: bool,
     /// Hide the append progress display.
-    #[arg(long, conflicts_with = "progress")]
+    #[arg(long)]
     no_progress: bool,
 }
 
@@ -185,7 +175,6 @@ impl AppendOptions {
     fn config(&self, label: &str, column_dim: String) -> Config {
         Config {
             workers: self.threads,
-            in_flight_spans: self.in_flight.unwrap_or(0),
             decode_chunks: self.decode_chunks.unwrap_or(0),
             column_dim: Some(column_dim),
             progress: (!self.no_progress).then(|| make_sink(label)),
@@ -255,32 +244,6 @@ struct AppendBedArgs {
     /// Omit when the header has one BED value column.
     #[arg(long = "field")]
     fields: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-struct ScaleArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
-    /// PBZ store containing the track.
-    #[arg(short('z'), long, value_name = "PATH")]
-    pbz: PathBuf,
-    /// Track to build a pyramid for.
-    #[arg(short('t'), long, value_name = "NAME")]
-    track: String,
-    /// Comma-separated downsampling factors (e.g. 8,64,512), strictly
-    /// ascending with no duplicates. Defaults to the built-in ladder.
-    #[arg(short('s'), long, value_name = "LIST")]
-    scales: Option<String>,
-    /// Number of scale workers.
-    #[arg(short('j'), long, value_name = "N", default_value_t = 4)]
-    workers: usize,
-    /// Show scale progress on stderr. This is the default; the flag is
-    /// accepted for symmetry with --no-progress.
-    #[arg(long)]
-    progress: bool,
-    /// Hide the scale progress display.
-    #[arg(long, conflicts_with = "progress")]
-    no_progress: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -358,12 +321,6 @@ struct ImportOptions {
     /// Number of import workers.
     #[arg(short = 't', long, default_value_t = 4)]
     threads: usize,
-    /// Position spans open at once in the import engine. Bounds the open
-    /// chunk buffers, this many times --decode-chunks; more keeps workers
-    /// busy near span boundaries. Default: auto (targets 3x the worker
-    /// count in runnable pieces, clamped to 8..256).
-    #[arg(long = "in-flight", value_name = "N")]
-    in_flight: Option<usize>,
     /// Position chunks each reader decodes per read pass. Default: auto
     /// (up to 4M positions, fewer when that leaves workers short of pieces).
     #[arg(long = "decode-chunks", value_name = "N")]
@@ -395,17 +352,8 @@ struct ImportOptions {
         conflicts_with_all = ["chunk_size", "column_chunk_size", "shard_size", "shard_column_size"]
     )]
     codecs: Option<String>,
-    /// Comma-separated downsampling factors (e.g. 16,256), strictly ascending
-    /// with no duplicates. Builds a multiscale pyramid on each imported track
-    /// after the base import.
-    #[arg(long, value_name = "LIST")]
-    scales: Option<String>,
-    /// Show import progress on stderr. This is the default; the flag is
-    /// accepted so scripts can be explicit.
-    #[arg(long)]
-    progress: bool,
     /// Hide the import progress display.
-    #[arg(long, conflicts_with = "progress")]
+    #[arg(long)]
     no_progress: bool,
 }
 
@@ -416,21 +364,13 @@ impl ImportOptions {
     fn config(&self, label: &str) -> Result<Config> {
         Ok(Config {
             workers: self.threads,
-            in_flight_spans: self.in_flight.unwrap_or(0),
             decode_chunks: self.decode_chunks.unwrap_or(0),
-            handle_budget: 0,
             chunk_size: self.chunk_size,
             column_chunk_size: self.column_chunk_size,
             shard_size: self.shard_size,
             shard_column_size: self.shard_column_size,
             column_dim: self.column_dim.clone(),
             codecs: self.parse_codecs()?,
-            scales: self
-                .scales
-                .as_deref()
-                .map(parse_scales)
-                .transpose()?
-                .unwrap_or_default(),
             progress: (!self.no_progress).then(|| make_sink(label)),
         })
     }
@@ -736,7 +676,6 @@ fn main() -> Result<()> {
             AppendCommand::D4(args) => append_d4(args),
             AppendCommand::BigWig(args) => append_bigwig(args),
         },
-        Command::Scale(args) => scale_cmd(args),
     }
 }
 
@@ -766,66 +705,6 @@ fn stat(args: StatArgs) -> Result<()> {
         threads: args.threads,
         precision: args.precision,
     })
-}
-
-fn scale_cmd(args: ScaleArgs) -> Result<()> {
-    init_logging(&args.global);
-    let factors = args.scales.as_deref().map(parse_scales).transpose()?;
-
-    let store =
-        PbzStore::open(&args.pbz).with_context(|| format!("open store {}", args.pbz.display()))?;
-    let config = ScaleConfig {
-        factors,
-        workers: args.workers,
-        progress: (!args.no_progress).then(|| make_sink(&format!("scale {}", args.track))),
-        ..ScaleConfig::default()
-    };
-
-    let start = Instant::now();
-    let report = pbzarr::scale(&store, &args.track, &config)
-        .with_context(|| format!("scale track {:?} in {}", args.track, args.pbz.display()))?;
-    let elapsed = start.elapsed();
-
-    println!(
-        "scaled '{}' in {} ({} level{}):",
-        args.track,
-        args.pbz.display(),
-        report.levels.len(),
-        if report.levels.len() == 1 { "" } else { "s" }
-    );
-    for level in &report.levels {
-        println!(
-            "  factor {:>6}: {:>10} bins, {:>12} bytes",
-            level.factor, level.bins, level.bytes_written
-        );
-    }
-    println!("done in {:.2}s", elapsed.as_secs_f64());
-    Ok(())
-}
-
-/// Parse a comma-separated `--scales` list into factors. Enforces strictly
-/// ascending, duplicate-free order here with a clear message; the rest of
-/// `ScaleConfig` validation (`>= 2`, non-empty) is left to `pbzarr::scale`.
-fn parse_scales(text: &str) -> Result<Vec<u64>> {
-    let mut factors = Vec::new();
-    let mut prev: Option<u64> = None;
-    for part in text.split(',') {
-        let part = part.trim();
-        let value: u64 = part.parse().with_context(|| {
-            format!("invalid --scales value {part:?}: expected a non-negative integer")
-        })?;
-        if let Some(prev) = prev {
-            if value == prev {
-                bail!("--scales values must be unique (duplicate {value})");
-            }
-            if value < prev {
-                bail!("--scales values must be strictly ascending (found {value} after {prev})");
-            }
-        }
-        prev = Some(value);
-        factors.push(value);
-    }
-    Ok(factors)
 }
 
 fn import_bed(args: BedArgs) -> Result<()> {
@@ -875,9 +754,7 @@ fn import_bed(args: BedArgs) -> Result<()> {
         let schema = load_schema(schema_path, &sources, infer_rows)?;
         let plan = plan_bed_schema(&sources, &schema, &config).context("plan BED schema")?;
         debug!("BED schema planned against {} source(s)", sources.len());
-        let mut destination = open_or_create(&output, args.import.scales.is_some(), || {
-            Ok(genome.contigs().to_vec())
-        })?;
+        let mut destination = open_or_create(&output, || Ok(genome.contigs().to_vec()))?;
         execute_bed_schema_plan(destination.target(), plan, genome, config)
             .context("import BED schema")?;
     } else {
@@ -894,9 +771,7 @@ fn import_bed(args: BedArgs) -> Result<()> {
             infer_rows,
             ..BedImportOptions::default()
         };
-        let mut destination = open_or_create(&output, args.import.scales.is_some(), || {
-            Ok(genome.contigs().to_vec())
-        })?;
+        let mut destination = open_or_create(&output, || Ok(genome.contigs().to_vec()))?;
         from_bed_matrix(destination.target(), &sources, genome, &options, config)
             .context("import BED columns")?;
     }
@@ -925,25 +800,14 @@ impl Output {
 /// with a stale path, so say which of the two happened. `reference` supplies
 /// the ordered contigs a new format-0.5 Dataset fixes at creation; it is only
 /// called when such a Dataset is created.
-fn open_or_create(
-    path: &Path,
-    scales_requested: bool,
-    reference: impl FnOnce() -> Result<Vec<Contig>>,
-) -> Result<Output> {
+fn open_or_create(path: &Path, reference: impl FnOnce() -> Result<Vec<Contig>>) -> Result<Output> {
     if path.exists() {
         warn!(
             "{} exists; adding track(s) to the existing store",
             path.display()
         );
         return match Dataset::open(path) {
-            Ok(dataset) => {
-                if scales_requested {
-                    bail!(
-                        "--scales is not supported by format 0.5: a multiscale pyramid under one root Dataset is not defined"
-                    );
-                }
-                Ok(Output::Dataset(dataset))
-            }
+            Ok(dataset) => Ok(Output::Dataset(dataset)),
             Err(PbzError::UnsupportedFormat(_)) => PbzStore::open(path)
                 .map(Output::Store)
                 .with_context(|| format!("open output store {}", path.display())),
@@ -951,11 +815,6 @@ fn open_or_create(
                 Err(error).with_context(|| format!("open output dataset {}", path.display()))
             }
         };
-    }
-    if scales_requested {
-        bail!(
-            "--scales is not supported by format 0.5: a multiscale pyramid under one root Dataset is not defined"
-        );
     }
     debug!("creating store {}", path.display());
     let reference = Reference::new(reference()?)?;
@@ -998,7 +857,7 @@ fn import_bam(args: BamArgs) -> Result<()> {
     };
 
     let output = args.bam.output;
-    let mut destination = open_or_create(&output, args.import.scales.is_some(), || {
+    let mut destination = open_or_create(&output, || {
         let source = &sources[0];
         let reader = BamReader::open(
             &source.path,
@@ -1052,7 +911,7 @@ fn import_d4(args: D4Args) -> Result<()> {
     let config = args.import.config(&args.d4.track)?;
     let output = args.d4.output;
 
-    let mut destination = open_or_create(&output, args.import.scales.is_some(), || {
+    let mut destination = open_or_create(&output, || {
         let source = &sources[0];
         let reader = D4Reader::open(&source.path)
             .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
@@ -1093,7 +952,7 @@ fn import_bigwig(args: BigWigArgs) -> Result<()> {
     let config = args.import.config(&args.bigwig.track)?;
     let output = args.bigwig.output;
 
-    let mut destination = open_or_create(&output, args.import.scales.is_some(), || {
+    let mut destination = open_or_create(&output, || {
         let source = &sources[0];
         let reader = BigWigReader::open(&source.path)
             .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
@@ -1477,34 +1336,24 @@ mod tests {
     }
 
     #[test]
-    fn scales_parse_ascending_list() {
-        assert_eq!(parse_scales("8,64,512").unwrap(), vec![8, 64, 512]);
-    }
-
-    #[test]
-    fn scales_parse_trims_whitespace() {
-        assert_eq!(parse_scales(" 8 , 64 , 512 ").unwrap(), vec![8, 64, 512]);
-    }
-
-    #[test]
-    fn scales_parse_single_value() {
-        assert_eq!(parse_scales("8").unwrap(), vec![8]);
-    }
-
-    #[test]
-    fn scales_reject_duplicates() {
-        let err = parse_scales("8,8,64").unwrap_err().to_string();
-        assert!(err.contains("unique"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn scales_reject_non_ascending() {
-        let err = parse_scales("64,8").unwrap_err().to_string();
-        assert!(err.contains("ascending"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn scales_reject_non_integer() {
-        assert!(parse_scales("8,abc").is_err());
+    fn removed_knobs_are_rejected() {
+        let import = |flag: &[&str]| {
+            let mut args = vec!["pbz", "import", "d4", "-o", "out.pbz", "--track", "depth"];
+            args.extend_from_slice(flag);
+            args.push("in.d4");
+            Cli::try_parse_from(args)
+        };
+        assert!(import(&[]).is_ok());
+        assert!(import(&["--no-progress", "--decode-chunks", "4"]).is_ok());
+        for flag in [
+            &["--in-flight", "8"][..],
+            &["--scales", "16"],
+            &["--progress"],
+        ] {
+            let err = import(flag).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+        let err = Cli::try_parse_from(["pbz", "scale", "-z", "s.pbz", "-t", "depth"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 }

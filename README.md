@@ -142,10 +142,10 @@ pbz append bigwig -o cohort.pbz --track signal heart.bw:heart
 
 Every variable over the appended dimension grows. Tracks that receive no data read their fill value in the new columns.
 
-Preview the tracks and storage layout without writing a store:
+Read the sources from a list file:
 
 ```sh
-pbz import bigwig -o cohort.pbz --track signal --file-list sources.tsv --dry-run
+pbz import bigwig -o cohort.pbz --track signal --file-list sources.tsv
 ```
 
 The source list contains one path per line, optionally followed by a tab and a label. If any source has a label, all sources must have labels.

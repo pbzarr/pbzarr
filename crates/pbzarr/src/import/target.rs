@@ -2,7 +2,7 @@
 //! root Dataset.
 
 use super::builder::{Import, ImportBuilder};
-use super::config::{Config, Report};
+use super::config::Report;
 use super::engine::PipelineOptions;
 use super::routing::SourceAxis;
 use crate::dataset::{Dataset, DatasetPlan};
@@ -86,47 +86,25 @@ impl Axes {
 
 impl Target<'_> {
     /// Create `specs` at this destination and populate them from `readers`.
-    ///
-    /// A store also builds the pyramid `config` asks for. A Dataset rejects
-    /// `config.scales` before it writes anything: a multiscale layout under
-    /// one root Dataset is not defined.
     pub fn import<R: ValueReader>(
         self,
         specs: Vec<(String, Genome, TrackConfig)>,
         readers: Vec<R>,
         axes: Axes,
         options: PipelineOptions,
-        config: &Config,
     ) -> Result<Report> {
         match self {
-            Self::Store(store) => {
-                let names: Vec<String> = specs.iter().map(|(name, _, _)| name.clone()).collect();
-                let report = store.create_tracks_with(specs, move |tracks| {
-                    axes.apply(Import::from_readers(readers)?.into_tracks(tracks))
-                        .options(options)
-                        .run()
-                })?;
-                config.scale_tracks(store, &names)?;
-                Ok(report)
+            Self::Store(store) => store.create_tracks_with(specs, move |tracks| {
+                axes.apply(Import::from_readers(readers)?.into_tracks(tracks))
+                    .options(options)
+                    .run()
+            }),
+            Self::Dataset(dataset) => {
+                dataset_run(dataset, specs, readers, axes, options, DatasetPlan::Create)
             }
-            Self::Dataset(dataset) => dataset_run(
-                dataset,
-                specs,
-                readers,
-                axes,
-                options,
-                config,
-                DatasetPlan::Create,
-            ),
-            Self::Append(dataset) => dataset_run(
-                dataset,
-                specs,
-                readers,
-                axes,
-                options,
-                config,
-                DatasetPlan::Append,
-            ),
+            Self::Append(dataset) => {
+                dataset_run(dataset, specs, readers, axes, options, DatasetPlan::Append)
+            }
         }
     }
 
@@ -143,22 +121,15 @@ impl Target<'_> {
         readers: Vec<R>,
         axes: Axes,
         options: PipelineOptions,
-        config: &Config,
     ) -> Result<Report> {
         match self {
             Self::Store(_) => Err(PbzError::UnsupportedFormat(
                 "append grows a format 0.5 root Dataset; this destination is a format 0.4 store"
                     .into(),
             )),
-            Self::Dataset(dataset) | Self::Append(dataset) => dataset_run(
-                dataset,
-                specs,
-                readers,
-                axes,
-                options,
-                config,
-                DatasetPlan::Append,
-            ),
+            Self::Dataset(dataset) | Self::Append(dataset) => {
+                dataset_run(dataset, specs, readers, axes, options, DatasetPlan::Append)
+            }
         }
     }
 }
@@ -169,14 +140,8 @@ fn dataset_run<R: ValueReader>(
     readers: Vec<R>,
     axes: Axes,
     options: PipelineOptions,
-    config: &Config,
     plan: DatasetPlan,
 ) -> Result<Report> {
-    if !config.scales.is_empty() {
-        return Err(PbzError::Metadata(
-            "format 0.5 import: scales are not supported; a multiscale pyramid under one root Dataset is not defined".into(),
-        ));
-    }
     if plan == DatasetPlan::Append {
         let reference = dataset.reference()?.contigs().to_vec();
         for (_, genome, _) in &specs {

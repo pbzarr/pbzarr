@@ -87,20 +87,6 @@ impl Backend {
             }
         }
     }
-
-    /// Cheap existence probe: does `[start, end)` on `contig` overlap any
-    /// record? Stops at the first hit instead of decoding the whole region.
-    pub fn has_records(&mut self, contig: &str, start: u64, end: u64) -> Result<bool> {
-        match self {
-            Backend::Bam {
-                reader,
-                header,
-                index,
-                ..
-            } => has_records_bam(reader, header, index, contig, start, end),
-            Backend::Cram { reader, .. } => has_records_cram(reader, contig, start, end),
-        }
-    }
 }
 
 const CRAM_MAGIC: [u8; 4] = *b"CRAM";
@@ -354,50 +340,6 @@ fn fetch_bam(
         visit(&read)?;
     }
     Ok(())
-}
-
-fn has_records_bam(
-    reader: &mut bam::io::Reader<bgzf::io::Reader<File>>,
-    header: &sam::Header,
-    index: &BamIndex,
-    contig: &str,
-    start: u64,
-    end: u64,
-) -> Result<bool> {
-    let Some(mut query) = bam_query_region(reader, header, index, contig, start, end)? else {
-        return Ok(false);
-    };
-
-    let mut record = noodles_bam::Record::default();
-    let n = query
-        .read_record(&mut record)
-        .map_err(|source| ReaderError::Other(anyhow::anyhow!("decode BAM record: {source}")))?;
-    Ok(n != 0)
-}
-
-fn has_records_cram(
-    reader: &mut rust_htslib::bam::IndexedReader,
-    contig: &str,
-    start: u64,
-    end: u64,
-) -> Result<bool> {
-    // htslib's fetch() is natively 0-based half-open; no conversion needed.
-    reader
-        .fetch((contig, start as i64, end as i64))
-        .map_err(|source| {
-            ReaderError::Other(anyhow::anyhow!("fetch {contig}:{start}-{end}: {source}"))
-        })?;
-
-    let mut record = rust_htslib::bam::Record::new();
-    match reader.read(&mut record) {
-        None => Ok(false),
-        Some(result) => {
-            result.map_err(|source| {
-                ReaderError::Other(anyhow::anyhow!("decode CRAM record: {source}"))
-            })?;
-            Ok(true)
-        }
-    }
 }
 
 fn decode_bam_record(

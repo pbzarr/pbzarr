@@ -154,7 +154,7 @@ fn no_mutations(trace: &Trace) {
     );
 }
 #[test]
-fn singleton_import_and_estimate_use_root_arrays() {
+fn singleton_import_uses_root_arrays() {
     let (mut ds, storage, trace) = traced_dataset();
     let cfg = TrackConfig::new(Dtype::U32)
         .columns(vec!["S1".into()])
@@ -165,7 +165,6 @@ fn singleton_import_and_estimate_use_root_arrays() {
         .into_dataset(&mut ds, vec![("depth".into(), cfg)])
         .readers_as_columns()
         .expect_column_labels(vec!["S1".into()]);
-    builder.estimate().unwrap();
     no_mutations(&trace);
     builder.run().unwrap();
     assert_eq!(ds.variables()["depth"].dims, ["position", "sample"]);
