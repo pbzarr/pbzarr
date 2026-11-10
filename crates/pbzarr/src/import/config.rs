@@ -2,6 +2,7 @@
 //! consumes, the progress hook, and the run summary.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::codec_spec::ExplicitArraySpec;
 use crate::import::progress::make_sink;
@@ -21,7 +22,7 @@ pub trait ProgressSink: Send + Sync {
 
 /// Configuration of one import run, shared by the format import entry points
 /// (`from_d4`, `from_bigwig`, `from_bed_matrix`, `from_bam`) and the engine.
-/// The engine reads `workers`, `decode_chunks` and `progress`; the entry
+/// The engine reads `workers`, `decode_chunks`, `progress` and `cancel`; the entry
 /// points read the track sizing fields when they create the tracks.
 pub struct Config {
     /// Worker thread count: the size of the one pool that runs both source
@@ -56,6 +57,9 @@ pub struct Config {
     pub codecs: Option<ExplicitArraySpec>,
     /// Optional progress observer.
     pub progress: Option<Arc<dyn ProgressSink>>,
+    /// When another thread sets this flag, the engine stops before its next
+    /// piece and the run fails with `PbzError::Cancelled`.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for Config {
@@ -70,6 +74,7 @@ impl Default for Config {
             column_dim: None,
             codecs: None,
             progress: None,
+            cancel: None,
         }
     }
 }
@@ -158,6 +163,7 @@ impl ConfigBuilder {
             column_dim: self.column_dim,
             codecs: self.codecs,
             progress: self.progress.as_deref().map(make_sink),
+            cancel: None,
         }
     }
 }

@@ -50,6 +50,12 @@ def test_import_d4_creates_a_new_store_from_the_source_headers(
         assert dict(pbzarr.Reference.from_xarray(dataset)) == {"chr1": 1000}
 
 
+def test_import_progress_writes_through_python_stderr(tmp_path, d4_fixture, capsys):
+    pbzarr.import_d4(tmp_path / "d4.pbz", "depth", d4_fixture, progress=True)
+
+    assert "depth: 100%" in capsys.readouterr().err
+
+
 def test_import_adds_a_track_and_refuses_a_used_name(tmp_path, d4_fixture):
     destination = tmp_path / "d4.pbz"
     pbzarr.import_d4(destination, "depth", d4_fixture)

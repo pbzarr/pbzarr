@@ -721,6 +721,7 @@ struct RunCtx<'a> {
     reference: &'a Reference,
     plan: &'a TouchPlan,
     progress: Option<&'a dyn ProgressSink>,
+    cancel: Option<&'a AtomicBool>,
     partial_opts: CodecOptions,
     shard_locks: Mutex<ShardLockMap>,
     /// Sharded `(target, chunk)` groups awaiting their last buffer (the
@@ -737,6 +738,15 @@ struct RunCtx<'a> {
 impl RunCtx<'_> {
     fn has_err(&self) -> bool {
         self.err_flag.load(Ordering::Relaxed)
+    }
+
+    /// Record `PbzError::Cancelled` when the caller set the cancel flag.
+    fn check_cancel(&self) -> bool {
+        let cancelled = self.cancel.is_some_and(|flag| flag.load(Ordering::Relaxed));
+        if cancelled {
+            self.record_err(PbzError::Cancelled);
+        }
+        cancelled
     }
 
     fn record_err(&self, err: PbzError) {
@@ -1517,6 +1527,7 @@ pub(crate) fn run_import<R: ValueReader>(
         reference: &reference,
         plan: &plan,
         progress: config.progress.as_deref(),
+        cancel: config.cancel.as_deref(),
         partial_opts,
         shard_locks: Mutex::new(HashMap::new()),
         chunk_groups: Mutex::new(HashMap::new()),
@@ -1580,6 +1591,10 @@ pub(crate) fn run_import<R: ValueReader>(
                                 // already aborted, so nothing blocks on us.
                                 break 'piece;
                             }
+                            if ctx.check_cancel() {
+                                pools.iter().for_each(HandlePool::abort);
+                                break 'piece;
+                            }
                             let checkout_start = Instant::now();
                             let checked_out = pools[piece.reader].checkout();
                             stalled = checkout_start.elapsed();
@@ -1623,6 +1638,10 @@ pub(crate) fn run_import<R: ValueReader>(
         let mut gate_wait = Duration::ZERO;
         'produce: for (span_idx, &(start, end)) in spans.iter().enumerate() {
             if ctx.has_err() {
+                break;
+            }
+            if ctx.check_cancel() {
+                pools.iter().for_each(HandlePool::abort);
                 break;
             }
             let gate_start = Instant::now();
@@ -2586,5 +2605,72 @@ mod tests {
             .expect("import did not return after a worker panic");
         let err = result.unwrap_err();
         assert!(err.contains("panicked"), "{err}");
+    }
+
+    /// Sets `cancel` on its first read past `cancel_at` and counts reads.
+    #[derive(Clone)]
+    struct CancelReader {
+        genome: Reference,
+        schema: OutputSchema,
+        cancel_at: u64,
+        cancel: Arc<AtomicBool>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl ValueReader for CancelReader {
+        fn contigs(&self) -> &Reference {
+            &self.genome
+        }
+
+        fn output_schema(&self) -> &OutputSchema {
+            &self.schema
+        }
+
+        fn read_into(
+            &mut self,
+            _contig: &str,
+            _start: u64,
+            end: u64,
+            outputs: &mut [OutputSinkMut<'_>],
+        ) -> std::result::Result<(), crate::io::ReaderError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if end > self.cancel_at {
+                self.cancel.store(true, Ordering::SeqCst);
+            }
+            outputs[0].as_i32_mut()?.fill(1);
+            Ok(())
+        }
+
+        fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
+            Ok(self.clone())
+        }
+    }
+
+    #[test]
+    fn cancel_flag_stops_the_import_with_an_error() {
+        let dir = TempDir::new().unwrap();
+        let genome = one_contig(1024);
+        let mut ds = dataset(&dir.path().join("cancel.pbz"), &genome);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reader = CancelReader {
+            genome: genome.clone(),
+            schema: OutputSchema::single("value", Dtype::I32),
+            cancel_at: 32,
+            cancel: Arc::clone(&cancel),
+            reads: Arc::clone(&reads),
+        };
+        let cfg = TrackConfig::new(Dtype::I32).chunk_size(4);
+        let result = import(&mut ds, "v", cfg, vec![reader])
+            .config(Config {
+                workers: 2,
+                decode_chunks: 1,
+                cancel: Some(cancel),
+                ..Config::default()
+            })
+            .run();
+        assert!(matches!(result, Err(PbzError::Cancelled)));
+        let reads = reads.load(Ordering::SeqCst);
+        assert!(reads < 256, "{reads} reads after cancel");
     }
 }

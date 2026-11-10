@@ -37,6 +37,10 @@ pub enum PbzError {
     #[error("metadata error: {0}")]
     Metadata(String),
 
+    /// The caller set the import cancel flag.
+    #[error("import cancelled")]
+    Cancelled,
+
     #[error(transparent)]
     Reader(#[from] crate::io::error::ReaderError),
 

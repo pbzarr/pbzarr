@@ -93,7 +93,8 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
         self
     }
 
-    /// The run reads the worker count, `decode_chunks` and the progress hook.
+    /// The run reads the worker count, `decode_chunks`, the progress hook and
+    /// the cancel flag.
     /// The tracks take their sizes from their `TrackConfig`.
     pub fn config(mut self, config: Config) -> Self {
         self.config = config;

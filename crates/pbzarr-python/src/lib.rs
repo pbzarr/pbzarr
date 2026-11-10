@@ -2,6 +2,10 @@
 
 use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, channel};
+use std::time::Duration;
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
@@ -10,7 +14,8 @@ use pyo3::types::PyDict;
 
 use pbzarr::Contig;
 use pbzarr::ExplicitArraySpec;
-use pbzarr::import::{Config, ConfigBuilder, Report, Source, store_reference};
+use pbzarr::import::progress::line_sink;
+use pbzarr::import::{Config, ConfigBuilder, ProgressSink, Report, Source, store_reference};
 use pbzarr::io::{Dtype, ReaderError};
 use pbzarr::{Dataset, PbzError as RsError, Reference, RegionQuery};
 use pbzarr_readers::{
@@ -46,8 +51,9 @@ fn py_err(error: RsError) -> PyErr {
 
 /// Build the import `Config` from the keyword arguments every import binding
 /// takes. A `codecs` JSON spec replaces the chunk and shard sizes, so the two
-/// together fail.
+/// together fail. Progress goes to Python `sys.stderr`.
 fn build_config(mut builder: ConfigBuilder, codecs: Option<&str>) -> PyResult<Config> {
+    let progress = builder.progress.take();
     if let Some(raw) = codecs {
         if let Some(name) = builder.grid_size_set() {
             return Err(PyValueError::new_err(format!(
@@ -58,7 +64,68 @@ fn build_config(mut builder: ConfigBuilder, codecs: Option<&str>) -> PyResult<Co
             ExplicitArraySpec::parse(raw).map_err(|e| PyValueError::new_err(e.to_string()))?;
         builder.codecs = Some(spec);
     }
-    Ok(builder.build())
+    let mut config = builder.build();
+    config.progress = progress.as_deref().map(python_progress);
+    Ok(config)
+}
+
+/// Write progress lines through Python `sys.stderr`, so that Jupyter shows
+/// them in the cell output.
+fn python_progress(label: &str) -> Arc<dyn ProgressSink> {
+    line_sink(label, |line| {
+        Python::with_gil(|py| {
+            let write = || -> PyResult<()> {
+                let stderr = py.import("sys")?.getattr("stderr")?;
+                stderr.call_method1("write", (format!("{line}\n"),))?;
+                stderr.call_method0("flush")?;
+                Ok(())
+            };
+            if let Err(error) = write() {
+                error.print(py);
+            }
+        })
+    })
+}
+
+const SIGNAL_CHECK: Duration = Duration::from_millis(100);
+
+/// Run an import on another thread and check for Python signals while it
+/// runs. On a signal such as Ctrl-C, cancel the import, wait for it to stop,
+/// and raise the exception of the signal handler.
+fn run_interruptible<T: Send>(
+    py: Python<'_>,
+    mut config: Config,
+    import: impl FnOnce(Config) -> PyResult<T> + Send,
+) -> PyResult<T> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    config.cancel = Some(Arc::clone(&cancel));
+    let (tx, mut rx) = channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let _ = tx.send(import(config));
+        });
+        loop {
+            let (back, received) = py.allow_threads(move || {
+                let received = rx.recv_timeout(SIGNAL_CHECK);
+                (rx, received)
+            });
+            rx = back;
+            match received {
+                Ok(result) => return result,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(PbzError::new_err(
+                        "the import thread stopped with no result",
+                    ));
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            if let Err(signal) = py.check_signals() {
+                cancel.store(true, Ordering::Relaxed);
+                let _ = py.allow_threads(move || rx.recv());
+                return Err(signal);
+            }
+        }
+    })
 }
 
 fn to_sources(sources: Vec<(PathBuf, Option<String>)>) -> PyResult<Vec<Source>> {
@@ -101,21 +168,21 @@ fn import_d4(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let sources = to_sources(sources)?;
-    let report = py.allow_threads(|| {
-        let config = build_config(
-            ConfigBuilder {
-                workers: threads,
-                decode_chunks,
-                chunk_size,
-                column_chunk_size,
-                shard_size,
-                shard_column_size,
-                column_dim: dim,
-                codecs: None,
-                progress: progress.then(|| track.clone()),
-            },
-            codecs.as_deref(),
-        )?;
+    let config = build_config(
+        ConfigBuilder {
+            workers: threads,
+            decode_chunks,
+            chunk_size,
+            column_chunk_size,
+            shard_size,
+            shard_column_size,
+            column_dim: dim,
+            codecs: None,
+            progress: progress.then(|| track.clone()),
+        },
+        codecs.as_deref(),
+    )?;
+    let report = run_interruptible(py, config, |config| {
         rs_from_d4(destination.as_path(), &track, &sources, config).map_err(py_err)
     })?;
     report_to_dict(py, &report)
@@ -146,21 +213,21 @@ fn import_bigwig(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let sources = to_sources(sources)?;
-    let report = py.allow_threads(|| {
-        let config = build_config(
-            ConfigBuilder {
-                workers: threads,
-                decode_chunks,
-                chunk_size,
-                column_chunk_size,
-                shard_size,
-                shard_column_size,
-                column_dim: dim,
-                codecs: None,
-                progress: progress.then(|| track.clone()),
-            },
-            codecs.as_deref(),
-        )?;
+    let config = build_config(
+        ConfigBuilder {
+            workers: threads,
+            decode_chunks,
+            chunk_size,
+            column_chunk_size,
+            shard_size,
+            shard_column_size,
+            column_dim: dim,
+            codecs: None,
+            progress: progress.then(|| track.clone()),
+        },
+        codecs.as_deref(),
+    )?;
+    let report = run_interruptible(py, config, |config| {
         rs_from_bigwig(destination.as_path(), &track, &sources, config).map_err(py_err)
     })?;
     report_to_dict(py, &report)
@@ -246,7 +313,7 @@ fn import_bed(
         },
         codecs.as_deref(),
     )?;
-    let report = py.allow_threads(|| {
+    let report = run_interruptible(py, config, |config| {
         let genome = genome
             .map(Reference::from_fai)
             .transpose()
@@ -359,7 +426,7 @@ fn import_bam(
         },
         codecs.as_deref(),
     )?;
-    let report = py.allow_threads(|| {
+    let report = run_interruptible(py, config, |config| {
         rs_from_bam(
             destination.as_path(),
             &track,
