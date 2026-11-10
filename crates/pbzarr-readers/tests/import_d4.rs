@@ -116,6 +116,24 @@ fn import_d4_multi_contig_writes_correct_contigs() {
     assert!(chr2.iter().all(|&v| v == 100), "chr2 should have value 100");
 }
 
+#[test]
+fn sources_with_different_contigs_leave_no_store() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("out.pbz");
+    let sources = [
+        Source::labeled(fixture("banded_1k.d4"), "a"),
+        Source::labeled(fixture("multi_contig.d4"), "b"),
+    ];
+    let err = from_d4(store.as_path(), "depth", &sources, Config::default())
+        .err()
+        .expect("sources with different contigs must be refused");
+    assert!(
+        err.to_string().contains("differ"),
+        "unexpected error: {err}"
+    );
+    assert!(!store.exists(), "a refused import created {store:?}");
+}
+
 /// Fix-point (non-integral) d4 files are rejected at open time.
 #[test]
 fn fixed_point_d4_is_rejected() {
