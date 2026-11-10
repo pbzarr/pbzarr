@@ -65,7 +65,7 @@ fn bed_regions_keep_order_including_duplicates_and_overlaps() {
     let bed = write_bed(dir.path(), "chr1\t0\t5\nchr1\t0\t5\nchr1\t3\t8\n");
     let output = run_pbz([
         "stat".into(),
-        "--region".into(),
+        "-R".into(),
         bed.into_os_string(),
         store.into_os_string(),
         "--track".into(),
@@ -76,6 +76,32 @@ fn bed_regions_keep_order_including_duplicates_and_overlaps() {
         "#chrom\tstart\tend\tmean\n\
          chr1\t0\t5\t5.8\n\
          chr1\t0\t5\t5.8\n\
+         chr1\t3\t8\t2.8\n"
+    );
+}
+
+#[test]
+fn region_flags_come_before_the_bed_file() {
+    let dir = TempDir::new().unwrap();
+    let store = build_store(dir.path());
+    let bed = write_bed(dir.path(), "chr1\t3\t8\n");
+    let output = run_pbz([
+        "stat".into(),
+        store.into_os_string(),
+        "--track".into(),
+        "depth".into(),
+        "-R".into(),
+        bed.into_os_string(),
+        "-r".into(),
+        "chr1:0-5".into(),
+        "-r".into(),
+        "chr2".into(),
+    ]);
+    assert_eq!(
+        stdout_of(&output),
+        "#chrom\tstart\tend\tmean\n\
+         chr1\t0\t5\t5.8\n\
+         chr2\t0\t6\t0\n\
          chr1\t3\t8\t2.8\n"
     );
 }
@@ -95,7 +121,7 @@ fn median_min_max_report_integers() {
             "--no-header".into(),
             "-s".into(),
             stat.into(),
-            "--region".into(),
+            "--regions".into(),
             bed.as_os_str().to_owned(),
             store.as_os_str().to_owned(),
             "--track".into(),

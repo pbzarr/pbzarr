@@ -165,6 +165,15 @@ Export a track as bedGraph-like text:
 pbz view cohort.pbz --track signal -o signal.bedgraph.gz
 ```
 
+Select regions for `pbz stat` or `pbz view`:
+
+```sh
+pbz stat cohort.pbz --track signal -s mean -R targets.bed
+pbz view cohort.pbz --track signal -r chr1:0-1000000 -r chr2:500-900
+```
+
+`-r CHROM:START-END` selects one region. You can repeat `-r`. `-R FILE.bed` reads regions from a BED file. Coordinates are 0-based and half-open, as in BED. Without `-r` or `-R`, `pbz view` reads the whole genome and `pbz stat` writes one row per contig.
+
 `pbz view` and `pbz stat` write to stdout when you do not give `-o`. When the store has one track, `--track` is optional.
 
 ## Single-file stores

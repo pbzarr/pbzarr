@@ -65,6 +65,47 @@ fn column_subset_and_no_header() {
         "af".into(),
     ]);
     assert_eq!(stdout_of(&output), "chr1\t2\t6\t1\n");
+
+    let output = run_pbz([
+        "view".into(),
+        dir.path().join("store.pbz").into_os_string(),
+        "--track".into(),
+        "af".into(),
+        "-c".into(),
+        "s2,s1".into(),
+    ]);
+    assert_eq!(
+        stdout_of(&output),
+        "#chrom\tstart\tend\ts2\ts1\n\
+         chr1\t2\t4\t1\t0.5\n\
+         chr1\t4\t6\t1\t0.25\n"
+    );
+}
+
+#[test]
+fn regions_clip_rows_and_refuse_ends_past_the_contig() {
+    let dir = TempDir::new().unwrap();
+    let store = build_store(dir.path());
+    let view = |region: &str| {
+        run_pbz([
+            "view".into(),
+            store.as_os_str().to_owned(),
+            "--track".into(),
+            "depth".into(),
+            "-r".into(),
+            region.into(),
+        ])
+    };
+    assert_eq!(
+        stdout_of(&view("chr1:4-8")),
+        "#chrom\tstart\tend\tdepth\n\
+         chr1\t4\t5\t7\n\
+         chr1\t5\t8\t0\n"
+    );
+    let past_end = view("chr1:0-11");
+    assert!(!past_end.status.success());
+    let error = String::from_utf8_lossy(&past_end.stderr);
+    assert!(error.contains("outside length 10"), "{error}");
 }
 
 #[test]

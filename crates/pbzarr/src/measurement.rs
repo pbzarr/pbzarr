@@ -133,8 +133,8 @@ impl<'a> Measurement<'a> {
         Ok(self.chunk)
     }
 
-    /// Decode unit as (positions, columns), which `stat` plans reads around.
-    pub(crate) fn inner_chunk_shape(&self) -> Result<(u64, u64)> {
+    /// Decode unit as (positions, columns), which `view` and `stat` plan reads around.
+    pub fn inner_chunk_shape(&self) -> Result<(u64, u64)> {
         Ok(self.inner)
     }
 
@@ -166,7 +166,7 @@ impl<'a> Measurement<'a> {
     }
 
     /// Read a flat position range for a column subrange of a rank-2 track.
-    pub(crate) fn read_flat_columns<T: Numeric>(
+    pub fn read_flat_columns<T: Numeric>(
         &self,
         position: Range<u64>,
         columns: Range<u64>,

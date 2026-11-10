@@ -7,16 +7,21 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use noodles_bgzf as bgzf;
-use pbzarr::Dataset;
-use pbzarr::Measurement;
 use pbzarr::io::{Dtype, Numeric};
+use pbzarr::{Dataset, Measurement, RegionQuery};
+use rayon::prelude::*;
 
-/// Target bytes fetched per batch (full stored width).
-const BATCH_TARGET_BYTES: usize = 64 << 20;
+use crate::regions::{NamedRegion, select_regions};
+
+/// Target bytes fetched per batch over the selected columns.
+const BATCH_TARGET_BYTES: u64 = 64 << 20;
+const BATCH_MAX_ROWS: u64 = 4 << 20;
 
 pub(crate) struct ViewSpec {
     pub store: PathBuf,
     pub track: Option<String>,
+    pub regions: Vec<RegionQuery>,
+    pub regions_file: Option<PathBuf>,
     pub columns: Vec<String>,
     pub output: Option<PathBuf>,
     pub no_header: bool,
@@ -38,12 +43,18 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
     let store = open_store(&spec.store)?;
     let measurement = resolve_measurement(&store, spec.track.as_deref())?;
     let (columns, names) = resolve_columns(&measurement, &spec.columns)?;
+    let regions = select_regions(
+        measurement.reference(),
+        &spec.regions,
+        spec.regions_file.as_ref(),
+    )?;
     let precision = usize::from(spec.precision);
     match spec.output.as_deref() {
         None => {
             let mut out = BufWriter::new(io::stdout());
             stream(
                 &measurement,
+                &regions,
                 &columns,
                 &names,
                 spec.no_header,
@@ -63,6 +74,7 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
             let mut out = bgzf::io::MultithreadedWriter::new(file);
             stream(
                 &measurement,
+                &regions,
                 &columns,
                 &names,
                 spec.no_header,
@@ -77,6 +89,7 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
             let mut out = BufWriter::new(file);
             stream(
                 &measurement,
+                &regions,
                 &columns,
                 &names,
                 spec.no_header,
@@ -175,6 +188,7 @@ fn resolve_columns(
 
 fn stream<W: Write>(
     measurement: &Measurement,
+    regions: &[NamedRegion],
     columns: &[usize],
     names: &[String],
     no_header: bool,
@@ -189,17 +203,17 @@ fn stream<W: Write>(
         writeln!(out)?;
     }
     match measurement.dtype() {
-        Dtype::U8 => export::<u8, _>(measurement, columns, precision, out),
-        Dtype::U16 => export::<u16, _>(measurement, columns, precision, out),
-        Dtype::U32 => export::<u32, _>(measurement, columns, precision, out),
-        Dtype::U64 => export::<u64, _>(measurement, columns, precision, out),
-        Dtype::I8 => export::<i8, _>(measurement, columns, precision, out),
-        Dtype::I16 => export::<i16, _>(measurement, columns, precision, out),
-        Dtype::I32 => export::<i32, _>(measurement, columns, precision, out),
-        Dtype::I64 => export::<i64, _>(measurement, columns, precision, out),
-        Dtype::F32 => export::<f32, _>(measurement, columns, precision, out),
-        Dtype::F64 => export::<f64, _>(measurement, columns, precision, out),
-        Dtype::Bool => export::<bool, _>(measurement, columns, precision, out),
+        Dtype::U8 => export::<u8, _>(measurement, regions, columns, precision, out),
+        Dtype::U16 => export::<u16, _>(measurement, regions, columns, precision, out),
+        Dtype::U32 => export::<u32, _>(measurement, regions, columns, precision, out),
+        Dtype::U64 => export::<u64, _>(measurement, regions, columns, precision, out),
+        Dtype::I8 => export::<i8, _>(measurement, regions, columns, precision, out),
+        Dtype::I16 => export::<i16, _>(measurement, regions, columns, precision, out),
+        Dtype::I32 => export::<i32, _>(measurement, regions, columns, precision, out),
+        Dtype::I64 => export::<i64, _>(measurement, regions, columns, precision, out),
+        Dtype::F32 => export::<f32, _>(measurement, regions, columns, precision, out),
+        Dtype::F64 => export::<f64, _>(measurement, regions, columns, precision, out),
+        Dtype::Bool => export::<bool, _>(measurement, regions, columns, precision, out),
     }
 }
 
@@ -272,61 +286,154 @@ impl Cell for bool {
     }
 }
 
-/// Read one batch as per-output-column vectors, quantized to the output
-/// precision. `columns` is empty for rank-1 tracks. `read_flat` returns a
-/// standard-layout (row-major) array, so `raw[row * n_cols + col]` addresses
-/// `(row, col)`.
-fn read_columns<T: Cell>(
-    measurement: &Measurement,
-    positions: std::ops::Range<u64>,
-    columns: &[usize],
-    precision: usize,
-) -> Result<Vec<Vec<T>>> {
-    let array = measurement.read_flat::<T>(positions)?;
-    if measurement.rank() == 1 {
-        let raw = array.into_raw_vec_and_offset().0;
-        return Ok(vec![
-            raw.into_iter().map(|v| v.quantize(precision)).collect(),
-        ]);
-    }
-    let n_cols = array.shape()[1];
-    let raw = array.into_raw_vec_and_offset().0;
-    let rows = raw.len() / n_cols.max(1);
-    Ok(columns
-        .iter()
-        .map(|&col| {
-            (0..rows)
-                .map(|row| raw[row * n_cols + col].quantize(precision))
-                .collect()
-        })
-        .collect())
+/// One read of a contiguous column range and the output slots it fills.
+struct ColumnRead {
+    cols: std::ops::Range<u64>,
+    /// (output slot, track column) pairs.
+    picks: Vec<(usize, usize)>,
 }
 
-/// Stream the whole track in genome order, collapsing equal-value runs.
-/// One `read_flat` per batch; zarrs decodes its chunks concurrently.
+/// Reads that touch only the inner column chunks holding selected columns.
+/// Touched chunks that are next to each other share one read.
+fn column_reads(columns: &[usize], inner_col: u64) -> Vec<ColumnRead> {
+    let inner_col = inner_col.max(1);
+    let mut picks: Vec<(usize, usize)> = columns.iter().copied().enumerate().collect();
+    picks.sort_by_key(|&(slot, col)| (col, slot));
+    let mut reads: Vec<ColumnRead> = Vec::new();
+    for (slot, col) in picks {
+        let chunk = col as u64 / inner_col;
+        match reads.last_mut() {
+            Some(read) if chunk <= (read.cols.end - 1) / inner_col + 1 => {
+                read.cols.end = read.cols.end.max(col as u64 + 1);
+                read.picks.push((slot, col));
+            }
+            _ => reads.push(ColumnRead {
+                cols: col as u64..col as u64 + 1,
+                picks: vec![(slot, col)],
+            }),
+        }
+    }
+    reads
+}
+
+/// Batch plan on the inner chunk grid of the selected columns.
+struct Plan {
+    inner_pos: u64,
+    batch_chunks: u64,
+    /// Empty for rank-1 tracks.
+    reads: Vec<ColumnRead>,
+    n_out: usize,
+}
+
+impl Plan {
+    fn new(measurement: &Measurement, columns: &[usize]) -> Result<Self> {
+        let (inner_pos, inner_col) = measurement.inner_chunk_shape()?;
+        let inner_pos = inner_pos.max(1);
+        let reads = if measurement.rank() == 1 {
+            Vec::new()
+        } else {
+            column_reads(columns, inner_col)
+        };
+        let width: u64 = if reads.is_empty() {
+            1
+        } else {
+            reads
+                .iter()
+                .map(|read| read.cols.end - read.cols.start)
+                .sum()
+        };
+        let per_chunk = inner_pos * width * measurement.dtype().size() as u64;
+        let batch_chunks = (BATCH_TARGET_BYTES / per_chunk.max(1))
+            .min(BATCH_MAX_ROWS / inner_pos)
+            .max(1);
+        Ok(Self {
+            inner_pos,
+            batch_chunks,
+            reads,
+            n_out: columns.len().max(1),
+        })
+    }
+
+    /// End of the batch that starts at flat position `lo`, at most `hi`.
+    fn batch_end(&self, lo: u64, hi: u64) -> u64 {
+        let first = lo / self.inner_pos * self.inner_pos;
+        (first + self.batch_chunks * self.inner_pos).min(hi)
+    }
+
+    /// Read one batch as per-output-column vectors, quantized to the output
+    /// precision. `read_flat_columns` returns a row-major array, so
+    /// `raw[row * width + col]` addresses `(row, col)`.
+    fn read<T: Cell>(
+        &self,
+        measurement: &Measurement,
+        positions: std::ops::Range<u64>,
+        precision: usize,
+    ) -> Result<Vec<Vec<T>>> {
+        if self.reads.is_empty() {
+            let raw = measurement
+                .read_flat::<T>(positions)?
+                .into_raw_vec_and_offset()
+                .0;
+            return Ok(vec![
+                raw.into_iter().map(|v| v.quantize(precision)).collect(),
+            ]);
+        }
+        let parts: Vec<Vec<(usize, Vec<T>)>> = self
+            .reads
+            .par_iter()
+            .map(|read| {
+                let raw = measurement
+                    .read_flat_columns::<T>(positions.clone(), read.cols.clone())?
+                    .into_raw_vec_and_offset()
+                    .0;
+                let width = (read.cols.end - read.cols.start) as usize;
+                let first = read.cols.start as usize;
+                let rows = raw.len() / width;
+                Ok(read
+                    .picks
+                    .iter()
+                    .map(|&(slot, col)| {
+                        let values = (0..rows)
+                            .map(|row| raw[row * width + col - first].quantize(precision))
+                            .collect();
+                        (slot, values)
+                    })
+                    .collect())
+            })
+            .collect::<Result<_>>()?;
+        let mut out: Vec<Vec<T>> = (0..self.n_out).map(|_| Vec::new()).collect();
+        for (slot, values) in parts.into_iter().flatten() {
+            out[slot] = values;
+        }
+        Ok(out)
+    }
+}
+
+/// Stream each region in order, collapsing equal-value runs. Runs do not
+/// cross region edges.
 fn export<T: Cell, W: Write>(
     measurement: &Measurement,
+    regions: &[NamedRegion],
     columns: &[usize],
     precision: usize,
     out: &mut W,
 ) -> Result<()> {
-    let per_row = measurement.columns_count()? * measurement.dtype().size();
-    let batch_rows = (BATCH_TARGET_BYTES / per_row.max(1)).clamp(1, 4 << 20) as u64;
+    let plan = Plan::new(measurement, columns)?;
     let offsets = measurement.reference().offsets();
-    for (id, contig) in measurement.reference().iter() {
-        let base = offsets[id.as_usize()];
-        // Open run on this contig: (start, end, values).
+    for named in regions {
+        let base = offsets[named.region.contig.as_usize()];
+        let chrom = named.chrom.as_str();
+        // Open run in this region: (start, end, values).
         let mut run: Option<(u64, u64, Vec<T>)> = None;
-        let mut start = 0u64;
-        while start < contig.length {
-            let end = (start + batch_rows).min(contig.length);
-            let batch =
-                read_columns::<T>(measurement, base + start..base + end, columns, precision)?;
+        let mut start = named.region.start;
+        while start < named.region.end {
+            let end = plan.batch_end(base + start, base + named.region.end) - base;
+            let batch = plan.read::<T>(measurement, base + start..base + end, precision)?;
             let rows = batch.first().map_or(0, Vec::len);
             for row in 0..rows {
                 let pos = start + row as u64;
                 if batch.iter().all(|column| column[row].is_missing()) {
-                    flush(out, &contig.name, &mut run, precision)?;
+                    flush(out, chrom, &mut run, precision)?;
                     continue;
                 }
                 let extends = run.as_ref().is_some_and(|(_, run_end, values)| {
@@ -340,7 +447,7 @@ fn export<T: Cell, W: Write>(
                     run.as_mut().expect("checked above").1 += 1;
                     continue;
                 }
-                flush(out, &contig.name, &mut run, precision)?;
+                flush(out, chrom, &mut run, precision)?;
                 run = Some((
                     pos,
                     pos + 1,
@@ -349,7 +456,7 @@ fn export<T: Cell, W: Write>(
             }
             start = end;
         }
-        flush(out, &contig.name, &mut run, precision)?;
+        flush(out, chrom, &mut run, precision)?;
     }
     Ok(())
 }
@@ -374,6 +481,14 @@ fn flush<T: Cell>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_reads_skip_untouched_chunks_and_merge_neighbors() {
+        let reads = column_reads(&[9, 0, 3], 2);
+        let spans: Vec<_> = reads.iter().map(|r| r.cols.clone()).collect();
+        assert_eq!(spans, vec![0..4, 9..10]);
+        assert_eq!(reads[0].picks, vec![(1, 0), (2, 3)]);
+    }
 
     #[test]
     fn quantize_collapses_values_that_print_identically() {

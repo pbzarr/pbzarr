@@ -12,7 +12,7 @@ use pbzarr::import::progress;
 use pbzarr::import::{Config, ConfigBuilder};
 use pbzarr::import::{Target, store_reference};
 use pbzarr::io::Dtype;
-use pbzarr::{ExplicitArraySpec, Reference};
+use pbzarr::{ExplicitArraySpec, Reference, RegionQuery};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
     OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam, from_bed_matrix,
@@ -21,6 +21,7 @@ use pbzarr_readers::{
 };
 
 mod fmt;
+mod regions;
 mod stat;
 mod view;
 
@@ -47,7 +48,7 @@ enum Command {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  pbz view cohort.pbz --track depth\n  pbz view cohort.pbz --track depth -o depth.bedgraph.gz\n  pbz view cohort.pbz --track af -c s1,s2"
+    after_help = "Examples:\n  pbz view cohort.pbz --track depth\n  pbz view cohort.pbz --track depth -r chr1:0-1000000 -o depth.bedgraph.gz\n  pbz view cohort.pbz --track af -c s1,s2 -R targets.bed\n\nEach region is written in order. Rows do not extend across region edges."
 )]
 struct ViewArgs {
     /// PBZ store to export.
@@ -55,6 +56,8 @@ struct ViewArgs {
     /// Track to export. Optional when the store holds exactly one track.
     #[arg(long)]
     track: Option<String>,
+    #[command(flatten)]
+    regions: RegionArgs,
     /// Column labels of a rank-2 track, comma-separated or repeated.
     /// Default: all columns in stored order.
     #[arg(short('c'), long, value_name = "LABEL", value_delimiter = ',')]
@@ -77,7 +80,7 @@ struct ViewArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  pbz stat cohort.pbz --track depth\n  pbz stat cohort.pbz --track depth -s median --region targets.bed\n  pbz stat cohort.pbz --track af -s hist -c s1,s2"
+    after_help = "Examples:\n  pbz stat cohort.pbz --track depth\n  pbz stat cohort.pbz --track depth -s median -R targets.bed\n  pbz stat cohort.pbz --track depth -r chr1:0-1000 -r chr2:500-900\n  pbz stat cohort.pbz --track af -s hist -c s1,s2\n\nWithout a region, stat writes one row per contig."
 )]
 struct StatArgs {
     /// PBZ store to read.
@@ -85,10 +88,8 @@ struct StatArgs {
     /// Track to compute over. Optional when the store holds exactly one track.
     #[arg(long)]
     track: Option<String>,
-    /// BED file with the regions to compute over. Default: one region per
-    /// chromosome.
-    #[arg(long, value_name = "BED")]
-    region: Option<PathBuf>,
+    #[command(flatten)]
+    regions: RegionArgs,
     /// Statistic: mean, min, max, median, or hist.
     #[arg(short('s'), long, value_name = "STAT", default_value = "mean")]
     stat: String,
@@ -108,6 +109,22 @@ struct StatArgs {
     /// Significant digits for float values, `%g` style.
     #[arg(short('p'), long, value_name = "N", default_value_t = 6)]
     precision: u8,
+}
+
+#[derive(Debug, Args)]
+struct RegionArgs {
+    /// Region CHROM:START-END, 0-based and half-open as in BED
+    /// (chr1:0-100 is the first 100 bases). CHROM alone selects the whole
+    /// contig. An end past the contig is an error. Repeat for more regions.
+    /// Without -r or -R, the command reads the whole genome.
+    #[arg(short('r'), long = "region", value_name = "REGION")]
+    region: Vec<RegionQuery>,
+    /// BED file (plain, gzip, or bgzip) with regions to read after the -r
+    /// regions. The first three tab-separated columns give CHROM, START,
+    /// END, 0-based and half-open. Lines that start with #, track, or
+    /// browser are skipped.
+    #[arg(short('R'), long = "regions", value_name = "BED")]
+    regions: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -713,8 +730,8 @@ fn main() -> Result<()> {
     init_logging(&cli.global);
     let quiet = cli.global.quiet;
     match cli.command {
-        Command::View(args) => view(args),
-        Command::Stat(args) => stat(args),
+        Command::View(args) => end_quietly_on_broken_pipe(view(args)),
+        Command::Stat(args) => end_quietly_on_broken_pipe(stat(args)),
         Command::Import(import) => match import.format {
             ImportCommand::Bed(args) => import_bed(args, quiet),
             ImportCommand::Bam(args) => import_bam(args, quiet),
@@ -730,10 +747,28 @@ fn main() -> Result<()> {
     }
 }
 
+/// A closed stdout, as from `pbz view | head`, is a normal end.
+fn end_quietly_on_broken_pipe(result: Result<()>) -> Result<()> {
+    match result {
+        Err(err)
+            if err.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
+            }) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
 fn view(args: ViewArgs) -> Result<()> {
     view::run_view(&view::ViewSpec {
         store: args.store,
         track: args.track,
+        regions: args.regions.region,
+        regions_file: args.regions.regions,
         columns: args.columns,
         output: args.output,
         no_header: args.no_header,
@@ -746,7 +781,8 @@ fn stat(args: StatArgs) -> Result<()> {
     stat::run_stat(&stat::StatSpec {
         store: args.store,
         track: args.track,
-        region: args.region,
+        regions: args.regions.region,
+        regions_file: args.regions.regions,
         stat: args.stat,
         columns: args.columns,
         output: args.output,
