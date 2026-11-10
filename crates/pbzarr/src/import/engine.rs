@@ -169,20 +169,14 @@ impl FillDecode for bool {
     }
 }
 
-/// Disjoint rank-1 column views borrowing the original lifetime. `cols` must
-/// be strictly increasing: each split consumes the view up to that column.
-fn take_columns<'a, T>(
-    mut view: ArrayViewMut2<'a, T>,
-    cols: &[usize],
-) -> Vec<ArrayViewMut1<'a, T>> {
-    let mut out = Vec::with_capacity(cols.len());
-    let mut offset = 0usize;
-    for &c in cols {
-        let (_, rest) = view.split_at(Axis(1), c - offset);
-        let (column, rest) = rest.split_at(Axis(1), 1);
+/// One rank-1 view per column, borrowing the original lifetime.
+fn split_columns<'a, T>(mut view: ArrayViewMut2<'a, T>) -> Vec<ArrayViewMut1<'a, T>> {
+    let ncols = view.ncols();
+    let mut out = Vec::with_capacity(ncols);
+    for _ in 0..ncols {
+        let (column, rest) = view.split_at(Axis(1), 1);
         out.push(column.remove_axis(Axis(1)));
         view = rest;
-        offset = c + 1;
     }
     out
 }
@@ -205,12 +199,11 @@ macro_rules! tile_buffer {
                 })
             }
 
-            /// `cols` holds strictly increasing buffer-local column indices;
-            /// the sinks come back in `cols` order.
-            fn column_sinks(&mut self, rows: Range<usize>, cols: &[usize]) -> Vec<OutputSinkMut<'_>> {
+            /// One sink per buffer column, in column order.
+            fn column_sinks(&mut self, rows: Range<usize>) -> Vec<OutputSinkMut<'_>> {
                 match self {
                     $( TileBuffer::$variant(a) => {
-                        take_columns(a.slice_mut(s![rows.clone(), ..]), cols)
+                        split_columns(a.slice_mut(s![rows.clone(), ..]))
                             .into_iter()
                             .map(OutputSinkMut::$variant)
                             .collect()
@@ -1174,8 +1167,7 @@ impl WindowSink for PieceSink<'_, '_> {
             local
                 .refill(&ctx.geoms[entry.t_idx].fill)
                 .map_err(to_reader_err)?;
-            let cols: Vec<usize> = (0..entry.fields.len()).collect();
-            for (&(field, _), sink) in entry.fields.iter().zip(local.column_sinks(0..n, &cols)) {
+            for (&(field, _), sink) in entry.fields.iter().zip(local.column_sinks(0..n)) {
                 staged[field] = Some(sink);
             }
         }
