@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 /// Errors returned by `ValueReader` impls.
 ///
-/// Every variant carries the source path so cohort-scale import can attribute
-/// failures to a specific input. Orchestrators decorate further (which sample,
-/// which region) at their layer.
+/// `Io` and `ContigNotFound` carry the source path so cohort-scale import can
+/// attribute failures to a specific input. Orchestrators decorate further
+/// (which sample, which region) at their layer.
 #[derive(Debug, thiserror::Error)]
 pub enum ReaderError {
     #[error("I/O error in {path}: {source}", path = path.display())]
