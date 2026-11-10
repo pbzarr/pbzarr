@@ -110,7 +110,7 @@ pub struct Track {
     /// once keeps per-region reads/writes cheap.
     pub(crate) values: RwLock<Option<Arc<Array<dyn ReadableWritableListableStorageTraits>>>>,
     /// Whether this track carries a published `multiscales` pyramid. Set from
-    /// the group attrs at open (and by `scale` after publication); a sealed
+    /// the group attrs at open; a sealed
     /// track rejects base writes until the pyramid is unpublished.
     pub(crate) sealed: AtomicBool,
 }
@@ -317,11 +317,6 @@ impl Track {
         Ok(arr)
     }
 
-    /// Mark this handle as carrying a published `multiscales` pyramid.
-    pub(crate) fn seal(&self) {
-        self.sealed.store(true, Ordering::Release);
-    }
-
     /// The seal: base writes on a track with a published pyramid are an error
     /// (the levels would silently go stale). Callers must unpublish first.
     fn ensure_unsealed(&self) -> Result<()> {
@@ -396,8 +391,7 @@ impl Track {
     }
 
     /// Read one rectangular tile of a rank-2 track using flat position and
-    /// column ranges. The scale engine uses this to bound slab memory on wide
-    /// cohort tracks (whole bins x a column subrange per read).
+    /// column ranges.
     pub(crate) fn read_flat_columns<T: Numeric>(
         &self,
         position: std::ops::Range<u64>,

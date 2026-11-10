@@ -229,8 +229,7 @@ impl PbzStore {
 
         // Track completion is a publication event: refresh the consolidated
         // metadata last, once for the whole batch, so a reader resolving
-        // solely from the root map sees the new tracks. Same ordering as the
-        // pyramid publish in `scale` (node metadata first, root refresh last).
+        // solely from the root map sees the new tracks.
         self.consolidate_metadata()?;
 
         Ok(result)

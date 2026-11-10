@@ -34,8 +34,7 @@ def main(argv: list[str]) -> int:
     missing = [path for path in expected if path not in found]
     assert not missing, f"{store}: missing from consolidated metadata: {missing}"
 
-    # The consolidated view alone must resolve every node, including the
-    # multiscale level arrays.
+    # The consolidated view alone must resolve every node.
     for path in sorted(found):
         node = group[path]
         if isinstance(node, zarr.Array):

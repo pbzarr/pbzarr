@@ -2,7 +2,7 @@
 
 PBZ is a small Zarr v3 convention for dense, per-base genomic data. The format supplies genomic interpretation and a flat track layout; Zarr supplies storage and codecs; xarray and Dask supply the Python read and analysis model.
 
-Format 0.5 (one root Dataset) is what imports write and what Python reads; see the [format 0.5 specification](../spec/README.md). The 0.4 per-track layout described in parts of this document is legacy: the Rust `PbzStore` API, `pbz view`, `pbz stat`, and pyramids still use it. Earlier contig-major and wrapper-oriented designs are historical only.
+Format 0.5 (one root Dataset) is what imports write and what Python reads; see the [format 0.5 specification](../spec/README.md). The 0.4 per-track layout described in parts of this document is legacy: the Rust `PbzStore` API, `pbz view`, and `pbz stat` still use it. Earlier contig-major and wrapper-oriented designs are historical only.
 
 ## Development reader
 
@@ -16,8 +16,8 @@ external changes. It does not provide a concurrent-mutation snapshot.
 
 CLI imports and appends write format `0.5`, and `pbz view` and `pbz stat`
 read both layouts. Python opens a `0.5` store as an `xr.Dataset` with
-`pbzarr.open` and refuses `0.4` stores. `PbzStore` remains the `0.4` Rust API, and
-pyramids exist only there. `Dataset` refuses a format `0.4` root with
+`pbzarr.open` and refuses `0.4` stores. `PbzStore` remains the `0.4` Rust API.
+`Dataset` refuses a format `0.4` root with
 `PbzError::LegacyFormat`. The Python import functions also refuse a `0.4`
 destination.
 
@@ -63,8 +63,7 @@ example.pbz/
 │   ├── values                 # (ΣL, n_columns), (position, sample)
 │   ├── offsets                # int64[k + 1], (contig_boundary,)
 │   ├── contigs                # vlen-utf8[k], (contig,)
-│   ├── sample                 # vlen-utf8[n_columns], (sample,)
-│   └── scales/16/mean         # optional pyramid level, float32, (bin, sample)
+│   └── sample                 # vlen-utf8[n_columns], (sample,)
 └── mask/
     ├── zarr.json
     ├── values                 # (ΣL,), (position,)
@@ -92,9 +91,7 @@ Optional `perbase:description` and `perbase:source` annotate a track. Dtype, fil
 
 A writer creates arrays first and writes the track’s `perbase:` interpretation block last. The marker is therefore a completion record: discovery skips a child without it because it may be a partial import or unrelated Zarr group.
 
-A track can carry an opt-in multiscale pyramid. Each level is a float32 array of per-bin means at `<track>/scales/<factor>/mean`. The writer bins each contig independently, so no bin crosses a contig boundary, and the last bin of a contig can be short. On NaN-fill tracks the mean skips NaN positions, and an all-NaN bin is NaN. The writer builds levels only after the base track publishes, and it stores the `multiscales` track attribute last, as the pyramid’s completion marker. Publication also seals the base: the library rejects later `values` writes on a track with a published pyramid.
-
-The root `zarr.json` also carries a consolidated metadata map in the zarr-python v3 flavor: every node’s metadata document, inlined verbatim. Writers refresh the map on each track or pyramid publication. The copy is advisory: the per-node `zarr.json` documents stay authoritative.
+The root `zarr.json` also carries a consolidated metadata map in the zarr-python v3 flavor: every node’s metadata document, inlined verbatim. Writers refresh the map on each track publication. The copy is advisory: the per-node `zarr.json` documents stay authoritative.
 
 ## Chunks and shards
 
@@ -156,6 +153,6 @@ The `pbz` CLI ships `import d4`, `import bigwig`, `import bed`, and `import bam`
 
 ## Deferred work
 
-Benchmarks, append from Python, cloud write adapters, and pyramid unpublish or rescale remain future work.
+Benchmarks, append from Python, and cloud write adapters remain future work.
 
 Rectilinear chunk-grid opening needs upstream support and is not a current PBZ read mode. On-disk region reads and writes are likewise not part of the Python or PyO3 surface.
