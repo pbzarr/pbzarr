@@ -21,7 +21,8 @@ pub use array::{TrackConfig, validate_node_name};
 pub use codec_spec::ExplicitArraySpec;
 pub use dataset::{
     BinInterval, Contig, ContigId, Dataset, FORMAT_VERSION, GenomicAxis, Reference, Region, Role,
-    Support, ValidationIssue, ValidationReport, ValidationStatus, VariableInfo, is_zip_store,
+    StoredSize, Support, ValidationIssue, ValidationReport, ValidationStatus, VariableInfo,
+    is_zip_store,
 };
 pub use error::{PbzError, Result};
 pub use import::{Import, ImportBuilder};

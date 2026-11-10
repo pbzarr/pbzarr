@@ -21,8 +21,10 @@ use pbzarr_readers::{
 };
 
 mod fmt;
+mod info;
 mod regions;
 mod stat;
+mod validate;
 mod view;
 
 #[derive(Debug, Parser)]
@@ -44,6 +46,36 @@ enum Command {
     Import(Box<ImportArgs>),
     /// Append columns to a track of a format-0.5 PBZ store.
     Append(Box<AppendArgs>),
+    /// Print the reference, dimensions and per-variable layout of a store.
+    Info(InfoArgs),
+    /// Check a store against the PBZ format rules. Exit code 1 when the
+    /// store is not valid.
+    Validate(ValidateArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Examples:\n  pbz info cohort.pbz\n  pbz info cohort.pbz.zip --json\n\nThe chunk column gives the inner chunk shape. The shard column gives the shard shape, or - when the array is not sharded. stored and objects count the chunk or shard objects, without the zarr.json metadata."
+)]
+struct InfoArgs {
+    /// PBZ store to describe (directory or zip).
+    store: PathBuf,
+    /// Print one JSON object instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Examples:\n  pbz validate cohort.pbz\n  pbz validate cohort.pbz.zip --json\n\nThe check reads metadata, the reference arrays and the dimension labels. It does not read track values."
+)]
+struct ValidateArgs {
+    /// PBZ store to check (directory or zip).
+    store: PathBuf,
+    /// Print one JSON object with the status and the problems. Each problem
+    /// also gives the code of the format rule it breaks.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -744,6 +776,13 @@ fn main() -> Result<()> {
             AppendCommand::D4(args) => append_d4(args, quiet),
             AppendCommand::BigWig(args) => append_bigwig(args, quiet),
         },
+        Command::Info(args) => end_quietly_on_broken_pipe(info::run_info(&args.store, args.json)),
+        Command::Validate(args) => {
+            if !validate::run_validate(&args.store, args.json)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
     }
 }
 

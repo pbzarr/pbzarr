@@ -176,6 +176,23 @@ pbz view cohort.pbz --track signal -r chr1:0-1000000 -r chr2:500-900
 
 `pbz view` and `pbz stat` write to stdout when you do not give `-o`. When the store has one track, `--track` is optional.
 
+Show the layout of a store:
+
+```sh
+pbz info cohort.pbz
+pbz info cohort.pbz --json
+```
+
+`pbz info` prints the format version, the contigs and their lengths, and the size of each dimension. For each variable, it prints the dtype, dimensions, shape, chunk shape, shard shape, codecs, fill value, stored bytes, and number of stored objects. `--json` prints the same data as one JSON object.
+
+Check a store against the format rules:
+
+```sh
+pbz validate cohort.pbz
+```
+
+`pbz validate` prints each problem as one line of text. The exit code is 0 when the store is valid and 1 when it is not valid. The check reads metadata, the reference arrays, and the dimension labels. It does not read track values. `--json` prints the status and the problems, and each problem gives the code of the format rule that it breaks.
+
 ## Single-file stores
 
 Import into a single zip file:
@@ -186,7 +203,7 @@ pbz import d4 cohort.pbz.zip s1.d4 s2.d4 --track depth --zip
 
 A store path that ends in `.zip` also writes a zip store, so `--zip` is optional here. The store path must not exist. The import writes a temporary file beside the store path and renames it at the end, so a failed import leaves no file.
 
-A zip store is written once. `pbz import` cannot add tracks to it, and `pbz append` refuses it. Without a shard flag or `--codecs`, each shard holds 64 position chunks and all columns. An import refuses `--codecs` without a `sharding_indexed` codec. `pbz view` and `pbz stat` read zip stores.
+A zip store is written once. `pbz import` cannot add tracks to it, and `pbz append` refuses it. Without a shard flag or `--codecs`, each shard holds 64 position chunks and all columns. An import refuses `--codecs` without a `sharding_indexed` codec. `pbz view`, `pbz stat`, `pbz info`, and `pbz validate` read zip stores.
 
 Open a zip store in Python:
 

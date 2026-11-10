@@ -15,7 +15,9 @@ use std::{
     sync::Arc,
 };
 pub(crate) use write::DatasetPlan;
-use zarrs::storage::{ReadableStorage, ReadableWritableListableStorage};
+use zarrs::storage::{
+    ListableStorage, ReadableStorage, ReadableWritableListableStorage, StorePrefix,
+};
 
 /// The `pbz:version` value written to, and required of, a root-Dataset store.
 pub const FORMAT_VERSION: &str = "0.5";
@@ -53,6 +55,8 @@ pub struct Dataset {
     /// The archive that [`Dataset::close`] writes, for a store made by
     /// [`Dataset::create_zip`].
     zip: Option<Arc<crate::zip_store::ZipStore>>,
+    /// `None` when the storage cannot list its keys.
+    lister: Option<ListableStorage>,
     reference_cache: std::sync::OnceLock<Reference>,
     handles: std::sync::Mutex<BTreeMap<String, Arc<read::ArrayHandle>>>,
     root: serde_json::Value,
@@ -110,23 +114,34 @@ impl Dataset {
         };
         let files = zarrs::filesystem::FilesystemStore::new(parent).map_err(|e| store_error(&e))?;
         let key = zarrs::storage::StoreKey::new(name).map_err(|e| store_error(&e))?;
-        let zip =
-            zarrs_zip::ZipStorageAdapter::new(Arc::new(files), key).map_err(|e| store_error(&e))?;
-        Self::open_readable(Arc::new(zip))
+        let zip = Arc::new(
+            zarrs_zip::ZipStorageAdapter::new(Arc::new(files), key).map_err(|e| store_error(&e))?,
+        );
+        let mut dataset = Self::open_readable(zip.clone())?;
+        dataset.lister = Some(zip);
+        Ok(dataset)
     }
     fn open_reader(
         reader: ReadableStorage,
         nodes: metadata::Nodes,
         dir: Option<PathBuf>,
     ) -> Result<Self> {
+        let lister = match &nodes {
+            metadata::Nodes::Listed(lister) => Some(lister.clone()),
+            metadata::Nodes::Consolidated => None,
+        };
         let (root, variables) = metadata::catalog(&reader, nodes)?;
-        Ok(Self::new(reader, None, dir, root, variables))
+        let mut dataset = Self::new(reader, None, dir, root, variables);
+        dataset.lister = lister;
+        Ok(dataset)
     }
     fn open_in(storage: ReadableWritableListableStorage, dir: Option<PathBuf>) -> Result<Self> {
         let reader: ReadableStorage = storage.clone();
         let (root, variables) =
             metadata::catalog(&reader, metadata::Nodes::Listed(storage.clone()))?;
-        Ok(Self::new(reader, Some(storage), dir, root, variables))
+        let mut dataset = Self::new(reader, Some(storage.clone()), dir, root, variables);
+        dataset.lister = Some(storage);
+        Ok(dataset)
     }
     fn new(
         reader: ReadableStorage,
@@ -140,6 +155,7 @@ impl Dataset {
             writer,
             dir,
             zip: None,
+            lister: None,
             reference_cache: std::sync::OnceLock::new(),
             handles: std::sync::Mutex::new(BTreeMap::new()),
             root,
@@ -158,4 +174,35 @@ impl Dataset {
     pub fn variables(&self) -> &BTreeMap<String, VariableInfo> {
         &self.variables
     }
+    /// The bytes and the number of stored objects (chunks or shards) of one
+    /// root array, without its `zarr.json`. `None` when the storage cannot
+    /// list its keys, as for [`Dataset::open_readable`].
+    pub fn stored_size(&self, name: &str) -> Result<Option<StoredSize>> {
+        let Some(lister) = &self.lister else {
+            return Ok(None);
+        };
+        let store_error = |e: zarrs::storage::StorageError| PbzError::Store(e.to_string());
+        let prefix =
+            StorePrefix::new(format!("{name}/")).map_err(|e| PbzError::Store(e.to_string()))?;
+        let mut size = StoredSize::default();
+        for key in lister.list_prefix(&prefix).map_err(store_error)? {
+            if key.as_str().ends_with("zarr.json") {
+                continue;
+            }
+            size.objects += 1;
+            size.bytes += self
+                .reader
+                .size_key(&key)
+                .map_err(store_error)?
+                .unwrap_or(0);
+        }
+        Ok(Some(size))
+    }
+}
+
+/// The stored data of one array. See [`Dataset::stored_size`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct StoredSize {
+    pub bytes: u64,
+    pub objects: u64,
 }
