@@ -11,7 +11,7 @@ use zarrs::{
     metadata::ArrayMetadata,
 };
 
-pub(super) type ArrayHandle = Array<dyn zarrs::storage::ReadableWritableListableStorageTraits>;
+pub(super) type ArrayHandle = Array<dyn zarrs::storage::ReadableStorageTraits>;
 
 /// Keep coordinate meaning in its physical domain, including infinities.
 pub(super) enum CoordinateValue {
@@ -133,7 +133,7 @@ impl Dataset {
         let meta = super::metadata::storage_metadata(info)?;
         let array = Arc::new(
             Array::new_with_metadata(
-                self.storage.clone(),
+                self.reader.clone(),
                 &format!("/{name}"),
                 ArrayMetadata::V3(meta),
             )

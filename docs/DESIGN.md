@@ -26,7 +26,7 @@ this copy as its last step. On a filesystem store, the Rust writer writes the
 new root to a temporary file and renames it over `zarr.json`. Until that step,
 the old copy shows the store as it was before the Rust write. A Python write
 removes the copy while `to_zarr` runs. `Dataset::open` lists the store and does
-not use the copy.
+not use the copy. `Dataset::open_readable` takes the variable list from the copy.
 
 ## Goals
 
@@ -78,7 +78,7 @@ Every `xr.DataArray` and `xr.Dataset` from `open` carries a 0-d coordinate named
 
 ## Rust API
 
-`Dataset::create(path, reference)` and `Dataset::open(path)` operate on filesystem stores. `create_with_storage` and `open_with_storage` take any synchronous readable, writable, listable Zarr storage handle. `TrackConfig::new(dtype)` configures scalar or 2D tracks with generic columns, chunking, optional sharding, fill value, and optional description or source metadata. `Dataset::read_region<T>` reads one region of a track at full column width.
+`Dataset::create(path, reference)` and `Dataset::open(path)` operate on filesystem stores. `create_with_storage` and `open_with_storage` take any synchronous readable, writable, listable Zarr storage handle. `Dataset::open_read_only(path)` opens a filesystem store for reads only. It lists the store, as `Dataset::open` does. `Dataset::open_readable(storage)` takes any readable storage handle. It does not list or write the storage. It takes the variable list from the consolidated copy, so the store must have the copy. A read-only Dataset refuses every import and append. `pbz view` and `pbz stat` use the read-only open. `TrackConfig::new(dtype)` configures scalar or 2D tracks with generic columns, chunking, optional sharding, fill value, and optional description or source metadata. `Dataset::read_region<T>` reads one region of a track at full column width.
 
 `Reference` holds named contigs and derives flat offsets. Regions are 0-based and half-open.
 

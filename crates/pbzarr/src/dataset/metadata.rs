@@ -2,7 +2,7 @@ use super::{FORMAT_VERSION, REFERENCE_ARRAYS};
 use crate::{PbzError, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use zarrs::storage::{ReadableWritableListableStorage, StoreKey, StorePrefix};
+use zarrs::storage::{ListableStorage, ReadableStorage, StoreKey, StorePrefix};
 use zarrs::{
     array::{DataType, codec::CodecChain},
     metadata::v3::ArrayMetadataV3,
@@ -41,7 +41,7 @@ impl VariableInfo {
             .is_some_and(|d| matches!(GenomicAxis::from_dimension(d), Ok(Some(_))))
     }
 }
-fn get_json(storage: &ReadableWritableListableStorage, key: &str) -> Result<Option<Value>> {
+fn get_json(storage: &ReadableStorage, key: &str) -> Result<Option<Value>> {
     let key = StoreKey::new(key).map_err(|e| PbzError::Metadata(e.to_string()))?;
     storage
         .get(&key)
@@ -126,8 +126,56 @@ fn support(info: &VariableInfo) -> Support {
         },
     }
 }
+/// Where the catalog finds the root's child nodes.
+pub(super) enum Nodes {
+    /// List the store root.
+    Listed(ListableStorage),
+    /// Take the root consolidated metadata.
+    Consolidated,
+}
+
+/// The `zarr.json` of each direct child of the root, by name. A child without
+/// a `zarr.json` is left out.
+fn children(
+    storage: &ReadableStorage,
+    root: &Value,
+    nodes: Nodes,
+) -> Result<BTreeMap<String, Value>> {
+    let lister = match nodes {
+        Nodes::Listed(lister) => lister,
+        Nodes::Consolidated => {
+            let copy = root["consolidated_metadata"]["metadata"]
+                .as_object()
+                .ok_or_else(|| {
+                    PbzError::InvalidStore(
+                        "the root zarr.json has no consolidated metadata. A read-only open \
+                         without a store listing needs it to find the arrays"
+                            .into(),
+                    )
+                })?;
+            return Ok(copy
+                .iter()
+                .filter(|(path, _)| !path.contains('/'))
+                .map(|(path, meta)| (path.clone(), meta.clone()))
+                .collect());
+        }
+    };
+    let listing = lister
+        .list_dir(&StorePrefix::root())
+        .map_err(|e| PbzError::Store(e.to_string()))?;
+    let mut out = BTreeMap::new();
+    for prefix in listing.prefixes() {
+        let name = prefix.as_str().trim_end_matches('/');
+        if let Some(meta) = get_json(storage, &format!("{name}/zarr.json"))? {
+            out.insert(name.to_owned(), meta);
+        }
+    }
+    Ok(out)
+}
+
 pub(super) fn catalog(
-    storage: &ReadableWritableListableStorage,
+    storage: &ReadableStorage,
+    nodes: Nodes,
 ) -> Result<(Value, BTreeMap<String, VariableInfo>)> {
     let invalid = |m: &str| PbzError::InvalidStore(m.into());
     let root = get_json(storage, "zarr.json")?.ok_or_else(|| invalid("missing root metadata"))?;
@@ -151,14 +199,8 @@ pub(super) fn catalog(
         other => return Err(PbzError::UnsupportedVersion(other.into())),
     }
     let mut variables = BTreeMap::new();
-    let children = storage
-        .list_dir(&StorePrefix::root())
-        .map_err(|e| PbzError::Store(e.to_string()))?;
-    for prefix in children.prefixes() {
-        let name = prefix.as_str().trim_end_matches('/');
-        let Some(meta) = get_json(storage, &format!("{name}/zarr.json"))? else {
-            continue;
-        };
+    for (name, meta) in children(storage, &root, nodes)? {
+        let name = name.as_str();
         if meta["node_type"] == "group" {
             continue;
         }

@@ -90,7 +90,7 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
 }
 
 pub(crate) fn open_store(path: &Path) -> Result<Dataset> {
-    Dataset::open(path).with_context(|| format!("open store {}", path.display()))
+    Dataset::open_read_only(path).with_context(|| format!("open store {}", path.display()))
 }
 
 /// Track names in sorted order.

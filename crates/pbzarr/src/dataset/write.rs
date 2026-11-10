@@ -113,14 +113,15 @@ impl Dataset {
     /// This is the last step of every write: until it lands, the old copy
     /// stays a correct view of the store before the write.
     fn publish(&mut self) -> Result<()> {
-        *self = Self::open_in(self.storage.clone(), self.dir.clone())?;
+        *self = Self::open_in(self.writable()?.clone(), self.dir.clone())?;
         self.write_snapshot()
     }
 
     fn write_snapshot(&mut self) -> Result<()> {
         let mut root = self.root.clone();
-        crate::consolidated::insert_snapshot(&self.storage, &mut root)?;
-        crate::consolidated::replace_root(&self.storage, self.dir.as_deref(), &root)?;
+        let storage = self.writable()?;
+        crate::consolidated::insert_snapshot(storage, &mut root)?;
+        crate::consolidated::replace_root(storage, self.dir.as_deref(), &root)?;
         self.root = root;
         Ok(())
     }
@@ -134,11 +135,13 @@ use crate::array::{
 use crate::import::destination::Destination;
 use std::collections::{BTreeMap, BTreeSet};
 use zarrs::array::codec::api::ArrayToBytesCodecTraits;
-use zarrs::storage::StoreKey;
+use zarrs::storage::{ReadableWritableListableStorageTraits, StoreKey};
+
+type WritableArray = zarrs::array::Array<dyn ReadableWritableListableStorageTraits>;
 
 pub(crate) struct PreparedImport {
     pub(crate) targets: Vec<Destination>,
-    coordinates: Vec<(Arc<super::read::ArrayHandle>, Vec<String>)>,
+    coordinates: Vec<(Arc<WritableArray>, Vec<String>)>,
 }
 
 /// Refuse a track or dimension name that the store keeps for its genomic axes
@@ -168,7 +171,7 @@ impl Dataset {
         let total = reference.extent(&GenomicAxis::Position)?;
         let shared_reference = Arc::new(reference.clone());
         let entries = self
-            .storage
+            .writable()?
             .list_dir(&StorePrefix::root())
             .map_err(storage_error)?;
         let occupied: BTreeSet<String> = entries
@@ -367,7 +370,7 @@ impl Dataset {
             }
             let array = Arc::new(
                 builder
-                    .build(self.storage.clone(), &format!("/{name}"))
+                    .build(self.writable()?.clone(), &format!("/{name}"))
                     .map_err(storage_error)?,
             );
             let chunk_shape = array
@@ -396,7 +399,7 @@ impl Dataset {
                 let n = labels.len() as u64;
                 let array = ArrayBuilder::new(vec![n], vec![n.max(1)], data_type::string(), "")
                     .dimension_names(Some(vec![dim.clone()]))
-                    .build(self.storage.clone(), &format!("/{dim}"))
+                    .build(self.writable()?.clone(), &format!("/{dim}"))
                     .map_err(storage_error)?;
                 coordinates.push((Arc::new(array), labels));
             }
@@ -430,7 +433,6 @@ impl Dataset {
     }
 }
 
-use super::read::ArrayHandle;
 use crate::io::Dtype;
 use zarrs::array::{Array, ArrayShardedExt, ArraySubset};
 use zarrs::metadata::ArrayMetadata;
@@ -466,7 +468,7 @@ pub(crate) struct PreparedAppend {
     grown: Vec<(String, serde_json::Value)>,
     /// The appended dimension's coordinate. It grows last, so a torn append
     /// reads back as a dimension-size conflict instead of silent fill.
-    coordinate: (String, serde_json::Value, Arc<ArrayHandle>),
+    coordinate: (String, serde_json::Value, Arc<WritableArray>),
     /// Labels for the appended columns.
     labels: Vec<String>,
     /// Column width before the append.
@@ -483,7 +485,7 @@ fn grown_metadata(info: &VariableInfo, axis: usize, extent: u64) -> (String, ser
 }
 
 /// A rank-2 array's column chunk, and its column shard when sharded.
-fn column_grid(array: &ArrayHandle, name: &str) -> Result<(u64, Option<u64>)> {
+fn column_grid(array: &WritableArray, name: &str) -> Result<(u64, Option<u64>)> {
     let outer = array.chunk_shape(&[0, 0]).map_err(storage_error)?;
     let shard = outer.as_slice()[1].get();
     if !array.is_sharded() {
@@ -498,13 +500,13 @@ fn column_grid(array: &ArrayHandle, name: &str) -> Result<(u64, Option<u64>)> {
 }
 
 impl Dataset {
-    fn open_growable(&self, name: &str) -> Result<ArrayHandle> {
+    fn open_growable(&self, name: &str) -> Result<WritableArray> {
         let info = self.variables.get(name).ok_or_else(|| {
             PbzError::Metadata(format!("append: {name:?} is not a variable of this store"))
         })?;
         let meta = super::metadata::storage_metadata(info)?;
         Array::new_with_metadata(
-            self.storage.clone(),
+            self.writable()?.clone(),
             &format!("/{name}"),
             ArrayMetadata::V3(meta),
         )
@@ -719,7 +721,7 @@ impl Dataset {
     fn publish_metadata(&self, name: &str, metadata: &serde_json::Value) -> Result<()> {
         let key = StoreKey::new(format!("{name}/zarr.json"))
             .map_err(|e| PbzError::Metadata(e.to_string()))?;
-        self.storage
+        self.writable()?
             .set(
                 &key,
                 serde_json::to_vec(metadata)
@@ -751,6 +753,7 @@ impl Dataset {
         specs: &[(String, TrackConfig)],
         plan: DatasetPlan,
     ) -> Result<Prepared> {
+        self.writable()?;
         for (name, config) in specs {
             refuse_reserved(name)?;
             if let Some(dim) = &config.column_dim {

@@ -2,12 +2,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use pbzarr::Contig;
 use pbzarr::TrackConfig;
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Dataset, Reference};
+use pbzarr::{Dataset, Reference, RegionQuery};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -179,6 +180,64 @@ fn a_later_import_refreshes_the_root_metadata() {
         &expected,
         "a_later_import_refreshes_the_root_metadata",
     );
+}
+
+/// Storage that can only read keys: no list, no write.
+fn read_only_storage(path: &Path) -> zarrs::storage::ReadableStorage {
+    Arc::new(zarrs::filesystem::FilesystemStore::new(path).unwrap())
+}
+
+#[test]
+fn a_store_opens_and_reads_over_storage_that_cannot_list() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    fixture(&path);
+
+    let mut ds = Dataset::open_readable(read_only_storage(&path)).unwrap();
+    let mut names: Vec<&str> = ds.variables().keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(names, EXPECTED_NODES);
+    let region: RegionQuery = "chr2:2-5".parse().unwrap();
+    let af = ds.read_region::<f32>("af", &region).unwrap();
+    assert_eq!(af.shape(), [3, 2]);
+    assert!(af.iter().all(|&v| v == 1.0));
+
+    let reader = OneReader {
+        genome: ds.reference().unwrap().clone(),
+        schema: OutputSchema::single("value", Dtype::I32),
+    };
+    let error = Import::from_readers(vec![reader])
+        .unwrap()
+        .into_dataset(
+            &mut ds,
+            vec![("extra".into(), TrackConfig::new(Dtype::I32))],
+        )
+        .run()
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("read-only"), "{error}");
+}
+
+#[test]
+fn a_store_without_consolidated_metadata_needs_listable_storage() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.pbz");
+    fixture(&path);
+    let mut root = root_metadata(&path);
+    root.as_object_mut()
+        .unwrap()
+        .remove("consolidated_metadata");
+    std::fs::write(path.join("zarr.json"), serde_json::to_vec(&root).unwrap()).unwrap();
+
+    let error = Dataset::open_readable(read_only_storage(&path))
+        .err()
+        .unwrap();
+    assert!(
+        error.to_string().contains("no consolidated metadata"),
+        "{error}"
+    );
+    let listed = Dataset::open_read_only(&path).unwrap();
+    assert_eq!(listed.variables().len(), EXPECTED_NODES.len());
 }
 
 /// The repository root (the pixi workspace), from this crate's manifest dir.
