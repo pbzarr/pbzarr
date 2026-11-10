@@ -148,3 +148,38 @@ fn append_d4_widens_a_cohort_track() {
         "#chrom\tstart\tend\ts1\ts2\ts3\ts4\nchr1\t0\t1000\t25\t25\t25\t25\n"
     );
 }
+
+#[test]
+fn import_creates_the_store_then_adds_tracks_and_refuses_a_used_name() {
+    let dir = TempDir::new().unwrap();
+    let d4 = fixture("banded_1k.d4");
+    let store = dir.path().join("store.pbz");
+    let import = |track: &str| {
+        run_pbz([
+            "import".into(),
+            "d4".into(),
+            "-o".into(),
+            store.as_os_str().to_owned(),
+            "--track".into(),
+            track.into(),
+            "--no-progress".into(),
+            d4.as_os_str().to_owned(),
+        ])
+    };
+
+    stdout_of(&import("depth"));
+    stdout_of(&import("depth2"));
+    let mean = run_pbz(["stat".into(), store.as_os_str().to_owned(), "depth2".into()]);
+    assert_eq!(
+        stdout_of(&mean),
+        "#chrom\tstart\tend\tmean\nchr1\t0\t1000\t25.5\n"
+    );
+
+    let again = import("depth");
+    assert!(!again.status.success());
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        stderr.contains("already has a track named \"depth\""),
+        "{stderr}"
+    );
+}

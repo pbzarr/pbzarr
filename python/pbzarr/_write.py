@@ -8,8 +8,6 @@ import os
 from typing import TypeAlias
 
 from . import _native
-from ._native import PbzError
-from ._dataset import _check_identity, _root_attrs
 
 PathLike: TypeAlias = str | os.PathLike[str]
 Source: TypeAlias = PathLike | tuple[PathLike, str]
@@ -88,15 +86,11 @@ def _codecs_json(codecs: list | dict | None) -> str | None:
     return json.dumps(codecs)
 
 
-def _require_destination(path: str) -> None:
-    """The destination must be an existing format 0.5 PBZ store."""
-    if not os.path.isdir(path):
-        raise PbzError(f"destination is not an existing PBZ store: {path}")
-    try:
-        attrs = _root_attrs(path, None)
-    except Exception as error:
-        raise PbzError(f"destination is not a PBZ store: {path}") from error
-    _check_identity(attrs)
+def _destination(value: object) -> str:
+    path = _path(value, "destination")
+    if "://" in path:
+        raise ValueError("import writes local stores only; give a local path")
+    return path
 
 
 def import_d4(
@@ -114,16 +108,17 @@ def import_d4(
     progress: bool = False,
     codecs: list | dict | None = None,
 ) -> dict[str, int | float]:
-    """Import one or more D4 sources into an existing PBZ store.
+    """Import one or more D4 sources into a PBZ store.
 
-    The destination must be a format 0.5 store from `pbzarr.create`.
+    When the destination does not exist, the import creates it from the
+    source headers. When it exists, the import adds the track to it. A
+    track name that the store already uses is refused.
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
     """
-    destination_path = _path(destination, "destination")
+    destination_path = _destination(destination)
 
     normalized_sources = _sources(sources)
-    _require_destination(destination_path)
     return _native.import_d4(
         destination_path,
         track,
@@ -155,16 +150,17 @@ def import_bigwig(
     progress: bool = False,
     codecs: list | dict | None = None,
 ) -> dict[str, int | float]:
-    """Import one or more bigWig sources into an existing PBZ store.
+    """Import one or more bigWig sources into a PBZ store.
 
-    The destination must be a format 0.5 store from `pbzarr.create`.
+    When the destination does not exist, the import creates it from the
+    source headers. When it exists, the import adds the track to it. A
+    track name that the store already uses is refused.
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
     """
-    destination_path = _path(destination, "destination")
+    destination_path = _destination(destination)
 
     normalized_sources = _sources(sources)
-    _require_destination(destination_path)
     return _native.import_bigwig(
         destination_path,
         track,
@@ -200,7 +196,7 @@ def import_bed(
     destination: PathLike,
     sources: Source | Iterable[Source],
     *,
-    genome: PathLike,
+    genome: PathLike | None = None,
     schema: Mapping[str | int, str | None] | None = None,
     track: str | None = None,
     column: str | int | None = None,
@@ -215,7 +211,7 @@ def import_bed(
     decode_chunks: int | None = None,
     progress: bool = False,
 ) -> dict[str, int | float]:
-    """Import tabix-indexed BED sources into an existing PBZ store.
+    """Import tabix-indexed BED sources into a PBZ store.
 
     The call has three forms, matching `pbz import bed`:
 
@@ -233,14 +229,19 @@ def import_bed(
 
     Output is 2D when there are several sources, or when one track holds
     several BED columns. Every 2D output requires `dim=`.
-    The destination must be a format 0.5 store from `pbzarr.create`.
+
+    BED files have no contig lengths. When the destination does not exist,
+    the import creates it with the lengths in `genome=`, a .fai or
+    chrom.sizes file. When it exists, the store gives the lengths, and
+    `genome=` is optional; if given, it must match the store. A track name
+    that the store already uses is refused.
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
     """
-    destination_path = _path(destination, "destination")
+    destination_path = _destination(destination)
 
     normalized_sources = _sources(sources)
-    genome_path = _path(genome, "genome")
+    genome_path = _path(genome, "genome") if genome is not None else None
     schema_entries = None
     if schema is not None:
         if track is not None or column is not None or dtype is not None:
@@ -255,7 +256,6 @@ def import_bed(
                 raise TypeError("schema dtypes must be strings or None")
             schema_entries.append((_bed_selector(key), value))
     normalized_column = _bed_selector(column) if column is not None else None
-    _require_destination(destination_path)
     return _native.import_bed(
         destination_path,
         normalized_sources,
@@ -311,12 +311,13 @@ def import_bam(
     collapsing only PROPER_PAIR-flagged overlapping mates to one count;
     `"all"` matches riker/samtools-mpileup-style unconditional dedup of any
     overlapping mate pair; `"none"` disables dedup, double-counting every
-    overlapping pair's shared span. The destination must be a format 0.5
-    store from `pbzarr.create`. `decode_chunks=` sets the position chunks
-    each reader decodes per pass (default auto). Returns the import report
-    dict.
+    overlapping pair's shared span. When the destination does not exist,
+    the import creates it from the source headers. When it exists, the
+    import adds the track(s) to it. A track name that the store already
+    uses is refused. `decode_chunks=` sets the position chunks each reader
+    decodes per pass (default auto). Returns the import report dict.
     """
-    destination_path = _path(destination, "destination")
+    destination_path = _destination(destination)
 
     if overlap not in ("proper", "all", "none"):
         raise ValueError('overlap must be "proper", "all", or "none"')
@@ -334,7 +335,6 @@ def import_bam(
             merged.append((path, label))
         normalized_sources = merged
     fasta_path = _path(fasta, "fasta") if fasta is not None else None
-    _require_destination(destination_path)
     return _native.import_bam(
         destination_path,
         track,

@@ -26,15 +26,11 @@ def test_create_opens_an_empty_store_and_refuses_an_existing_destination(tmp_pat
         pbzarr.create(destination, reference={"chr1": 1000})
 
 
-def test_import_d4_one_labeled_source_with_dim_is_two_dimensional(
+def test_import_d4_creates_a_new_store_from_the_source_headers(
     tmp_path, d4_fixture
 ):
     destination = tmp_path / "d4.pbz"
 
-    with pytest.raises(pbzarr.PbzError):
-        pbzarr.import_d4(tmp_path / "missing.pbz", "depth", d4_fixture)
-
-    _create(destination, reference={"chr1": 1000})
     report = pbzarr.import_d4(
         destination,
         "depth",
@@ -50,6 +46,19 @@ def test_import_d4_one_labeled_source_with_dim_is_two_dimensional(
         assert dataset["depth"].dtype == np.dtype("int32")
         expected = np.repeat((np.arange(100) % 50) + 1, 10)
         np.testing.assert_array_equal(dataset["depth"].values[:, 0], expected)
+        assert dict(pbzarr.Reference.from_xarray(dataset)) == {"chr1": 1000}
+
+
+def test_import_adds_a_track_and_refuses_a_used_name(tmp_path, d4_fixture):
+    destination = tmp_path / "d4.pbz"
+    pbzarr.import_d4(destination, "depth", d4_fixture)
+    pbzarr.import_d4(destination, "depth2", d4_fixture)
+
+    with pytest.raises(pbzarr.PbzError, match="already has a track named"):
+        pbzarr.import_d4(destination, "depth", d4_fixture)
+
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert set(dataset.data_vars) == {"depth", "depth2"}
 
 
 def test_import_d4_cohort_opens_as_one_xarray_dataset(tmp_path, cohort_fixtures):
@@ -99,14 +108,12 @@ def test_import_bed_single_column_is_scalar(tmp_path):
         ["chrom", "start", "end", "coverage"],
         [("chr1", 0, 20, ["7"])],
     )
-    genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
     destination = tmp_path / "bed.pbz"
     _create(destination, reference={"chr1": 20})
 
     report = pbzarr.import_bed(
         destination,
         bed,
-        genome=genome,
         track="depth",
         column="coverage",
         dtype="int32",
@@ -131,7 +138,6 @@ def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
     )
     genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
     destination = tmp_path / "multi.pbz"
-    _create(destination, reference={"chr1": 20})
 
     report = pbzarr.import_bed(
         destination,

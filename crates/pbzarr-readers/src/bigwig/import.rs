@@ -20,6 +20,8 @@ use super::reader::BigWigReader;
 ///
 /// A format-0.4 store creates the track(s) from the sources' genome; a
 /// format-0.5 Dataset keeps its own reference, which the sources must match.
+/// A [`Target::Path`] that does not exist becomes a new store whose
+/// reference is the checked genome of the sources.
 ///
 /// A bigWig has no value at an uncovered base, so the track takes the `float32`
 /// default fill of `NaN`: gaps read back as missing data, not as zero.

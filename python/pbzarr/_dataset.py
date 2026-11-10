@@ -231,10 +231,11 @@ def create(
 ) -> xr.Dataset:
     """Create an empty PBZ store and return it opened.
 
-    ``reference`` is the ordered mapping of contig name to length that
-    every track shares. The destination must be a local path that does
-    not exist. Remote stores are not supported yet, so ``storage_options``
-    must be None.
+    Use it to make a store for ``write``. The import functions do not need
+    it: they create the store from the source headers. ``reference`` is the
+    ordered mapping of contig name to length that every track shares. The
+    destination must be a local path that does not exist. Remote stores are
+    not supported yet, so ``storage_options`` must be None.
     """
     path = os.fspath(destination)
     if not path:

@@ -30,6 +30,8 @@ use super::{DepthFilter, OverlapMode};
 ///
 /// A format-0.4 store creates the track(s) from the sources' genome; a
 /// format-0.5 Dataset keeps its own reference, which the sources must match.
+/// A [`Target::Path`] that does not exist becomes a new store whose
+/// reference is the checked genome of the sources.
 pub fn from_bam<'t>(
     target: impl Into<Target<'t>>,
     track_name: &str,

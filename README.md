@@ -35,15 +35,11 @@ The store fixes its reference (contig names and lengths) when it is created. Eve
 
 ## Python examples
 
-### Create a store and import d4 files
+### Import d4 files
 
 ```python
 import pbzarr
 
-import pandas as pd
-
-fai = pd.read_csv("genome.fai", sep="\t", header=None, usecols=[0, 1])
-pbzarr.create("depth.pbz", reference=dict(zip(fai[0], fai[1])))
 pbzarr.import_d4(
     "depth.pbz",
     "depth",
@@ -52,7 +48,9 @@ pbzarr.import_d4(
 )
 ```
 
-This creates a `depth` track with one row per genomic position and one column per sample. The store's reference must match the genome of every source exactly: the same contig names, lengths, and order.
+This creates the store `depth.pbz` and a `depth` track with one row per genomic position and one column per sample. The import takes the store's reference from the source headers. All sources must have the same contig names, lengths, and order.
+
+When the store exists, the import adds the track to it. The sources must then match the store's reference. The import refuses a track name that the store already uses. The CLI imports follow the same rule.
 
 ### Read a region
 
@@ -96,12 +94,8 @@ A derived track must cover the whole reference on `position`, or have no genomic
 ### Import other files
 
 ```python
-reference = dict(zip(fai[0], fai[1]))
-
-pbzarr.create("signals.pbz", reference=reference)
 pbzarr.import_bigwig("signals.pbz", "signal", "sample.bw")
 
-pbzarr.create("scores.pbz", reference=reference)
 pbzarr.import_bed(
     "scores.pbz",
     "sites.bed.gz",
@@ -112,7 +106,9 @@ pbzarr.import_bed(
 )
 ```
 
-BED imports need a `.fai` or chromosome-sizes file because BED does not record chromosome lengths.
+BED does not record chromosome lengths. To create a store, a BED import needs a `.fai` or chromosome-sizes file (`genome=`, or `--genome` in the CLI). An import into an existing store takes the lengths from the store.
+
+`pbzarr.create(path, reference=...)` makes an empty store for `pbzarr.write`. Imports do not need it.
 
 ## CLI examples
 

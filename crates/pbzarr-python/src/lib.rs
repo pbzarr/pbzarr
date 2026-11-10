@@ -1,7 +1,7 @@
 //! PyO3 bindings for pbzarr: `import_d4`, `import_bigwig`, `import_bed`, and
 //! `import_bam`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -11,9 +11,9 @@ use pyo3::types::PyDict;
 use pbzarr::ExplicitArraySpec;
 use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::progress::make_sink;
-use pbzarr::import::{Config, Report, Source, Target};
+use pbzarr::import::{Config, Report, Source, reference_genome};
 use pbzarr::io::Dtype;
-use pbzarr::{Contig, Genome, PbzStore};
+use pbzarr::{Contig, Genome};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
     OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam as rs_from_bam,
@@ -43,37 +43,10 @@ fn apply_codecs_kwarg(
     Ok(())
 }
 
-/// An opened import destination. `target` hands it to the format entry points.
-enum Output {
-    Store(PbzStore),
-    Dataset(Dataset),
-}
-
-impl Output {
-    /// Open an existing destination, detecting its format from the root
-    /// attributes. A format 0.4 root opens as the 0.4 store.
-    fn open(path: &str) -> PyResult<Self> {
-        match Dataset::open(path) {
-            Ok(dataset) => Ok(Self::Dataset(dataset)),
-            Err(pbzarr::PbzError::LegacyFormat) => PbzStore::open(path)
-                .map(Self::Store)
-                .map_err(|e| PbzError::new_err(format!("{e}"))),
-            Err(error) => Err(PbzError::new_err(format!("{error}"))),
-        }
-    }
-
-    fn target(&mut self) -> Target<'_> {
-        match self {
-            Self::Store(store) => Target::Store(store),
-            Self::Dataset(dataset) => Target::Dataset(dataset),
-        }
-    }
-}
-
 /// Bulk-import one or more d4 files into a new `int32` track.
 ///
-/// The track is created from the source headers; it must NOT already exist.
-/// d4 stores depths as `int32` natively, so import is zero-conversion.
+/// The store is created from the source headers when the path does not
+/// exist. The track must not already be in the store. d4 stores depths as `int32` natively, so import is zero-conversion.
 #[pyfunction]
 #[pyo3(signature = (store_path, track, sources, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
@@ -93,7 +66,6 @@ fn import_d4(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
-        let mut output = Output::open(&store_path)?;
         let d4_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -136,7 +108,7 @@ fn import_d4(
                 ("shard_column_size", shard_column_size.is_some()),
             ],
         )?;
-        rs_from_d4(output.target(), &track, &d4_sources, config)
+        rs_from_d4(Path::new(&store_path), &track, &d4_sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))
     })?;
     report_to_dict(py, &report)
@@ -144,8 +116,8 @@ fn import_d4(
 
 /// Bulk-import one or more bigWig files into a new `float32` track.
 ///
-/// The track is created from the source headers; it must NOT already exist.
-/// bigWig stores values as `float32` natively. A bigWig holds no value at an
+/// The store is created from the source headers when the path does not
+/// exist. The track must not already be in the store. bigWig stores values as `float32` natively. A bigWig holds no value at an
 /// uncovered base, so uncovered positions read back as `NaN` and reductions
 /// skip them.
 #[pyfunction]
@@ -167,7 +139,6 @@ fn import_bigwig(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
-        let mut output = Output::open(&store_path)?;
         let bw_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -210,7 +181,7 @@ fn import_bigwig(
                 ("shard_column_size", shard_column_size.is_some()),
             ],
         )?;
-        rs_from_bigwig(output.target(), &track, &bw_sources, config)
+        rs_from_bigwig(Path::new(&store_path), &track, &bw_sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))
     })?;
     report_to_dict(py, &report)
@@ -312,7 +283,8 @@ fn build_bed_schema(
 }
 
 /// Import bgzipped, tabix-indexed BED sources into new tracks. `genome` is a
-/// .fai / chrom.sizes path (BED files carry no contig lengths).
+/// .fai / chrom.sizes path (BED files carry no contig lengths). It is needed
+/// only to create the store; an existing store gives its own lengths.
 ///
 /// Three forms, mirroring `pbz import bed`:
 /// - `column` (a header name, or an all-digit 1-based BED column number)
@@ -328,13 +300,13 @@ fn build_bed_schema(
 /// Any 2D output (several sources, or a wide track) requires `dim`.
 /// Returns the import report dict.
 #[pyfunction]
-#[pyo3(signature = (store_path, sources, genome, schema=None, track=None, column=None, dtype=None, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (store_path, sources, genome=None, schema=None, track=None, column=None, dtype=None, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bed(
     py: Python<'_>,
     store_path: String,
     sources: Vec<(String, Option<String>)>,
-    genome: String,
+    genome: Option<String>,
     schema: Option<Vec<(String, Option<String>)>>,
     track: Option<String>,
     column: Option<String>,
@@ -360,7 +332,11 @@ fn import_bed(
         if bed_sources.is_empty() {
             return Err(PbzError::new_err("bed import: no sources"));
         }
-        let genome = Genome::from_fai(&genome).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        let genome = genome
+            .map(Genome::from_fai)
+            .transpose()
+            .and_then(|genome| reference_genome(Path::new(&store_path), genome))
+            .map_err(|e| PbzError::new_err(format!("{e}")))?;
 
         let mut config = Config {
             column_dim: dim,
@@ -397,8 +373,6 @@ fn import_bed(
                 ("shard_column_size", shard_column_size.is_some()),
             ],
         )?;
-        let mut output = Output::open(&store_path)?;
-
         let entries = match (schema, &column) {
             (Some(_), Some(_)) => {
                 return Err(PbzError::new_err(
@@ -426,7 +400,7 @@ fn import_bed(
                 let bed_schema = build_bed_schema(&bed_sources, &entries, track_override)?;
                 let plan = plan_bed_schema(&bed_sources, &bed_schema, &config)
                     .map_err(|e| PbzError::new_err(format!("{e}")))?;
-                execute_bed_schema_plan(output.target(), plan, genome, config)
+                execute_bed_schema_plan(Path::new(&store_path), plan, genome, config)
                     .map_err(|e| PbzError::new_err(format!("{e}")))
             }
             None => {
@@ -439,8 +413,14 @@ fn import_bed(
                         .map_err(|e| PbzError::new_err(format!("{e}")))?,
                     ..BedImportOptions::default()
                 };
-                rs_from_bed_matrix(output.target(), &bed_sources, genome, &options, config)
-                    .map_err(|e| PbzError::new_err(format!("{e}")))
+                rs_from_bed_matrix(
+                    Path::new(&store_path),
+                    &bed_sources,
+                    genome,
+                    &options,
+                    config,
+                )
+                .map_err(|e| PbzError::new_err(format!("{e}")))
             }
         }
     })?;
@@ -519,7 +499,6 @@ fn import_bam(
         count_deletions,
     };
     let report = py.allow_threads(|| {
-        let mut output = Output::open(&store_path)?;
         let bam_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -563,7 +542,7 @@ fn import_bam(
             ],
         )?;
         rs_from_bam(
-            output.target(),
+            Path::new(&store_path),
             &track,
             &bam_sources,
             mode,
@@ -576,10 +555,11 @@ fn import_bam(
     report_to_dict(py, &report)
 }
 
-/// Create a new empty format-0.5 pbz store.
+/// Create a new empty format-0.5 pbz store for `pbz.write`.
 ///
 /// The root Dataset's `reference`, ordered contig name/length pairs, is fixed
-/// here and shared by every track the store later holds.
+/// here and shared by every track the store later holds. Import does not need
+/// this: it creates the store from the source headers.
 #[pyfunction]
 #[pyo3(signature = (store_path, reference))]
 fn create_store(store_path: String, reference: Vec<(String, u64)>) -> PyResult<()> {

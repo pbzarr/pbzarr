@@ -6,18 +6,18 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use indicatif_log_bridge::LogWrapper;
-use log::{LevelFilter, debug, info, warn};
-use pbzarr::dataset::{Dataset, Reference};
+use log::{LevelFilter, debug, info};
+use pbzarr::dataset::Dataset;
 use pbzarr::import::Config;
-use pbzarr::import::Target;
 use pbzarr::import::progress::{self, make_sink};
-use pbzarr::io::{Dtype, ValueReader as _};
-use pbzarr::{Contig, ExplicitArraySpec, Genome, PbzError, PbzStore};
+use pbzarr::import::{Target, reference_genome};
+use pbzarr::io::Dtype;
+use pbzarr::{ExplicitArraySpec, Genome};
 use pbzarr_readers::{
-    BamReader, BedColumnSpec, BedImportOptions, BedSchema, BigWigReader, ColumnSelector, D4Reader,
-    DepthFilter, ImportMode, InferRows, OverlapMode, column_index_by_name, execute_bed_schema_plan,
-    from_bam, from_bed_matrix, from_bigwig, from_d4, infer_bed_dtypes,
-    infer_bed_dtypes_for_sources, plan_bed_schema, read_bed_layout,
+    BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
+    OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam, from_bed_matrix,
+    from_bigwig, from_d4, infer_bed_dtypes, infer_bed_dtypes_for_sources, plan_bed_schema,
+    read_bed_layout,
 };
 
 mod fmt;
@@ -499,13 +499,15 @@ impl ImportInputOptions {
 
 #[derive(Debug, Args)]
 struct BedOptions {
-    /// PBZ output store. It is created when absent.
+    /// PBZ output store. Import creates it when the path does not exist, and
+    /// adds the track(s) to it when it exists.
     #[arg(short('o'), long, required_unless_present = "emit_schema")]
     output: Option<PathBuf>,
     #[command(flatten)]
     input: ImportInputOptions,
-    /// FAI or chromosome-sizes file defining the genome.
-    #[arg(long, required_unless_present = "emit_schema")]
+    /// FAI or chromosome-sizes file with the contig lengths. It is needed
+    /// only when the store does not exist; an existing store gives its own.
+    #[arg(long)]
     genome: Option<PathBuf>,
     /// BED header column to import (requires a `#`-prefixed header). Repeating
     /// selects several BED columns; omit to import all BED value columns.
@@ -552,7 +554,8 @@ struct BamArgs {
 
 #[derive(Debug, Args)]
 struct BamOptions {
-    /// PBZ output store. It is created when absent.
+    /// PBZ output store. Import creates it from the source headers when the
+    /// path does not exist, and adds the track(s) to it when it exists.
     #[arg(short('o'), long)]
     output: PathBuf,
     #[command(flatten)]
@@ -627,7 +630,8 @@ struct D4Args {
 
 #[derive(Debug, Args)]
 struct D4Options {
-    /// PBZ output store. It is created when absent.
+    /// PBZ output store. Import creates it from the source headers when the
+    /// path does not exist, and adds the track(s) to it when it exists.
     #[arg(short('o'), long)]
     output: PathBuf,
     #[command(flatten)]
@@ -653,7 +657,8 @@ struct BigWigArgs {
 
 #[derive(Debug, Args)]
 struct BigWigOptions {
-    /// PBZ output store. It is created when absent.
+    /// PBZ output store. Import creates it from the source headers when the
+    /// path does not exist, and adds the track(s) to it when it exists.
     #[arg(short('o'), long)]
     output: PathBuf,
     #[command(flatten)]
@@ -736,15 +741,17 @@ fn import_bed(args: BedArgs) -> Result<()> {
         return emit_schema(&sources[0].path, infer_rows);
     }
 
-    let genome_path = args.bed.genome.context("--genome is required to import")?;
-    let genome = Genome::from_fai(&genome_path)
-        .with_context(|| format!("read genome {}", genome_path.display()))?;
-    info!(
-        "genome {}: {} contig(s)",
-        genome_path.display(),
-        genome.contigs().len()
-    );
     let output = args.bed.output.context("--output is required to import")?;
+    let genome = args
+        .bed
+        .genome
+        .as_deref()
+        .map(|path| {
+            Genome::from_fai(path).with_context(|| format!("read genome {}", path.display()))
+        })
+        .transpose()?;
+    let genome = reference_genome(&output, genome)?;
+    info!("genome: {} contig(s)", genome.contigs().len());
     let label = args
         .bed
         .track
@@ -757,8 +764,7 @@ fn import_bed(args: BedArgs) -> Result<()> {
         let schema = load_schema(schema_path, &sources, infer_rows)?;
         let plan = plan_bed_schema(&sources, &schema, &config).context("plan BED schema")?;
         debug!("BED schema planned against {} source(s)", sources.len());
-        let mut destination = open_or_create(&output, || Ok(genome.contigs().to_vec()))?;
-        execute_bed_schema_plan(destination.target(), plan, genome, config)
+        execute_bed_schema_plan(output.as_path(), plan, genome, config)
             .context("import BED schema")?;
     } else {
         let options = BedImportOptions {
@@ -774,56 +780,11 @@ fn import_bed(args: BedArgs) -> Result<()> {
             infer_rows,
             ..BedImportOptions::default()
         };
-        let mut destination = open_or_create(&output, || Ok(genome.contigs().to_vec()))?;
-        from_bed_matrix(destination.target(), &sources, genome, &options, config)
+        from_bed_matrix(output.as_path(), &sources, genome, &options, config)
             .context("import BED columns")?;
     }
     info!("wrote {}", output.display());
     Ok(())
-}
-
-/// An opened import destination, holding whichever store the chosen format
-/// writes. `target` hands it to the format entry points.
-enum Output {
-    Store(PbzStore),
-    Dataset(Dataset),
-}
-
-impl Output {
-    fn target(&mut self) -> Target<'_> {
-        match self {
-            Self::Store(store) => Target::Store(store),
-            Self::Dataset(dataset) => Target::Dataset(dataset),
-        }
-    }
-}
-
-/// Open `path` in `format`, creating it when it does not exist yet. Importing
-/// into an existing store adds tracks to it, which is easy to do by accident
-/// with a stale path, so say which of the two happened. `reference` supplies
-/// the ordered contigs a new format-0.5 Dataset fixes at creation; it is only
-/// called when such a Dataset is created.
-fn open_or_create(path: &Path, reference: impl FnOnce() -> Result<Vec<Contig>>) -> Result<Output> {
-    if path.exists() {
-        warn!(
-            "{} exists; adding track(s) to the existing store",
-            path.display()
-        );
-        return match Dataset::open(path) {
-            Ok(dataset) => Ok(Output::Dataset(dataset)),
-            Err(PbzError::LegacyFormat) => PbzStore::open(path)
-                .map(Output::Store)
-                .with_context(|| format!("open output store {}", path.display())),
-            Err(error) => {
-                Err(error).with_context(|| format!("open output dataset {}", path.display()))
-            }
-        };
-    }
-    debug!("creating store {}", path.display());
-    let reference = Reference::new(reference()?)?;
-    Dataset::create(path, reference)
-        .map(Output::Dataset)
-        .with_context(|| format!("create output dataset {}", path.display()))
 }
 
 fn import_bam(args: BamArgs) -> Result<()> {
@@ -860,15 +821,8 @@ fn import_bam(args: BamArgs) -> Result<()> {
     };
 
     let output = args.bam.output;
-    let mut destination = open_or_create(&output, || {
-        let source = &sources[0];
-        let reader = BamReader::open(&source.path, args.bam.decode.fasta.as_deref(), mode, filter)
-            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
-        Ok(reader.contigs().contigs().to_vec())
-    })?;
-
     let report = from_bam(
-        destination.target(),
+        output.as_path(),
         &args.bam.track,
         &sources,
         mode,
@@ -899,16 +853,8 @@ fn import_d4(args: D4Args) -> Result<()> {
 
     let config = args.import.config(&args.d4.track)?;
     let output = args.d4.output;
-
-    let mut destination = open_or_create(&output, || {
-        let source = &sources[0];
-        let reader = D4Reader::open(&source.path)
-            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
-        Ok(reader.contigs().contigs().to_vec())
-    })?;
-
     let report =
-        from_d4(destination.target(), &args.d4.track, &sources, config).context("import d4")?;
+        from_d4(output.as_path(), &args.d4.track, &sources, config).context("import d4")?;
 
     print_report("imported", n_sources, &output, &report);
     Ok(())
@@ -931,15 +877,7 @@ fn import_bigwig(args: BigWigArgs) -> Result<()> {
 
     let config = args.import.config(&args.bigwig.track)?;
     let output = args.bigwig.output;
-
-    let mut destination = open_or_create(&output, || {
-        let source = &sources[0];
-        let reader = BigWigReader::open(&source.path)
-            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
-        Ok(reader.contigs().contigs().to_vec())
-    })?;
-
-    let report = from_bigwig(destination.target(), &args.bigwig.track, &sources, config)
+    let report = from_bigwig(output.as_path(), &args.bigwig.track, &sources, config)
         .context("import bigWig")?;
 
     print_report("imported", n_sources, &output, &report);

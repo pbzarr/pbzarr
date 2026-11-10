@@ -1,11 +1,15 @@
-//! Where a format entry point writes: a format-0.4 store, or a format-0.5
-//! root Dataset.
+//! Where a format entry point writes: a format-0.4 store, a format-0.5
+//! root Dataset, or a path that holds one or will hold a new one.
+
+use std::path::Path;
+
+use log::{debug, info};
 
 use super::builder::{Import, ImportBuilder};
 use super::config::Report;
 use super::engine::PipelineOptions;
 use super::routing::SourceAxis;
-use crate::dataset::{Dataset, DatasetPlan};
+use crate::dataset::{Dataset, DatasetPlan, Reference};
 use crate::io::ValueReader;
 use crate::{Contig, Genome, PbzError, PbzStore, Result, TrackConfig};
 
@@ -23,6 +27,16 @@ pub enum Target<'a> {
     /// column dimension. [`Target::import`] routes this variant to the append
     /// path, so every format entry point appends without knowing about it.
     Append(&'a mut Dataset),
+    /// A store path. When the path does not exist, the import creates a
+    /// format-0.5 store whose reference is the genome of the checked
+    /// sources. When it exists, the import adds new tracks to that store.
+    Path(&'a Path),
+}
+
+impl<'a> From<&'a Path> for Target<'a> {
+    fn from(path: &'a Path) -> Self {
+        Self::Path(path)
+    }
 }
 
 impl<'a> From<&'a mut PbzStore> for Target<'a> {
@@ -105,6 +119,7 @@ impl Target<'_> {
             Self::Append(dataset) => {
                 dataset_run(dataset, specs, readers, axes, options, DatasetPlan::Append)
             }
+            Self::Path(path) => import_at(path, specs, readers, axes, options),
         }
     }
 
@@ -124,11 +139,85 @@ impl Target<'_> {
     ) -> Result<Report> {
         match self {
             Self::Store(_) => Err(PbzError::LegacyFormat),
+            Self::Path(path) => {
+                let mut dataset = Dataset::open(path)?;
+                dataset_run(
+                    &mut dataset,
+                    specs,
+                    readers,
+                    axes,
+                    options,
+                    DatasetPlan::Append,
+                )
+            }
             Self::Dataset(dataset) | Self::Append(dataset) => {
                 dataset_run(dataset, specs, readers, axes, options, DatasetPlan::Append)
             }
         }
     }
+}
+
+/// Import into the store at `path`, or into a new store there. A new store
+/// takes its reference from the first spec, whose genome the format entry
+/// point has already checked against every source. A failed import into a
+/// new store removes that store.
+fn import_at<R: ValueReader>(
+    path: &Path,
+    specs: Vec<(String, Genome, TrackConfig)>,
+    readers: Vec<R>,
+    axes: Axes,
+    options: PipelineOptions,
+) -> Result<Report> {
+    if path.exists() {
+        info!("{} exists; adding track(s) to the store", path.display());
+        return match Dataset::open(path) {
+            Ok(mut dataset) => Target::Dataset(&mut dataset).import(specs, readers, axes, options),
+            Err(PbzError::LegacyFormat) => {
+                let mut store = PbzStore::open(path)?;
+                Target::Store(&mut store).import(specs, readers, axes, options)
+            }
+            Err(error) => Err(error),
+        };
+    }
+    let (_, genome, _) = specs
+        .first()
+        .ok_or_else(|| PbzError::Metadata("import: no destination tracks".into()))?;
+    let reference = Reference::new(genome.contigs().to_vec())?;
+    debug!("creating store {}", path.display());
+    let mut dataset = Dataset::create(path, reference)?;
+    let report = Target::Dataset(&mut dataset).import(specs, readers, axes, options);
+    if report.is_err() {
+        drop(dataset);
+        if let Err(error) = std::fs::remove_dir_all(path) {
+            debug!("remove failed store {}: {error}", path.display());
+        }
+    }
+    report
+}
+
+/// The contig list for an import into `path` whose sources carry no contig
+/// lengths, such as BED. An existing store gives its own reference, and a
+/// `genome` given with it must match that reference. A new store needs
+/// `genome`.
+pub fn reference_genome(path: &Path, genome: Option<Genome>) -> Result<Genome> {
+    if !path.exists() {
+        return genome.ok_or_else(|| {
+            PbzError::Metadata(format!(
+                "a genome file is needed to create the store {}",
+                path.display()
+            ))
+        });
+    }
+    let dataset = match Dataset::open(path) {
+        Ok(dataset) => dataset,
+        Err(PbzError::LegacyFormat) => return genome.ok_or(PbzError::LegacyFormat),
+        Err(error) => return Err(error),
+    };
+    let store = dataset.reference()?.contigs().to_vec();
+    if let Some(genome) = &genome {
+        same_reference(genome.contigs(), &store)?;
+    }
+    Genome::new(store)
 }
 
 fn dataset_run<R: ValueReader>(
@@ -182,6 +271,6 @@ fn same_reference(source: &[Contig], store: &[Contig]) -> Result<()> {
             )
         });
     Err(PbzError::Metadata(format!(
-        "append: source reference differs from the store reference: {message}"
+        "source reference differs from the store reference: {message}"
     )))
 }

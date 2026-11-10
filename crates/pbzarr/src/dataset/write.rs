@@ -141,6 +141,14 @@ impl Dataset {
             .collect();
         for (name, _) in specs {
             validate_node_name(name)?;
+            if self.variables.contains_key(name)
+                && !dimensions.contains(name.as_str())
+                && !super::REFERENCE_ARRAYS.contains(&name.as_str())
+            {
+                return Err(PbzError::Metadata(format!(
+                    "import: the store already has a track named {name:?}"
+                )));
+            }
             if !names.insert(name.clone())
                 || occupied.contains(name)
                 || name == "position"

@@ -34,7 +34,7 @@ def import_bigwig(
 def import_bed(
     store_path: str,
     sources: Sequence[tuple[str, str | None]],
-    genome: str,
+    genome: str | None = ...,
     schema: Sequence[tuple[str, str | None]] | None = ...,
     track: str | None = ...,
     column: str | None = ...,
