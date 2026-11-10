@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use log::{debug, info, warn};
 use pbzarr::PbzError;
 use pbzarr::Result;
-use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
+use pbzarr::import::{Axes, Config, Report, Source, Target};
 use pbzarr::io::Dtype;
 use pbzarr::io::ValueReader as _;
 
@@ -156,11 +156,6 @@ pub fn from_bam<'t>(
         })
         .collect();
 
-    let options = PipelineOptions {
-        workers: config.workers,
-        decode_chunks: config.decode_chunks,
-        progress: config.progress.clone(),
-    };
     let mut axes = match mode {
         ImportMode::Depth => Axes::default(),
         ImportMode::Composition => Axes::default().fields_as_tracks(),
@@ -168,7 +163,7 @@ pub fn from_bam<'t>(
     if let Some(labels) = column_labels {
         axes = axes.readers_as_columns(labels);
     }
-    target.into().import(specs, readers, axes, options)
+    target.into().import(specs, readers, axes, config)
 }
 
 /// Spec-required `description`: field name plus the filter settings that

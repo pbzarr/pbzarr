@@ -4,7 +4,7 @@
 //!
 //! Usage: cargo run --release -p pbzarr --example import_threads -- <out.pbz> [workers]
 
-use pbzarr::import::{Import, PipelineOptions};
+use pbzarr::import::{Config, Import};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ReaderError, ValueReader};
 use pbzarr::{Contig, ExplicitArraySpec, TrackConfig};
 use pbzarr::{Dataset, Reference};
@@ -91,9 +91,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Import::from_readers(readers)?
         .into_dataset(&mut dataset, vec![("depth".into(), config)])
         .readers_as_columns()
-        .options(PipelineOptions {
+        .config(Config {
             workers,
-            ..PipelineOptions::default()
+            ..Config::default()
         })
         .run()?;
     Ok(())

@@ -3,7 +3,7 @@
 use log::{debug, info};
 use pbzarr::PbzError;
 use pbzarr::Result;
-use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
+use pbzarr::import::{Axes, Config, Report, Source, Target};
 use pbzarr::io::Dtype;
 
 use super::reader::D4Reader;
@@ -48,11 +48,6 @@ pub fn from_d4<'t>(
     let labels = (sources.len() > 1 || config.column_dim.is_some())
         .then(|| sources.iter().map(Source::label).collect::<Vec<String>>());
     let track_config = config.track_config(Dtype::I32, None, labels.clone(), "sample");
-    let options = PipelineOptions {
-        workers: config.workers,
-        decode_chunks: config.decode_chunks,
-        progress: config.progress.clone(),
-    };
     let mut axes = Axes::default();
     if let Some(labels) = labels {
         axes = axes.readers_as_columns(labels);
@@ -61,6 +56,6 @@ pub fn from_d4<'t>(
         vec![(track_name.to_owned(), track_config)],
         readers,
         axes,
-        options,
+        config,
     )
 }

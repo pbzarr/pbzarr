@@ -10,8 +10,7 @@ use pyo3::types::PyDict;
 
 use pbzarr::Contig;
 use pbzarr::ExplicitArraySpec;
-use pbzarr::import::progress::make_sink;
-use pbzarr::import::{Config, Report, Source, store_reference};
+use pbzarr::import::{Config, ConfigBuilder, Report, Source, store_reference};
 use pbzarr::io::Dtype;
 use pbzarr::{Dataset, Reference};
 use pbzarr_readers::{
@@ -23,24 +22,30 @@ use pbzarr_readers::{
 
 create_exception!(_native, PbzError, PyRuntimeError);
 
-/// Parse the optional `codecs` JSON kwarg into `config.codecs`, rejecting
-/// the chunk/shard kwargs it replaces.
-fn apply_codecs_kwarg(
-    config: &mut Config,
-    codecs: Option<&str>,
-    conflicts: &[(&str, bool)],
-) -> PyResult<()> {
-    let Some(raw) = codecs else {
-        return Ok(());
-    };
-    if let Some((name, _)) = conflicts.iter().find(|(_, present)| *present) {
-        return Err(PbzError::new_err(format!(
-            "codecs conflicts with {name}; the codecs spec controls chunking and sharding"
-        )));
+/// Build the import `Config` from the keyword arguments every import binding
+/// takes. A `codecs` JSON spec replaces the chunk and shard sizes, so the two
+/// together fail.
+fn build_config(mut builder: ConfigBuilder, codecs: Option<&str>) -> PyResult<Config> {
+    if let Some(raw) = codecs {
+        if let Some(name) = builder.grid_size_set() {
+            return Err(PbzError::new_err(format!(
+                "codecs conflicts with {name}; the codecs spec controls chunking and sharding"
+            )));
+        }
+        let spec = ExplicitArraySpec::parse(raw).map_err(|e| PbzError::new_err(format!("{e}")))?;
+        builder.codecs = Some(spec);
     }
-    let spec = ExplicitArraySpec::parse(raw).map_err(|e| PbzError::new_err(format!("{e}")))?;
-    config.codecs = Some(spec);
-    Ok(())
+    Ok(builder.build())
+}
+
+fn to_sources(sources: &[(String, Option<String>)]) -> Vec<Source> {
+    sources
+        .iter()
+        .map(|(path, column_label)| Source {
+            path: path.into(),
+            column_label: column_label.clone(),
+        })
+        .collect()
 }
 
 /// Bulk-import one or more d4 files into a new `int32` track.
@@ -67,47 +72,20 @@ fn import_d4(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
-        let d4_sources: Vec<Source> = sources
-            .iter()
-            .map(|(path, column_label)| Source {
-                path: path.into(),
-                column_label: column_label.clone(),
-            })
-            .collect();
-        let mut config = Config {
-            column_dim: dim,
-            ..Config::default()
-        };
-        if let Some(n) = threads {
-            config.workers = n;
-        }
-        if let Some(n) = decode_chunks {
-            config.decode_chunks = n;
-        }
-        if let Some(c) = chunk_size {
-            config.chunk_size = Some(c);
-        }
-        if let Some(c) = column_chunk_size {
-            config.column_chunk_size = Some(c);
-        }
-        if let Some(s) = shard_size {
-            config.shard_size = Some(s);
-        }
-        if let Some(s) = shard_column_size {
-            config.shard_column_size = Some(s);
-        }
-        if progress {
-            config.progress = Some(make_sink(&track));
-        }
-        apply_codecs_kwarg(
-            &mut config,
+        let d4_sources = to_sources(&sources);
+        let config = build_config(
+            ConfigBuilder {
+                workers: threads,
+                decode_chunks,
+                chunk_size,
+                column_chunk_size,
+                shard_size,
+                shard_column_size,
+                column_dim: dim,
+                codecs: None,
+                progress: progress.then(|| track.clone()),
+            },
             codecs.as_deref(),
-            &[
-                ("chunk_size", chunk_size.is_some()),
-                ("column_chunk_size", column_chunk_size.is_some()),
-                ("shard_size", shard_size.is_some()),
-                ("shard_column_size", shard_column_size.is_some()),
-            ],
         )?;
         rs_from_d4(Path::new(&store_path), &track, &d4_sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))
@@ -140,47 +118,20 @@ fn import_bigwig(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
-        let bw_sources: Vec<Source> = sources
-            .iter()
-            .map(|(path, column_label)| Source {
-                path: path.into(),
-                column_label: column_label.clone(),
-            })
-            .collect();
-        let mut config = Config {
-            column_dim: dim,
-            ..Config::default()
-        };
-        if let Some(n) = threads {
-            config.workers = n;
-        }
-        if let Some(n) = decode_chunks {
-            config.decode_chunks = n;
-        }
-        if let Some(c) = chunk_size {
-            config.chunk_size = Some(c);
-        }
-        if let Some(c) = column_chunk_size {
-            config.column_chunk_size = Some(c);
-        }
-        if let Some(s) = shard_size {
-            config.shard_size = Some(s);
-        }
-        if let Some(s) = shard_column_size {
-            config.shard_column_size = Some(s);
-        }
-        if progress {
-            config.progress = Some(make_sink(&track));
-        }
-        apply_codecs_kwarg(
-            &mut config,
+        let bw_sources = to_sources(&sources);
+        let config = build_config(
+            ConfigBuilder {
+                workers: threads,
+                decode_chunks,
+                chunk_size,
+                column_chunk_size,
+                shard_size,
+                shard_column_size,
+                column_dim: dim,
+                codecs: None,
+                progress: progress.then(|| track.clone()),
+            },
             codecs.as_deref(),
-            &[
-                ("chunk_size", chunk_size.is_some()),
-                ("column_chunk_size", column_chunk_size.is_some()),
-                ("shard_size", shard_size.is_some()),
-                ("shard_column_size", shard_column_size.is_some()),
-            ],
         )?;
         rs_from_bigwig(Path::new(&store_path), &track, &bw_sources, config)
             .map_err(|e| PbzError::new_err(format!("{e}")))
@@ -323,13 +274,7 @@ fn import_bed(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
-        let bed_sources: Vec<Source> = sources
-            .iter()
-            .map(|(path, column_label)| Source {
-                path: path.into(),
-                column_label: column_label.clone(),
-            })
-            .collect();
+        let bed_sources = to_sources(&sources);
         if bed_sources.is_empty() {
             return Err(PbzError::new_err("bed import: no sources"));
         }
@@ -339,40 +284,19 @@ fn import_bed(
             .and_then(|genome| store_reference(Path::new(&store_path), genome))
             .map_err(|e| PbzError::new_err(format!("{e}")))?;
 
-        let mut config = Config {
-            column_dim: dim,
-            ..Config::default()
-        };
-        if let Some(n) = threads {
-            config.workers = n;
-        }
-        if let Some(n) = decode_chunks {
-            config.decode_chunks = n;
-        }
-        if let Some(c) = chunk_size {
-            config.chunk_size = Some(c);
-        }
-        if let Some(c) = column_chunk_size {
-            config.column_chunk_size = Some(c);
-        }
-        if let Some(s) = shard_size {
-            config.shard_size = Some(s);
-        }
-        if let Some(s) = shard_column_size {
-            config.shard_column_size = Some(s);
-        }
-        if progress {
-            config.progress = Some(make_sink(track.as_deref().unwrap_or("bed")));
-        }
-        apply_codecs_kwarg(
-            &mut config,
+        let config = build_config(
+            ConfigBuilder {
+                workers: threads,
+                decode_chunks,
+                chunk_size,
+                column_chunk_size,
+                shard_size,
+                shard_column_size,
+                column_dim: dim,
+                codecs: None,
+                progress: progress.then(|| track.as_deref().unwrap_or("bed").to_owned()),
+            },
             codecs.as_deref(),
-            &[
-                ("chunk_size", chunk_size.is_some()),
-                ("column_chunk_size", column_chunk_size.is_some()),
-                ("shard_size", shard_size.is_some()),
-                ("shard_column_size", shard_column_size.is_some()),
-            ],
         )?;
         let entries = match (schema, &column) {
             (Some(_), Some(_)) => {
@@ -500,47 +424,20 @@ fn import_bam(
         count_deletions,
     };
     let report = py.allow_threads(|| {
-        let bam_sources: Vec<Source> = sources
-            .iter()
-            .map(|(path, column_label)| Source {
-                path: path.into(),
-                column_label: column_label.clone(),
-            })
-            .collect();
-        let mut config = Config {
-            column_dim: dim,
-            ..Config::default()
-        };
-        if let Some(n) = threads {
-            config.workers = n;
-        }
-        if let Some(n) = decode_chunks {
-            config.decode_chunks = n;
-        }
-        if let Some(c) = chunk_size {
-            config.chunk_size = Some(c);
-        }
-        if let Some(c) = column_chunk_size {
-            config.column_chunk_size = Some(c);
-        }
-        if let Some(s) = shard_size {
-            config.shard_size = Some(s);
-        }
-        if let Some(s) = shard_column_size {
-            config.shard_column_size = Some(s);
-        }
-        if progress {
-            config.progress = Some(make_sink(&track));
-        }
-        apply_codecs_kwarg(
-            &mut config,
+        let bam_sources = to_sources(&sources);
+        let config = build_config(
+            ConfigBuilder {
+                workers: threads,
+                decode_chunks,
+                chunk_size,
+                column_chunk_size,
+                shard_size,
+                shard_column_size,
+                column_dim: dim,
+                codecs: None,
+                progress: progress.then(|| track.clone()),
+            },
             codecs.as_deref(),
-            &[
-                ("chunk_size", chunk_size.is_some()),
-                ("column_chunk_size", column_chunk_size.is_some()),
-                ("shard_size", shard_size.is_some()),
-                ("shard_column_size", shard_column_size.is_some()),
-            ],
         )?;
         rs_from_bam(
             Path::new(&store_path),

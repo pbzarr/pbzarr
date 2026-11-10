@@ -8,8 +8,8 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use indicatif_log_bridge::LogWrapper;
 use log::{LevelFilter, debug, info};
 use pbzarr::Dataset;
-use pbzarr::import::Config;
-use pbzarr::import::progress::{self, make_sink};
+use pbzarr::import::progress;
+use pbzarr::import::{Config, ConfigBuilder};
 use pbzarr::import::{Target, store_reference};
 use pbzarr::io::Dtype;
 use pbzarr::{ExplicitArraySpec, Reference};
@@ -173,13 +173,14 @@ impl AppendOptions {
     /// Pipeline config for an append. `column_dim` comes from the store, so a
     /// single source still forms a column batch instead of a scalar track.
     fn config(&self, label: &str, column_dim: String) -> Config {
-        Config {
-            workers: self.threads,
-            decode_chunks: self.decode_chunks.unwrap_or(0),
+        ConfigBuilder {
+            workers: Some(self.threads),
+            decode_chunks: self.decode_chunks,
             column_dim: Some(column_dim),
-            progress: (!self.no_progress).then(|| make_sink(label)),
-            ..Config::default()
+            progress: (!self.no_progress).then(|| label.to_owned()),
+            ..ConfigBuilder::default()
         }
+        .build()
     }
 }
 
@@ -365,17 +366,18 @@ impl ImportOptions {
     /// `--no-progress` turned it off. The pipeline sizes the sink itself, so
     /// the label is all it needs here.
     fn config(&self, label: &str) -> Result<Config> {
-        Ok(Config {
-            workers: self.threads,
-            decode_chunks: self.decode_chunks.unwrap_or(0),
+        Ok(ConfigBuilder {
+            workers: Some(self.threads),
+            decode_chunks: self.decode_chunks,
             chunk_size: self.chunk_size,
             column_chunk_size: self.column_chunk_size,
             shard_size: self.shard_size,
             shard_column_size: self.shard_column_size,
             column_dim: self.dim.clone(),
             codecs: self.parse_codecs()?,
-            progress: (!self.no_progress).then(|| make_sink(label)),
-        })
+            progress: (!self.no_progress).then(|| label.to_owned()),
+        }
+        .build())
     }
 
     /// Parse `--codecs`: inline JSON, or `@path` to a JSON file.

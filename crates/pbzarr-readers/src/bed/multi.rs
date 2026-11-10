@@ -15,7 +15,7 @@ use noodles_bgzf as bgzf;
 use noodles_csi::BinningIndex;
 
 use pbzarr::Reference;
-use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
+use pbzarr::import::{Axes, Config, Report, Source, Target};
 use pbzarr::io::{
     ColumnSinkMut, Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, ValueReader,
 };
@@ -652,7 +652,7 @@ pub fn execute_bed_schema_plan<'t>(
                 .collect::<Vec<_>>();
             let readers = open_readers(&plan.sources, &reader_columns, &genome)?;
             let column_labels = (!scalar).then_some(source_labels);
-            run_field_tracks(target, specs, readers, column_labels, &config)
+            run_field_tracks(target, specs, readers, column_labels, config)
         }
         SchemaLayout::BedColumnAxis {
             track_name,
@@ -680,12 +680,11 @@ pub fn execute_bed_schema_plan<'t>(
                 .map_err(|error| {
                     PbzError::Store(format!("open {}: {error}", source.path.display()))
                 })?;
-            let options = pipeline_options(&config);
             target.import(
                 vec![(track_name, track_config)],
                 vec![reader],
                 Axes::default().fields_as_columns(column_labels),
-                options,
+                config,
             )
         }
     }
@@ -741,7 +740,7 @@ pub fn from_bed_matrix<'t>(
                 "sample",
             );
             let readers = open_readers(sources, &[(column, dtype, None)], &genome)?;
-            run_field_tracks(target, vec![(track, cfg)], readers, column_labels, &config)
+            run_field_tracks(target, vec![(track, cfg)], readers, column_labels, config)
         }
         ResolvedImport::Wide {
             track,
@@ -764,12 +763,11 @@ pub fn from_bed_matrix<'t>(
                 .collect();
             let reader = BedMultiReader::open(&sources[0].path, reader_columns, genome.clone())
                 .map_err(|e| PbzError::Store(format!("open {}: {e}", sources[0].path.display())))?;
-            let options = pipeline_options(&config);
             target.import(
                 vec![(track, cfg)],
                 vec![reader],
                 Axes::default().fields_as_columns(column_labels),
-                options,
+                config,
             )
         }
         ResolvedImport::PerField {
@@ -798,7 +796,7 @@ pub fn from_bed_matrix<'t>(
                 .collect();
             let readers = open_readers(sources, &reader_columns, &genome)?;
             let column_labels = (!scalar).then_some(labels);
-            run_field_tracks(target, specs, readers, column_labels, &config)
+            run_field_tracks(target, specs, readers, column_labels, config)
         }
     }
 }
@@ -817,14 +815,6 @@ fn open_readers(
         .collect()
 }
 
-fn pipeline_options(config: &Config) -> PipelineOptions {
-    PipelineOptions {
-        workers: config.workers,
-        decode_chunks: config.decode_chunks,
-        progress: config.progress.clone(),
-    }
-}
-
 fn run_field_tracks(
     target: Target<'_>,
     specs: Vec<(String, TrackConfig)>,
@@ -834,12 +824,11 @@ fn run_field_tracks(
     // explicit `column_dim` is still rank 2, so the caller passes the same
     // labels it baked into the `TrackConfig`s.
     column_labels: Option<Vec<String>>,
-    config: &Config,
+    config: Config,
 ) -> Result<Report> {
-    let options = pipeline_options(config);
     let mut axes = Axes::default().fields_as_tracks();
     if let Some(labels) = column_labels {
         axes = axes.readers_as_columns(labels);
     }
-    target.import(specs, readers, axes, options)
+    target.import(specs, readers, axes, config)
 }

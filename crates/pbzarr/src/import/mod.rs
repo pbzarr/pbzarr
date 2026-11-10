@@ -15,8 +15,7 @@ mod source;
 mod target;
 
 pub use builder::{Import, ImportBuilder};
-pub use config::{Config, ProgressSink, Report};
-pub use engine::PipelineOptions;
+pub use config::{Config, ConfigBuilder, ProgressSink, Report};
 pub use routing::{ImportRouting, SourceAxis, TrackTarget};
 pub use source::Source;
 pub use target::{Axes, Target, store_reference};

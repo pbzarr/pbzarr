@@ -80,7 +80,7 @@ fn creation_rejects_occupied_namespaces_without_writing() {
     }
 }
 
-use pbzarr::import::{Import, PipelineOptions};
+use pbzarr::import::{Config, Import};
 use pbzarr::io::{Dtype, OutputField, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{ExplicitArraySpec, TrackConfig};
 use std::sync::Mutex;
@@ -210,7 +210,7 @@ fn multifield_cohorts_preserve_shards_and_reuse_shared_labels() {
             )
             .fields_as_tracks()
             .readers_as_columns()
-            .options(PipelineOptions {
+            .config(Config {
                 workers: 2,
                 ..Default::default()
             })

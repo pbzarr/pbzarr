@@ -43,33 +43,10 @@ use super::destination::Destination;
 use crate::Result;
 use crate::dataset::Reference;
 use crate::error::PbzError;
-use crate::import::config::{ProgressSink, Report};
+use crate::import::config::{Config, ProgressSink, Report};
 use crate::import::progress::human_bytes;
 use crate::import::routing::ImportRouting;
 use crate::io::{Dtype, OutputSinkMut, ReaderError, ValueReader, WindowSink};
-
-pub struct PipelineOptions {
-    /// Worker thread count: the size of the one pool that runs both source
-    /// decoding and zarrs encoding, so at most this many threads are busy.
-    pub workers: usize,
-    /// Inner position chunks each reader decodes per piece. `0` = auto, see
-    /// `auto_decode_chunks`; an explicit value is clamped to
-    /// `[1, chunk count]`, and either is snapped to the shard grid of
-    /// sharded targets. Larger values cut per-piece fixed cost (one index
-    /// seek per piece); buffers still close per chunk.
-    pub decode_chunks: usize,
-    pub progress: Option<Arc<dyn ProgressSink>>,
-}
-
-impl Default for PipelineOptions {
-    fn default() -> Self {
-        Self {
-            workers: 4,
-            decode_chunks: 0,
-            progress: None,
-        }
-    }
-}
 
 /// Open decode spans allowed at once, before the span count cap the engine
 /// applies. This bounds the open chunk buffers: each span holds up to
@@ -85,7 +62,7 @@ fn auto_in_flight_spans(workers: usize, n_readers: usize) -> usize {
 /// decode on a deep BAM while bounding open chunk buffers per span.
 const DECODE_SPAN_CAP: u64 = 4 << 20;
 
-/// Auto rule for `PipelineOptions::decode_chunks` = 0: as many chunks as the
+/// Auto rule for `Config::decode_chunks` = 0: as many chunks as the
 /// 4M cap allows, reduced so every worker sees about eight pieces.
 fn auto_decode_chunks(total: u64, chunk_len: u64, n_readers: usize, workers: usize) -> usize {
     let chunk_len = chunk_len.max(1);
@@ -1410,7 +1387,7 @@ pub(crate) fn run_import<R: ValueReader>(
     readers: Vec<R>,
     tracks: &[Destination],
     routing: &ImportRouting,
-    options: &PipelineOptions,
+    config: &Config,
     handle_budget: usize,
 ) -> Result<Report> {
     let n_readers = readers.len();
@@ -1419,11 +1396,11 @@ pub(crate) fn run_import<R: ValueReader>(
 
     let reference = Arc::clone(tracks[0].reference());
     let total = tracks[0].total_len();
-    let workers = options.workers.max(1);
+    let workers = config.workers.max(1);
     let chunk_len = geoms[0].array_chunk_len.max(1);
     let n_chunks = usize::try_from(total.div_ceil(chunk_len))
         .map_err(|_| PbzError::Metadata("chunk count exceeds usize".into()))?;
-    let decode_chunks = match options.decode_chunks {
+    let decode_chunks = match config.decode_chunks {
         0 => auto_decode_chunks(total, chunk_len, n_readers, workers),
         n => n.clamp(1, n_chunks.max(1)),
     };
@@ -1436,7 +1413,7 @@ pub(crate) fn run_import<R: ValueReader>(
         .map(|i| (i * span_len, ((i + 1) * span_len).min(total)))
         .collect();
 
-    if let Some(progress) = &options.progress {
+    if let Some(progress) = &config.progress {
         let total_bytes: u64 = geoms
             .iter()
             .map(|g| total * (g.columns.end - g.columns.start) * g.dtype.size() as u64)
@@ -1506,7 +1483,7 @@ pub(crate) fn run_import<R: ValueReader>(
         geoms: &geoms,
         reference: &reference,
         plan: &plan,
-        progress: options.progress.as_deref(),
+        progress: config.progress.as_deref(),
         partial_opts,
         shard_locks: Mutex::new(HashMap::new()),
         chunk_groups: Mutex::new(HashMap::new()),
@@ -1647,7 +1624,7 @@ pub(crate) fn run_import<R: ValueReader>(
         drop(piece_tx);
     });
 
-    if let Some(progress) = &options.progress {
+    if let Some(progress) = &config.progress {
         progress.done();
     }
 
@@ -1997,10 +1974,10 @@ mod tests {
         let run = |dir: &Path, name: &str, cfg: TrackConfig, decode_chunks: usize| {
             let mut ds = dataset(&dir.join(name), &genome);
             import(&mut ds, "v", cfg.columns(labels.clone()), readers())
-                .options(PipelineOptions {
+                .config(Config {
                     workers: 3,
                     decode_chunks,
-                    ..PipelineOptions::default()
+                    ..Config::default()
                 })
                 .run()
                 .unwrap();
@@ -2045,10 +2022,10 @@ mod tests {
             SynthReader::new(genome.clone(), Dtype::I32, 0..16, 7).with_extra_cover(48..64);
         let cfg = TrackConfig::new(Dtype::I32).chunk_size(16);
         let report = import(&mut ds, "v", cfg, vec![reader])
-            .options(PipelineOptions {
+            .config(Config {
                 workers: 1,
                 decode_chunks: 4,
-                ..PipelineOptions::default()
+                ..Config::default()
             })
             .run()
             .unwrap();
@@ -2073,10 +2050,10 @@ mod tests {
         // (48..80). Coverage 0..40 leaves row 1 untouched.
         let reader = SynthReader::new(genome.clone(), Dtype::I32, 0..40, 7);
         let report = import(&mut ds, "v", cfg, vec![reader])
-            .options(PipelineOptions {
+            .config(Config {
                 workers: 2,
                 decode_chunks: 2,
-                ..PipelineOptions::default()
+                ..Config::default()
             })
             .run()
             .unwrap();
@@ -2116,10 +2093,10 @@ mod tests {
         let reader = SynthReader::new(genome, Dtype::I32, 0..22, 100);
         let cfg = TrackConfig::new(Dtype::I32).chunk_size(8);
         let report = import(&mut ds, "v", cfg, vec![reader])
-            .options(PipelineOptions {
+            .config(Config {
                 workers: 1,
                 decode_chunks: 4,
-                ..PipelineOptions::default()
+                ..Config::default()
             })
             .run()
             .unwrap();
@@ -2151,10 +2128,10 @@ mod tests {
         };
         let cfg = TrackConfig::new(Dtype::I32).chunk_size(16);
         import(&mut ds, "v", cfg, vec![reader])
-            .options(PipelineOptions {
+            .config(Config {
                 workers: 3,
                 decode_chunks: 1,
-                ..PipelineOptions::default()
+                ..Config::default()
             })
             .run()
             .unwrap();
@@ -2271,9 +2248,9 @@ mod tests {
             .collect();
 
         import(&mut ds, "depth", cfg, readers)
-            .options(PipelineOptions {
+            .config(Config {
                 workers: 2,
-                ..PipelineOptions::default()
+                ..Config::default()
             })
             .run()
             .unwrap();
@@ -2311,9 +2288,9 @@ mod tests {
 
         for (ds, cfg) in [(&mut plain, plain_cfg), (&mut sharded, sharded_cfg)] {
             let report = import(ds, "depth", cfg, readers())
-                .options(PipelineOptions {
+                .config(Config {
                     workers: 4,
-                    ..PipelineOptions::default()
+                    ..Config::default()
                 })
                 .run()
                 .unwrap();
@@ -2371,9 +2348,9 @@ mod tests {
 
         for (ds, cfg) in [(&mut plain, plain_cfg), (&mut sharded, sharded_cfg)] {
             let report = import(ds, "depth", cfg, readers())
-                .options(PipelineOptions {
+                .config(Config {
                     workers: 4,
-                    ..PipelineOptions::default()
+                    ..Config::default()
                 })
                 .run()
                 .unwrap();
@@ -2465,9 +2442,9 @@ mod tests {
         };
         let cfg = TrackConfig::new(Dtype::I32).chunk_size(4);
         let report = import(&mut ds, "v", cfg, vec![reader])
-            .options(PipelineOptions {
+            .config(Config {
                 workers: 8,
-                ..PipelineOptions::default()
+                ..Config::default()
             })
             .handle_budget(2)
             .run()
@@ -2494,9 +2471,9 @@ mod tests {
             .map(|i| SynthReader::new(genome.clone(), Dtype::I32, 0..32, (i + 1) * 100))
             .collect();
         import(&mut ds, "v", cfg, readers)
-            .options(PipelineOptions {
+            .config(Config {
                 workers: 4,
-                ..PipelineOptions::default()
+                ..Config::default()
             })
             .handle_budget(1)
             .run()
@@ -2560,10 +2537,10 @@ mod tests {
             };
             let cfg = TrackConfig::new(Dtype::I32).chunk_size(4);
             let result = import(&mut ds, "v", cfg, vec![reader])
-                .options(PipelineOptions {
+                .config(Config {
                     workers: 4,
                     decode_chunks: 1,
-                    ..PipelineOptions::default()
+                    ..Config::default()
                 })
                 .handle_budget(1)
                 .run();

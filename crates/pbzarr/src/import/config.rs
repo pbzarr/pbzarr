@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use crate::codec_spec::ExplicitArraySpec;
+use crate::import::progress::make_sink;
 
 /// Hook for callers to observe import progress. Implementations must be
 /// `Send + Sync` because workers call `tick` concurrently.
@@ -16,13 +17,18 @@ pub trait ProgressSink: Send + Sync {
     fn done(&self) {}
 }
 
-/// Configuration shared by the format import entry points
-/// (`from_d4`, `from_bigwig`, `from_bed_matrix`, `from_bam`).
+/// Configuration of one import run, shared by the format import entry points
+/// (`from_d4`, `from_bigwig`, `from_bed_matrix`, `from_bam`) and the engine.
+/// The engine reads `workers`, `decode_chunks` and `progress`; the entry
+/// points read the track sizing fields when they create the tracks.
 pub struct Config {
-    /// Number of reader/writer worker threads.
+    /// Worker thread count: the size of the one pool that runs both source
+    /// decoding and zarrs encoding, so at most this many threads are busy.
     pub workers: usize,
-    /// Inner chunks each reader decodes per piece; 0 = auto (see
-    /// `PipelineOptions::decode_chunks`).
+    /// Inner position chunks each reader decodes per piece. `0` is auto: as
+    /// many chunks as fit in 4M positions, fewer when that leaves workers
+    /// short of pieces. An explicit value is clamped to `[1, chunk count]`,
+    /// and either is snapped to the shard grid of sharded tracks.
     pub decode_chunks: usize,
     /// Position chunk size for the track being imported. Consumed by the
     /// format entry points when they create the track; the engine always
@@ -108,6 +114,52 @@ impl Config {
     }
 }
 
+/// A [`Config`] from optional settings, as the CLI and the Python bindings
+/// take them. A `None` field keeps the `Config` default.
+#[derive(Default)]
+pub struct ConfigBuilder {
+    pub workers: Option<usize>,
+    pub decode_chunks: Option<usize>,
+    pub chunk_size: Option<usize>,
+    pub column_chunk_size: Option<usize>,
+    pub shard_size: Option<usize>,
+    pub shard_column_size: Option<usize>,
+    pub column_dim: Option<String>,
+    pub codecs: Option<ExplicitArraySpec>,
+    /// Label of the progress display; `None` shows no progress.
+    pub progress: Option<String>,
+}
+
+impl ConfigBuilder {
+    /// The first chunk or shard size that is set. A `codecs` spec replaces
+    /// these sizes, so a caller refuses them together.
+    pub fn grid_size_set(&self) -> Option<&'static str> {
+        [
+            ("chunk_size", self.chunk_size),
+            ("column_chunk_size", self.column_chunk_size),
+            ("shard_size", self.shard_size),
+            ("shard_column_size", self.shard_column_size),
+        ]
+        .into_iter()
+        .find_map(|(name, size)| size.map(|_| name))
+    }
+
+    pub fn build(self) -> Config {
+        let default = Config::default();
+        Config {
+            workers: self.workers.unwrap_or(default.workers),
+            decode_chunks: self.decode_chunks.unwrap_or(default.decode_chunks),
+            chunk_size: self.chunk_size,
+            column_chunk_size: self.column_chunk_size,
+            shard_size: self.shard_size,
+            shard_column_size: self.shard_column_size,
+            column_dim: self.column_dim,
+            codecs: self.codecs,
+            progress: self.progress.as_deref().map(make_sink),
+        }
+    }
+}
+
 /// Summary of a finished import.
 pub struct Report {
     /// Positions the import covered, summed over every contig.
@@ -119,4 +171,24 @@ pub struct Report {
     pub bytes_written: u64,
     /// Wall-clock duration of the engine run.
     pub wall_seconds: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_keeps_defaults_and_names_the_first_grid_size() {
+        let builder = ConfigBuilder {
+            shard_size: Some(8),
+            column_chunk_size: Some(2),
+            ..ConfigBuilder::default()
+        };
+        assert_eq!(builder.grid_size_set(), Some("column_chunk_size"));
+        let config = builder.build();
+        assert_eq!(config.workers, Config::default().workers);
+        assert_eq!(config.decode_chunks, 0);
+        assert_eq!(config.shard_size, Some(8));
+        assert!(config.progress.is_none());
+    }
 }

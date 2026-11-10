@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use pbzarr::import::{Config, Import, PipelineOptions, Source};
+use pbzarr::import::{Config, Import, Source};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, TrackConfig};
 use pbzarr::{Dataset, Reference};
@@ -197,9 +197,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Import::from_readers(readers)?
             .into_dataset(&mut dataset, vec![("depth".into(), cfg)])
             .readers_as_columns()
-            .options(PipelineOptions {
+            .config(Config {
                 workers: args.workers,
-                ..PipelineOptions::default()
+                ..Config::default()
             })
             .run()?
     };

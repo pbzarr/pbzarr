@@ -2,7 +2,7 @@
 #![allow(clippy::single_range_in_vec_init)]
 use std::sync::Arc;
 
-use pbzarr::import::{Axes, Import, PipelineOptions, Target};
+use pbzarr::import::{Axes, Config, Import, Target};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, TrackConfig};
 use pbzarr::{Dataset, Reference};
@@ -96,11 +96,11 @@ fn append(
         .map(|i| ConstReader::new(base + i as u32))
         .collect();
     let owned: Vec<String> = labels.iter().map(|l| (*l).to_owned()).collect();
-    Target::Append(dataset).append(
+    Target::Append(dataset).import(
         vec![(track.into(), cohort(labels, 2))],
         readers,
         Axes::default().readers_as_columns(owned),
-        PipelineOptions::default(),
+        Config::default(),
     )
 }
 

@@ -6,8 +6,7 @@ use std::path::Path;
 use log::{debug, info};
 
 use super::builder::{Import, ImportBuilder};
-use super::config::Report;
-use super::engine::PipelineOptions;
+use super::config::{Config, Report};
 use super::routing::SourceAxis;
 use crate::dataset::{Dataset, DatasetPlan, Reference};
 use crate::io::ValueReader;
@@ -25,6 +24,11 @@ pub enum Target<'a> {
     /// A format-0.5 Dataset whose existing root variables grow along their
     /// column dimension. [`Target::import`] routes this variant to the append
     /// path, so every format entry point appends without knowing about it.
+    ///
+    /// Every other root variable over that dimension grows with them, and its
+    /// new columns read as the Zarr fill value. A variable with no such
+    /// dimension, such as a reduction across columns, keeps a legal shape and
+    /// goes stale; nothing detects or marks that.
     Append(&'a mut Dataset),
     /// A store path. When the path does not exist, the import creates a
     /// format-0.5 store whose reference is the contig list of the sources.
@@ -98,48 +102,16 @@ impl Target<'_> {
         specs: Vec<(String, TrackConfig)>,
         readers: Vec<R>,
         axes: Axes,
-        options: PipelineOptions,
+        config: Config,
     ) -> Result<Report> {
         match self {
             Self::Dataset(dataset) => {
-                dataset_run(dataset, specs, readers, axes, options, DatasetPlan::Create)
+                dataset_run(dataset, specs, readers, axes, config, DatasetPlan::Create)
             }
             Self::Append(dataset) => {
-                dataset_run(dataset, specs, readers, axes, options, DatasetPlan::Append)
+                dataset_run(dataset, specs, readers, axes, config, DatasetPlan::Append)
             }
-            Self::Path(path) => import_at(path, specs, readers, axes, options),
-        }
-    }
-
-    /// Grow the `specs` tracks at this destination along their column
-    /// dimension and fill the new columns from `readers`.
-    ///
-    /// Every other root variable over that dimension grows with them, and its
-    /// new columns read as the Zarr fill value. A variable with no such
-    /// dimension, such as a reduction across columns, keeps a legal shape and
-    /// goes stale; nothing detects or marks that.
-    pub fn append<R: ValueReader>(
-        self,
-        specs: Vec<(String, TrackConfig)>,
-        readers: Vec<R>,
-        axes: Axes,
-        options: PipelineOptions,
-    ) -> Result<Report> {
-        match self {
-            Self::Path(path) => {
-                let mut dataset = Dataset::open(path)?;
-                dataset_run(
-                    &mut dataset,
-                    specs,
-                    readers,
-                    axes,
-                    options,
-                    DatasetPlan::Append,
-                )
-            }
-            Self::Dataset(dataset) | Self::Append(dataset) => {
-                dataset_run(dataset, specs, readers, axes, options, DatasetPlan::Append)
-            }
+            Self::Path(path) => import_at(path, specs, readers, axes, config),
         }
     }
 }
@@ -152,12 +124,12 @@ fn import_at<R: ValueReader>(
     specs: Vec<(String, TrackConfig)>,
     readers: Vec<R>,
     axes: Axes,
-    options: PipelineOptions,
+    config: Config,
 ) -> Result<Report> {
     if path.exists() {
         info!("{} exists; adding track(s) to the store", path.display());
         let mut dataset = Dataset::open(path)?;
-        return Target::Dataset(&mut dataset).import(specs, readers, axes, options);
+        return Target::Dataset(&mut dataset).import(specs, readers, axes, config);
     }
     let reference = readers
         .first()
@@ -166,7 +138,7 @@ fn import_at<R: ValueReader>(
         .clone();
     debug!("creating store {}", path.display());
     let mut dataset = Dataset::create(path, reference)?;
-    let report = Target::Dataset(&mut dataset).import(specs, readers, axes, options);
+    let report = Target::Dataset(&mut dataset).import(specs, readers, axes, config);
     if report.is_err() {
         drop(dataset);
         if let Err(error) = std::fs::remove_dir_all(path) {
@@ -202,7 +174,7 @@ fn dataset_run<R: ValueReader>(
     specs: Vec<(String, TrackConfig)>,
     readers: Vec<R>,
     axes: Axes,
-    options: PipelineOptions,
+    config: Config,
     plan: DatasetPlan,
 ) -> Result<Report> {
     let store = dataset.reference()?;
@@ -210,7 +182,7 @@ fn dataset_run<R: ValueReader>(
         same_reference(reader.contigs().contigs(), store.contigs())?;
     }
     axes.apply(Import::from_readers(readers)?.into_dataset_plan(dataset, specs, plan))
-        .options(options)
+        .config(config)
         .run()
 }
 

@@ -4,7 +4,7 @@
 //! Import::from_readers(readers)?
 //!     .into_dataset(&mut dataset, specs)
 //!     .readers_as_columns()        // or .fields_as_tracks() / .fields_as_columns()
-//!     .options(PipelineOptions::default())
+//!     .config(Config::default())
 //!     .run()?;
 //! ```
 //!
@@ -13,8 +13,8 @@
 
 use crate::dataset::DatasetPlan;
 use crate::error::{PbzError, Result};
-use crate::import::config::Report;
-use crate::import::engine::{self, PipelineOptions};
+use crate::import::config::{Config, Report};
+use crate::import::engine;
 use crate::import::routing::{ImportRouting, SourceAxis};
 use crate::io::ValueReader;
 use crate::{TrackConfig, dataset::Dataset};
@@ -36,7 +36,7 @@ impl Import {
             dataset: None,
             tracks_from: None,
             columns_from: None,
-            options: PipelineOptions::default(),
+            config: Config::default(),
             handle_budget: 0,
             expected_labels: None,
         })
@@ -48,7 +48,7 @@ pub struct ImportBuilder<'t, R: ValueReader> {
     dataset: Option<DatasetTarget<'t>>,
     tracks_from: Option<SourceAxis>,
     columns_from: Option<SourceAxis>,
-    options: PipelineOptions,
+    config: Config,
     /// Reader handles across all readers; 0 derives it from the fd limit.
     handle_budget: usize,
     expected_labels: Option<Vec<String>>,
@@ -93,8 +93,10 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
         self
     }
 
-    pub fn options(mut self, options: PipelineOptions) -> Self {
-        self.options = options;
+    /// The run reads the worker count, `decode_chunks` and the progress hook.
+    /// The tracks take their sizes from their `TrackConfig`.
+    pub fn config(mut self, config: Config) -> Self {
+        self.config = config;
         self
     }
 
@@ -148,7 +150,7 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             self.readers,
             tracks,
             &routing,
-            &self.options,
+            &self.config,
             self.handle_budget,
         )?;
         if let Some((ds, ..)) = self.dataset.as_mut() {

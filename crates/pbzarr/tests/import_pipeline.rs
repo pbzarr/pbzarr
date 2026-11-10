@@ -1,4 +1,4 @@
-use pbzarr::import::{Import, PipelineOptions};
+use pbzarr::import::{Config, Import};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, TrackConfig};
 use pbzarr::{Dataset, Reference};
@@ -121,9 +121,9 @@ fn cohort_pipeline_tiles_columns_with_multiple_workers() {
         .unwrap()
         .into_dataset(&mut ds, vec![("depth".into(), cfg)])
         .readers_as_columns()
-        .options(PipelineOptions {
+        .config(Config {
             workers: 2,
-            ..PipelineOptions::default()
+            ..Config::default()
         })
         .run()
         .unwrap();
