@@ -668,7 +668,16 @@ fn ns_secs(counter: &AtomicU64) -> f64 {
     counter.load(Ordering::Relaxed) as f64 / 1e9
 }
 
-struct EngineState {
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic payload")
+}
+
+/// Everything workers share.
+struct RunCtx<'a> {
     slots: Mutex<HashMap<SlotKey, Arc<SlotHandle>>>,
     gate: SpanGate,
     span_remaining: Vec<AtomicUsize>,
@@ -678,9 +687,24 @@ struct EngineState {
     timings: RunTimings,
     err_flag: AtomicBool,
     first_err: Mutex<Option<PbzError>>,
+    geoms: &'a [TargetGeom<'a>],
+    reference: &'a Reference,
+    plan: &'a TouchPlan,
+    progress: Option<&'a dyn ProgressSink>,
+    partial_opts: CodecOptions,
+    shard_locks: Mutex<ShardLockMap>,
+    /// Sharded `(target, chunk)` groups awaiting their last buffer (the
+    /// fallback path for targets that are not shard-aligned).
+    chunk_groups: Mutex<HashMap<(usize, usize), ChunkGroup>>,
+    /// Shard groups awaiting their last buffer, for shard-aligned targets.
+    /// Each group carries its own lock so closers merge concurrently across
+    /// shards.
+    shard_groups: Mutex<ShardGroupMap>,
+    /// Flat position count, so a piece can clamp its last chunk.
+    total: u64,
 }
 
-impl EngineState {
+impl RunCtx<'_> {
     fn has_err(&self) -> bool {
         self.err_flag.load(Ordering::Relaxed)
     }
@@ -700,39 +724,9 @@ impl EngineState {
         self.err_flag.store(true, Ordering::Relaxed);
         self.gate.abort();
     }
-}
 
-fn panic_message(payload: &(dyn Any + Send)) -> &str {
-    payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("unknown panic payload")
-}
-
-/// Everything workers share.
-struct RunCtx<'a> {
-    state: &'a EngineState,
-    geoms: &'a [TargetGeom<'a>],
-    reference: &'a Reference,
-    plan: &'a TouchPlan,
-    progress: Option<&'a dyn ProgressSink>,
-    partial_opts: CodecOptions,
-    shard_locks: Mutex<ShardLockMap>,
-    /// Sharded `(target, chunk)` groups awaiting their last buffer (the
-    /// fallback path for targets that are not shard-aligned).
-    chunk_groups: Mutex<HashMap<(usize, usize), ChunkGroup>>,
-    /// Shard groups awaiting their last buffer, for shard-aligned targets.
-    /// Each group carries its own lock so closers merge concurrently across
-    /// shards.
-    shard_groups: Mutex<ShardGroupMap>,
-    /// Flat position count, so a piece can clamp its last chunk.
-    total: u64,
-}
-
-impl RunCtx<'_> {
     fn slot(&self, key: SlotKey) -> Arc<SlotHandle> {
-        let mut map = self.state.slots.lock().expect("slot map poisoned");
+        let mut map = self.slots.lock().expect("slot map poisoned");
         Arc::clone(map.entry(key).or_insert_with(|| {
             Arc::new(SlotHandle {
                 inner: Mutex::new(SlotInner {
@@ -752,14 +746,14 @@ impl RunCtx<'_> {
     }
 
     fn record_skipped(&self) {
-        self.state.chunks_skipped.fetch_add(1, Ordering::Relaxed);
+        self.chunks_skipped.fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_written(&self, geom: &TargetGeom<'_>, chunk: Range<u64>, columns: Range<u64>) {
         let bytes =
             (chunk.end - chunk.start) * (columns.end - columns.start) * geom.dtype.size() as u64;
-        self.state.bytes_written.fetch_add(bytes, Ordering::Relaxed);
-        self.state.chunks_written.fetch_add(1, Ordering::Relaxed);
+        self.bytes_written.fetch_add(bytes, Ordering::Relaxed);
+        self.chunks_written.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Write, batch, or elide one closed buffer.
@@ -785,7 +779,7 @@ impl RunCtx<'_> {
             let columns = geom.buffer_columns(cc);
             let write_start = Instant::now();
             data.write_unsharded(geom.track, chunk.clone(), columns.clone())?;
-            self.state.timings.write.record(write_start.elapsed());
+            self.timings.write.record(write_start.elapsed());
             self.record_written(geom, chunk, columns);
         } else {
             self.record_skipped();
@@ -897,7 +891,7 @@ impl RunCtx<'_> {
             let lock = self.shard_lock(t_idx, chunk.start, seg.start);
             let wait_start = Instant::now();
             let guard = lock.lock().expect("shard mutex poisoned");
-            self.state.timings.shard_wait.record(wait_start.elapsed());
+            self.timings.shard_wait.record(wait_start.elapsed());
             let write_start = Instant::now();
             rect.store_subset(
                 &geom.array,
@@ -907,7 +901,7 @@ impl RunCtx<'_> {
                 seg,
                 &self.partial_opts,
             )?;
-            self.state.timings.write.record(write_start.elapsed());
+            self.timings.write.record(write_start.elapsed());
             drop(guard);
 
             for &(cc, _) in &parts[lo..hi] {
@@ -1015,7 +1009,7 @@ impl RunCtx<'_> {
         if let Some(shard) = shard {
             let write_start = Instant::now();
             shard.store_chunk(&geom.array, geom.track.name(), geom.rank, &[row, cs])?;
-            self.state.timings.write.record(write_start.elapsed());
+            self.timings.write.record(write_start.elapsed());
         }
         for &(chunk_idx, cc, covered) in &parts {
             if covered {
@@ -1074,12 +1068,11 @@ impl PieceSink<'_, '_> {
             }
         }
         for (t_idx, cc, data, any_data) in closed {
-            self.ctx
-                .state
-                .slots
-                .lock()
-                .expect("slot map poisoned")
-                .remove(&(t_idx, chunk_idx as usize, cc));
+            self.ctx.slots.lock().expect("slot map poisoned").remove(&(
+                t_idx,
+                chunk_idx as usize,
+                cc,
+            ));
             self.ctx
                 .close_buffer(t_idx, cc, chunk_idx as usize, lo..hi, data, any_data)?;
         }
@@ -1099,11 +1092,7 @@ impl PieceSink<'_, '_> {
             let wait_start = Instant::now();
             let handle = self.ctx.slot((entry.t_idx, chunk_idx as usize, entry.cc));
             let mut guard = handle.inner.lock().expect("buffer slot poisoned");
-            self.ctx
-                .state
-                .timings
-                .slot_wait
-                .record(wait_start.elapsed());
+            self.ctx.timings.slot_wait.record(wait_start.elapsed());
             let merge_start = Instant::now();
             if guard.data.is_none() {
                 let geom = &self.ctx.geoms[entry.t_idx];
@@ -1126,7 +1115,7 @@ impl PieceSink<'_, '_> {
                     row0..row0 + n,
                     dst_lo..dst_lo + entry.fields.len(),
                 )?;
-            self.ctx.state.timings.merge.record(merge_start.elapsed());
+            self.ctx.timings.merge.record(merge_start.elapsed());
         }
         Ok(())
     }
@@ -1237,7 +1226,7 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
             .read_windows(w.name, w.local_lo, w.local_hi, &cuts, &mut sink)
             .map_err(PbzError::Reader)?;
     }
-    ctx.state.timings.decode.record(read_start.elapsed());
+    ctx.timings.decode.record(read_start.elapsed());
 
     // Finish the last streamed chunk, then every chunk the stream never
     // reached, so an uncovered chunk inside a covered span still elides.
@@ -1478,7 +1467,9 @@ pub(crate) fn run_import<R: ValueReader>(
         human_bytes(buffer_ceiling)
     );
 
-    let state = EngineState {
+    let mut partial_opts = CodecOptions::default();
+    partial_opts.set_experimental_partial_encoding(true);
+    let ctx = RunCtx {
         slots: Mutex::new(HashMap::new()),
         gate: SpanGate::new(in_flight),
         span_remaining: (0..n_spans).map(|_| AtomicUsize::new(n_readers)).collect(),
@@ -1488,11 +1479,6 @@ pub(crate) fn run_import<R: ValueReader>(
         timings: RunTimings::default(),
         err_flag: AtomicBool::new(false),
         first_err: Mutex::new(None),
-    };
-    let mut partial_opts = CodecOptions::default();
-    partial_opts.set_experimental_partial_encoding(true);
-    let ctx = RunCtx {
-        state: &state,
         geoms: &geoms,
         reference: &reference,
         plan: &plan,
@@ -1540,7 +1526,7 @@ pub(crate) fn run_import<R: ValueReader>(
                     return;
                 };
                 let fail = |e: PbzError| {
-                    ctx.state.record_err(e);
+                    ctx.record_err(e);
                     pools.iter().for_each(HandlePool::abort);
                 };
                 let mut busy = Duration::ZERO;
@@ -1555,7 +1541,7 @@ pub(crate) fn run_import<R: ValueReader>(
                         // `busy` below and is reported as its own stage.
                         let mut stalled = Duration::ZERO;
                         'piece: {
-                            if ctx.state.has_err() {
+                            if ctx.has_err() {
                                 // Drain so the channel closes cleanly; the gate is
                                 // already aborted, so nothing blocks on us.
                                 break 'piece;
@@ -1563,7 +1549,7 @@ pub(crate) fn run_import<R: ValueReader>(
                             let checkout_start = Instant::now();
                             let checked_out = pools[piece.reader].checkout();
                             stalled = checkout_start.elapsed();
-                            ctx.state.timings.handle_wait.record(stalled);
+                            ctx.timings.handle_wait.record(stalled);
                             let mut reader = match checked_out {
                                 Ok(Some(reader)) => reader,
                                 Ok(None) => break 'piece,
@@ -1578,10 +1564,8 @@ pub(crate) fn run_import<R: ValueReader>(
                                 fail(e);
                                 break 'piece;
                             }
-                            if ctx.state.span_remaining[piece.span].fetch_sub(1, Ordering::AcqRel)
-                                == 1
-                            {
-                                ctx.state.gate.release();
+                            if ctx.span_remaining[piece.span].fetch_sub(1, Ordering::AcqRel) == 1 {
+                                ctx.gate.release();
                             }
                         }
                         busy += work_start.elapsed().saturating_sub(stalled);
@@ -1597,7 +1581,7 @@ pub(crate) fn run_import<R: ValueReader>(
                     )));
                 }
                 drop(piece_rx);
-                let timings = &ctx.state.timings;
+                let timings = &ctx.timings;
                 timings
                     .worker_busy_ns
                     .fetch_add(busy.as_nanos() as u64, Ordering::Relaxed);
@@ -1609,13 +1593,13 @@ pub(crate) fn run_import<R: ValueReader>(
 
         let mut gate_wait = Duration::ZERO;
         'produce: for (span_idx, &(start, end)) in spans.iter().enumerate() {
-            if state.has_err() {
+            if ctx.has_err() {
                 break;
             }
             let gate_start = Instant::now();
-            state.gate.acquire();
+            ctx.gate.acquire();
             gate_wait += gate_start.elapsed();
-            if state.has_err() {
+            if ctx.has_err() {
                 break;
             }
             for reader in 0..n_readers {
@@ -1630,8 +1614,7 @@ pub(crate) fn run_import<R: ValueReader>(
                 }
             }
         }
-        state
-            .timings
+        ctx.timings
             .gate_wait_ns
             .store(gate_wait.as_nanos() as u64, Ordering::Relaxed);
         drop(piece_tx);
@@ -1641,9 +1624,9 @@ pub(crate) fn run_import<R: ValueReader>(
         progress.done();
     }
 
-    let completed = state.chunks_written.load(Ordering::Relaxed);
-    let skipped = state.chunks_skipped.load(Ordering::Relaxed);
-    let bytes = state.bytes_written.load(Ordering::Relaxed);
+    let completed = ctx.chunks_written.load(Ordering::Relaxed);
+    let skipped = ctx.chunks_skipped.load(Ordering::Relaxed);
+    let bytes = ctx.bytes_written.load(Ordering::Relaxed);
     info!(
         "import pipeline finished: {completed} buffer(s) written, {skipped} elided, \
          {bytes} bytes in {:.1?}",
@@ -1657,7 +1640,7 @@ pub(crate) fn run_import<R: ValueReader>(
     }
 
     let wall = started.elapsed().as_secs_f64();
-    let timings = &state.timings;
+    let timings = &ctx.timings;
     let busy = ns_secs(&timings.worker_busy_ns);
     let idle = ns_secs(&timings.worker_idle_ns);
     let gate_wait = ns_secs(&timings.gate_wait_ns);
@@ -1702,7 +1685,7 @@ pub(crate) fn run_import<R: ValueReader>(
         timings.handle_wait.max_secs(),
     );
 
-    let first_err = state
+    let first_err = ctx
         .first_err
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1714,7 +1697,7 @@ pub(crate) fn run_import<R: ValueReader>(
     // Every piece drops its claim on every chunk of its span, so a clean run
     // ends with nothing open. A reader that skipped a window would otherwise
     // leave that chunk unwritten, uncounted, and unreported.
-    let open = state.slots.lock().expect("slot map poisoned").len()
+    let open = ctx.slots.lock().expect("slot map poisoned").len()
         + ctx
             .chunk_groups
             .lock()
