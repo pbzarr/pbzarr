@@ -4,28 +4,12 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
-
 use pbzarr::dataset::{Dataset, Reference, ValidationStatus};
 use pbzarr::import::{Config, Source, Target};
 use pbzarr::io::ValueReader as _;
-use pbzarr::{Contig, Genome, PbzStore, Region};
-use pbzarr_readers::{
-    BedImportOptions, BigWigReader, D4Reader, from_bed_matrix, from_bigwig, from_d4,
-};
+use pbzarr::{Contig, Genome};
+use pbzarr_readers::{BedImportOptions, BigWigReader, from_bed_matrix, from_bigwig};
 use tempfile::TempDir;
-
-fn d4_fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/d4")
-        .join(name)
-}
-
-fn d4_reference(path: &Path) -> (Reference, u64) {
-    let genome = D4Reader::open(path).unwrap().contigs().clone();
-    let total = genome.contigs().iter().map(|c| c.length).sum();
-    (Reference::new(genome.contigs().to_vec()).unwrap(), total)
-}
 
 #[test]
 fn bigwig_cohort_imports_into_a_dataset() {
@@ -93,44 +77,6 @@ fn bigwig_cohort_imports_into_a_dataset() {
         assert_eq!(covered, if position < 8 { 1.5 } else { 2.5 });
         assert!(gap.is_nan(), "position {position} should be missing");
     }
-}
-
-#[test]
-fn d4_import_into_a_dataset_matches_the_store() {
-    let dir = TempDir::new().unwrap();
-    let source = d4_fixture("cohort_s0.d4");
-    let (reference, total) = d4_reference(&source);
-    let sources = [Source::new(source)];
-    let config = || Config {
-        chunk_size: Some(1_000),
-        ..Config::default()
-    };
-
-    let mut store = PbzStore::create(dir.path().join("store.pbz")).unwrap();
-    from_d4(&mut store, "depth", &sources, config()).unwrap();
-    let track = store.track("depth").unwrap();
-    let expected = track
-        .read_region::<i32>(&Region {
-            contig: store.genome_for("depth").unwrap().id("chr1").unwrap(),
-            start: 0,
-            end: total,
-        })
-        .unwrap();
-
-    let path = dir.path().join("dataset.pbz");
-    let mut dataset = Dataset::create(&path, reference).unwrap();
-    from_d4(&mut dataset, "depth", &sources, config()).unwrap();
-
-    let dataset = Dataset::open(&path).unwrap();
-    assert_eq!(dataset.variables()["depth"].dims, ["position"]);
-    assert_eq!(
-        dataset
-            .read_raw::<i32>("depth", &[0..total])
-            .unwrap()
-            .as_slice()
-            .unwrap(),
-        expected.as_slice().unwrap()
-    );
 }
 
 #[test]

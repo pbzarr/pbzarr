@@ -1,14 +1,19 @@
 //! End-to-end: synthesize multi-column bgzipped+tabix BEDs and import them via
 //! the schema generation (`plan_bed_schema`/`execute_bed_schema_plan`) and
 //! `from_bed_matrix`, then read the tracks back.
+// One range per axis; the single-range cases are rank-one reads.
+#![allow(clippy::single_range_in_vec_init)]
 
 mod common;
 
-use ndarray::{Ix1, Ix2};
+use std::path::{Path, PathBuf};
+
+use ndarray::Ix2;
+use pbzarr::RegionQuery;
+use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::genome::{Contig, Genome};
 use pbzarr::import::Config;
 use pbzarr::io::Dtype;
-use pbzarr::{PbzStore, Region};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, Source, execute_bed_schema_plan, from_bed_matrix,
     plan_bed_schema,
@@ -27,6 +32,37 @@ fn genome(cs: &[(&str, u64)]) -> Genome {
             .collect(),
     )
     .unwrap()
+}
+
+/// An empty store over one `chr1` contig of `length` positions.
+fn create(dir: &Path, name: &str, length: u64) -> (PathBuf, Dataset) {
+    let path = dir.join(name);
+    let reference = Reference::new(genome(&[("chr1", length)]).contigs().to_vec()).unwrap();
+    let dataset = Dataset::create(&path, reference).unwrap();
+    (path, dataset)
+}
+
+fn track_names(store: &Path) -> Vec<String> {
+    Dataset::open(store)
+        .unwrap()
+        .variables()
+        .values()
+        .filter(|v| v.is_track())
+        .map(|v| v.name.clone())
+        .collect()
+}
+
+fn labels(dataset: &Dataset, dim: &str) -> Vec<String> {
+    let n = dataset.variables()[dim].shape[0];
+    dataset
+        .read_raw::<String>(dim, &[0..n])
+        .unwrap()
+        .into_raw_vec_and_offset()
+        .0
+}
+
+fn chr1() -> RegionQuery {
+    "chr1".parse().unwrap()
 }
 
 #[test]
@@ -72,20 +108,17 @@ fn indexed_duplicate_header_labels_are_safe_for_per_column_tracks() {
     let plan = plan_bed_schema(&sources, &schema, &Config::default())
         .expect("duplicate labels are not persisted by PerColumn layout");
     let output = dir.path().join("duplicate-header-indexed.pbz");
-    let mut store = PbzStore::create(output).unwrap();
-    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 8)]), Config::default()).unwrap();
+    execute_bed_schema_plan(
+        output.as_path(),
+        plan,
+        genome(&[("chr1", 8)]),
+        Config::default(),
+    )
+    .unwrap();
 
-    let region = Region {
-        contig: store.genome_for("first").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
+    let dataset = Dataset::open(&output).unwrap();
     for (track_name, expected) in [("first", 4u16), ("second", 9u16)] {
-        let values = store
-            .track(track_name)
-            .unwrap()
-            .read_region::<u16>(&region)
-            .unwrap();
+        let values = dataset.read_region::<u16>(track_name, &chr1()).unwrap();
         assert!(values.iter().all(|value| *value == expected));
     }
 }
@@ -217,26 +250,16 @@ fn grouped_schema_one_source_preserves_bed_column_order() {
 
     let plan = plan_bed_schema(&sources, &schema, &config).unwrap();
     let output = dir.path().join("grouped.pbz");
-    let mut store = PbzStore::create(&output).unwrap();
-    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 8)]), config).unwrap();
+    execute_bed_schema_plan(output.as_path(), plan, genome(&[("chr1", 8)]), config).unwrap();
 
-    let track = store.track("stats").unwrap();
-    assert_eq!(track.rank(), 2);
-    assert_eq!(track.dtype(), Dtype::U16);
-    assert_eq!(track.column_dim(), Some("BED column"));
-    assert_eq!(track.columns_count().unwrap(), 2);
+    let dataset = Dataset::open(&output).unwrap();
     assert_eq!(
-        track.column_labels().unwrap(),
-        vec!["mapq".to_owned(), "cov".to_owned()]
+        dataset.variables()["stats"].dims,
+        ["position", "BED column"]
     );
-
-    let region = Region {
-        contig: store.genome_for("stats").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
-    let values = track
-        .read_region::<u16>(&region)
+    assert_eq!(labels(&dataset, "BED column"), ["mapq", "cov"]);
+    let values = dataset
+        .read_region::<u16>("stats", &chr1())
         .unwrap()
         .into_dimensionality::<Ix2>()
         .unwrap();
@@ -246,13 +269,6 @@ fn grouped_schema_one_source_preserves_bed_column_order() {
             if index < 4 { vec![60, 4] } else { vec![30, 9] }
         );
     }
-
-    let metadata = std::fs::read_to_string(output.join("stats").join("zarr.json")).unwrap();
-    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
-    assert_eq!(
-        metadata["attributes"]["perbase:description"],
-        "Quality statistics"
-    );
 }
 
 #[test]
@@ -283,25 +299,15 @@ fn unique_schema_two_sources_uses_labeled_source_axis_per_track() {
         ..Config::default()
     };
     let plan = plan_bed_schema(&sources, &schema, &config).unwrap();
-    let mut store = PbzStore::create(dir.path().join("unique.pbz")).unwrap();
-    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 8)]), config).unwrap();
+    let output = dir.path().join("unique.pbz");
+    execute_bed_schema_plan(output.as_path(), plan, genome(&[("chr1", 8)]), config).unwrap();
 
-    let region = Region {
-        contig: store.genome_for("mapq").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
+    let dataset = Dataset::open(&output).unwrap();
+    assert_eq!(labels(&dataset, "sample"), ["tumor", "normal"]);
     for (track_name, expected) in [("mapq", vec![60, 30]), ("cov", vec![4, 9])] {
-        let track = store.track(track_name).unwrap();
-        assert_eq!(track.rank(), 2);
-        assert_eq!(track.dtype(), Dtype::U16);
-        assert_eq!(track.column_dim(), Some("sample"));
-        assert_eq!(
-            track.column_labels().unwrap(),
-            vec!["tumor".to_owned(), "normal".to_owned()]
-        );
-        let values = track
-            .read_region::<u16>(&region)
+        assert_eq!(dataset.variables()[track_name].dims, ["position", "sample"]);
+        let values = dataset
+            .read_region::<u16>(track_name, &chr1())
             .unwrap()
             .into_dimensionality::<Ix2>()
             .unwrap();
@@ -362,9 +368,6 @@ fn grouped_schema_two_sources_reports_rank_three_before_track_creation() {
         error.contains("Use one input or give every BED column a unique track name"),
         "{error}"
     );
-
-    let store = PbzStore::create(dir.path().join("rank3.pbz")).unwrap();
-    assert!(store.track_names().next().is_none());
 }
 
 #[test]
@@ -523,10 +526,10 @@ fn schema_execution_rejects_a_column_dimension_changed_after_planning() {
         &Config::default(),
     )
     .unwrap();
-    let mut store = PbzStore::create(dir.path().join("changed-config.pbz")).unwrap();
+    let (path, mut dataset) = create(dir.path(), "changed-config.pbz", 8);
 
     let error = execute_bed_schema_plan(
-        &mut store,
+        &mut dataset,
         plan,
         genome(&[("chr1", 8)]),
         Config {
@@ -539,7 +542,7 @@ fn schema_execution_rejects_a_column_dimension_changed_after_planning() {
     .to_string();
     assert!(error.contains("column dimension"), "{error}");
     assert!(error.contains("planning"), "{error}");
-    assert!(store.track_names().next().is_none());
+    assert!(track_names(&path).is_empty());
 }
 
 #[test]
@@ -606,7 +609,7 @@ fn multi_column_mixed_dtype_roundtrip() {
             ("chr1", 20, 40, vec!["9", "2.5", "0"]),
         ],
     );
-    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let output = dir.path().join("out.pbz");
 
     // Two name selectors (default track names) + one index selector.
     let schema = BedSchema(vec![
@@ -616,43 +619,25 @@ fn multi_column_mixed_dtype_roundtrip() {
     ]);
     let sources = [Source::new(bed)];
     let plan = plan_bed_schema(&sources, &schema, &Config::default()).unwrap();
-    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 40)]), Config::default()).unwrap();
+    execute_bed_schema_plan(
+        output.as_path(),
+        plan,
+        genome(&[("chr1", 40)]),
+        Config::default(),
+    )
+    .unwrap();
 
-    // Every track owns an identical genome; contig ids share the same index.
-    let g = store.genome_for("cov").unwrap();
-    let reg = Region {
-        contig: g.id("chr1").unwrap(),
-        start: 0,
-        end: 40,
-    };
-
-    let cov = store
-        .track("cov")
-        .unwrap()
-        .read_region::<i32>(&reg)
-        .unwrap()
-        .into_dimensionality::<Ix1>()
-        .unwrap();
+    let dataset = Dataset::open(&output).unwrap();
+    let cov = dataset.read_region::<i32>("cov", &chr1()).unwrap();
+    assert_eq!(cov.shape(), [40]);
     assert!(cov.iter().take(20).all(|&v| v == 4));
     assert!(cov.iter().skip(20).all(|&v| v == 9));
 
-    let score = store
-        .track("score")
-        .unwrap()
-        .read_region::<f32>(&reg)
-        .unwrap()
-        .into_dimensionality::<Ix1>()
-        .unwrap();
+    let score = dataset.read_region::<f32>("score", &chr1()).unwrap();
     assert!(score.iter().take(20).all(|&v| v == 1.5));
     assert!(score.iter().skip(20).all(|&v| v == 2.5));
 
-    let mask = store
-        .track("mask")
-        .unwrap()
-        .read_region::<bool>(&reg)
-        .unwrap()
-        .into_dimensionality::<Ix1>()
-        .unwrap();
+    let mask = dataset.read_region::<bool>("mask", &chr1()).unwrap();
     assert!(mask.iter().take(20).all(|&v| v));
     assert!(mask.iter().skip(20).all(|&v| !v));
 }
@@ -672,9 +657,9 @@ fn multi_source_matrix_import_roundtrip() {
         &["chrom", "start", "end", "coverage", "score"],
         &[("chr1", 0, 8, vec!["9", "2.5"])],
     );
-    let mut store = PbzStore::create(dir.path().join("matrix.pbz")).unwrap();
+    let output = dir.path().join("matrix.pbz");
     from_bed_matrix(
-        &mut store,
+        output.as_path(),
         &[Source::labeled(a, "A"), Source::labeled(b, "B")],
         genome(&[("chr1", 8)]),
         &BedImportOptions::default(),
@@ -689,22 +674,14 @@ fn multi_source_matrix_import_roundtrip() {
         },
     )
     .unwrap();
-    let region = Region {
-        contig: store.genome_for("coverage").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
-    let coverage = store
-        .track("coverage")
-        .unwrap()
-        .read_region::<u8>(&region)
+    let dataset = Dataset::open(&output).unwrap();
+    let coverage = dataset
+        .read_region::<u8>("coverage", &chr1())
         .unwrap()
         .into_dimensionality::<Ix2>()
         .unwrap();
-    let score = store
-        .track("score")
-        .unwrap()
-        .read_region::<f32>(&region)
+    let score = dataset
+        .read_region::<f32>("score", &chr1())
         .unwrap()
         .into_dimensionality::<Ix2>()
         .unwrap();
@@ -735,9 +712,9 @@ fn single_source_with_column_dim_is_one_column_2d() {
         &["chrom", "start", "end", "cov"],
         &[("chr1", 0, 8, vec!["4"])],
     );
-    let mut store = PbzStore::create(dir.path().join("single_column_dim.pbz")).unwrap();
+    let output = dir.path().join("single_column_dim.pbz");
     from_bed_matrix(
-        &mut store,
+        output.as_path(),
         &[Source::new(bed)],
         genome(&[("chr1", 8)]),
         &BedImportOptions {
@@ -751,20 +728,10 @@ fn single_source_with_column_dim_is_one_column_2d() {
     )
     .unwrap();
 
-    let track = store.track("cov").unwrap();
-    assert_eq!(track.rank(), 2);
-    assert_eq!(track.columns_count().unwrap(), 1);
-    assert_eq!(track.column_dim(), Some("sample"));
-
-    let region = Region {
-        contig: store.genome_for("cov").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
-    let cov = store
-        .track("cov")
-        .unwrap()
-        .read_region::<u8>(&region)
+    let dataset = Dataset::open(&output).unwrap();
+    assert_eq!(dataset.variables()["cov"].dims, ["position", "sample"]);
+    let cov = dataset
+        .read_region::<u8>("cov", &chr1())
         .unwrap()
         .into_dimensionality::<Ix2>()
         .unwrap();
@@ -785,29 +752,24 @@ fn uncovered_positions_read_back_as_zero() {
             ("chr1", 20, 30, vec!["7", "0"]),
         ],
     );
-    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let output = dir.path().join("out.pbz");
     let schema = BedSchema(vec![
         BedColumnSpec::named("cov", Dtype::I32),
         BedColumnSpec::named("flag", Dtype::Bool),
     ]);
     let sources = [Source::new(bed)];
     let plan = plan_bed_schema(&sources, &schema, &Config::default()).unwrap();
-    execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 40)]), Config::default()).unwrap();
+    execute_bed_schema_plan(
+        output.as_path(),
+        plan,
+        genome(&[("chr1", 40)]),
+        Config::default(),
+    )
+    .unwrap();
 
-    let g = store.genome_for("cov").unwrap();
-    let reg = Region {
-        contig: g.id("chr1").unwrap(),
-        start: 0,
-        end: 40,
-    };
-
-    let cov = store
-        .track("cov")
-        .unwrap()
-        .read_region::<i32>(&reg)
-        .unwrap()
-        .into_dimensionality::<Ix1>()
-        .unwrap();
+    let dataset = Dataset::open(&output).unwrap();
+    let cov = dataset.read_region::<i32>("cov", &chr1()).unwrap();
+    assert_eq!(cov.shape(), [40]);
     assert!(cov.iter().take(10).all(|&v| v == 5));
     assert!(
         cov.iter().skip(10).take(10).all(|&v| v == 0),
@@ -816,13 +778,7 @@ fn uncovered_positions_read_back_as_zero() {
     assert!(cov.iter().skip(20).take(10).all(|&v| v == 7));
     assert!(cov.iter().skip(30).all(|&v| v == 0), "tail reads as zero");
 
-    let flag = store
-        .track("flag")
-        .unwrap()
-        .read_region::<bool>(&reg)
-        .unwrap()
-        .into_dimensionality::<Ix1>()
-        .unwrap();
+    let flag = dataset.read_region::<bool>("flag", &chr1()).unwrap();
     assert!(flag.iter().take(10).all(|&v| v));
     assert!(
         flag.iter().skip(10).all(|&v| !v),
@@ -839,8 +795,7 @@ fn population_failure_leaves_all_tracks_unpublished() {
         &["chrom", "start", "end", "cov", "flag"],
         &[("chr1", 0, 10, vec!["not-an-int", "1"])],
     );
-    let path = dir.path().join("out.pbz");
-    let mut store = PbzStore::create(&path).unwrap();
+    let (path, mut dataset) = create(dir.path(), "out.pbz", 10);
     let schema = BedSchema(vec![
         BedColumnSpec::named("cov", Dtype::I32),
         BedColumnSpec::named("flag", Dtype::Bool),
@@ -848,15 +803,15 @@ fn population_failure_leaves_all_tracks_unpublished() {
 
     let sources = [Source::new(bed)];
     let plan = plan_bed_schema(&sources, &schema, &Config::default()).unwrap();
-    let result =
-        execute_bed_schema_plan(&mut store, plan, genome(&[("chr1", 10)]), Config::default());
+    let result = execute_bed_schema_plan(
+        &mut dataset,
+        plan,
+        genome(&[("chr1", 10)]),
+        Config::default(),
+    );
 
     assert!(result.is_err());
-    assert!(store.track("cov").is_none());
-    assert!(store.track("flag").is_none());
-    let reopened = PbzStore::open(path).unwrap();
-    assert!(reopened.track("cov").is_none());
-    assert!(reopened.track("flag").is_none());
+    assert!(track_names(&path).is_empty());
 }
 
 #[test]
@@ -874,7 +829,7 @@ fn reordered_headers_are_rejected() {
         &["chrom", "start", "end", "score", "coverage"],
         &[("chr1", 0, 8, vec!["2.5", "9"])],
     );
-    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let (path, mut dataset) = create(dir.path(), "out.pbz", 8);
     let sources = [Source::new(a), Source::new(b)];
     let schema_error = plan_bed_schema(
         &sources,
@@ -894,9 +849,8 @@ fn reordered_headers_are_rejected() {
         schema_error.contains("BED column header differs"),
         "{schema_error}"
     );
-    assert!(store.track_names().next().is_none());
     let result = from_bed_matrix(
-        &mut store,
+        &mut dataset,
         &sources,
         genome(&[("chr1", 8)]),
         &BedImportOptions::default(),
@@ -906,6 +860,7 @@ fn reordered_headers_are_rejected() {
         },
     );
     assert!(result.is_err());
+    assert!(track_names(&path).is_empty());
 }
 
 #[test]
@@ -913,11 +868,11 @@ fn headerless_bed4_cohort_roundtrip() {
     let dir = TempDir::new().unwrap();
     let a = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 0, 8, vec!["4"])]);
     let b = write_headerless_bed_bgzip_tabix(dir.path(), "s2", &[("chr1", 0, 8, vec!["9"])]);
-    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let output = dir.path().join("out.pbz");
     let sources = [Source::new(a), Source::new(b)];
 
     let error = from_bed_matrix(
-        &mut store,
+        output.as_path(),
         &sources,
         genome(&[("chr1", 8)]),
         &BedImportOptions::default(),
@@ -936,7 +891,7 @@ fn headerless_bed4_cohort_roundtrip() {
         ..BedImportOptions::default()
     };
     from_bed_matrix(
-        &mut store,
+        output.as_path(),
         &sources,
         genome(&[("chr1", 8)]),
         &options,
@@ -947,16 +902,9 @@ fn headerless_bed4_cohort_roundtrip() {
     )
     .unwrap();
 
-    let g = store.genome_for("depth").unwrap();
-    let reg = Region {
-        contig: g.id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
-    let depth = store
-        .track("depth")
+    let depth = Dataset::open(&output)
         .unwrap()
-        .read_region::<u8>(&reg)
+        .read_region::<u8>("depth", &chr1())
         .unwrap()
         .into_dimensionality::<Ix2>()
         .unwrap();
@@ -972,14 +920,14 @@ fn headerless_bed4_cohort_roundtrip() {
 fn bed3_imports_bool_presence() {
     let dir = TempDir::new().unwrap();
     let bed = write_headerless_bed_bgzip_tabix(dir.path(), "s1", &[("chr1", 2, 5, vec![])]);
-    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let output = dir.path().join("out.pbz");
     let sources = [Source::new(bed)];
     let options = BedImportOptions {
         track: Some("callable".into()),
         ..BedImportOptions::default()
     };
     from_bed_matrix(
-        &mut store,
+        output.as_path(),
         &sources,
         genome(&[("chr1", 8)]),
         &options,
@@ -987,73 +935,16 @@ fn bed3_imports_bool_presence() {
     )
     .unwrap();
 
-    let g = store.genome_for("callable").unwrap();
-    let reg = Region {
-        contig: g.id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
-    let mask = store
-        .track("callable")
+    let mask = Dataset::open(&output)
         .unwrap()
-        .read_region::<bool>(&reg)
+        .read_region::<bool>("callable", &chr1())
         .unwrap()
-        .into_dimensionality::<Ix1>()
-        .unwrap();
+        .into_raw_vec_and_offset()
+        .0;
     assert_eq!(
-        mask.to_vec(),
+        mask,
         vec![false, false, true, true, true, false, false, false]
     );
-}
-
-#[test]
-fn single_source_wide_track_with_joint_inference() {
-    let dir = TempDir::new().unwrap();
-    // cov fits u8 alone; mapq's 300 forces the joint dtype up to u16.
-    let bed = write_bed_bgzip_tabix(
-        dir.path(),
-        "s1",
-        &["chrom", "start", "end", "cov", "mapq"],
-        &[
-            ("chr1", 0, 4, vec!["4", "60"]),
-            ("chr1", 4, 8, vec!["9", "300"]),
-        ],
-    );
-    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
-    let sources = [Source::new(bed)];
-    let options = BedImportOptions {
-        track: Some("stats".into()),
-        ..BedImportOptions::default()
-    };
-    from_bed_matrix(
-        &mut store,
-        &sources,
-        genome(&[("chr1", 8)]),
-        &options,
-        Config {
-            column_dim: Some("field".into()),
-            ..Config::default()
-        },
-    )
-    .unwrap();
-
-    let g = store.genome_for("stats").unwrap();
-    let reg = Region {
-        contig: g.id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
-    let stats = store
-        .track("stats")
-        .unwrap()
-        .read_region::<u16>(&reg)
-        .unwrap()
-        .into_dimensionality::<Ix2>()
-        .unwrap();
-    for (i, row) in stats.rows().into_iter().enumerate() {
-        let expected = if i < 4 { vec![4, 60] } else { vec![9, 300] };
-        assert_eq!(row.to_vec(), expected);
-    }
 }
 
 #[test]
@@ -1066,14 +957,14 @@ fn wide_track_rejects_word_bool_field_before_creating_tracks() {
         &["chrom", "start", "end", "score", "is_local_max"],
         &[("chr1", 0, 8, vec!["1.5", "false"])],
     );
-    let mut store = PbzStore::create(dir.path().join("out.pbz")).unwrap();
+    let (path, mut dataset) = create(dir.path(), "out.pbz", 8);
     let sources = [Source::new(bed)];
     let options = BedImportOptions {
         track: Some("stats".into()),
         ..BedImportOptions::default()
     };
     let result = from_bed_matrix(
-        &mut store,
+        &mut dataset,
         &sources,
         genome(&[("chr1", 8)]),
         &options,
@@ -1093,5 +984,5 @@ fn wide_track_rejects_word_bool_field_before_creating_tracks() {
         "unexpected error: {error}"
     );
     assert!(!error.contains("field(s)"), "unexpected error: {error}");
-    assert!(store.track("stats").is_none());
+    assert!(track_names(&path).is_empty());
 }

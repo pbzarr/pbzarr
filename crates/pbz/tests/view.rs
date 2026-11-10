@@ -5,7 +5,7 @@ use noodles_bgzf as bgzf;
 use tempfile::TempDir;
 
 mod common;
-use common::{add_rank_three_variable, build_root_store, build_store, run_pbz, stdout_of};
+use common::{add_rank_three_variable, build_store, run_pbz, stdout_of};
 
 #[test]
 fn integer_track_streams_collapsed_rows_in_genome_order() {
@@ -104,45 +104,9 @@ fn threads_option_does_not_change_output() {
 }
 
 #[test]
-fn root_dataset_streams_the_same_rows_as_a_track_store() {
-    let dir = TempDir::new().unwrap();
-    let store = build_root_store(dir.path());
-
-    let output = run_pbz(["view".into(), store.as_os_str().to_owned(), "depth".into()]);
-    assert_eq!(
-        stdout_of(&output),
-        "#chrom\tstart\tend\tdepth\n\
-         chr1\t0\t3\t5\n\
-         chr1\t3\t5\t7\n\
-         chr1\t5\t10\t0\n\
-         chr2\t0\t6\t0\n"
-    );
-
-    let output = run_pbz(["view".into(), store.as_os_str().to_owned(), "af".into()]);
-    assert_eq!(
-        stdout_of(&output),
-        "#chrom\tstart\tend\ts1\ts2\n\
-         chr1\t2\t4\t0.5\t1\n\
-         chr1\t4\t6\t0.25\t1\n"
-    );
-
-    let output = run_pbz([
-        "view".into(),
-        "-c".into(),
-        "s2".into(),
-        store.into_os_string(),
-        "af".into(),
-    ]);
-    assert_eq!(
-        stdout_of(&output),
-        "#chrom\tstart\tend\ts2\nchr1\t2\t6\t1\n"
-    );
-}
-
-#[test]
 fn rank_three_variable_is_rejected_by_name_and_dimensions() {
     let dir = TempDir::new().unwrap();
-    let store = build_root_store(dir.path());
+    let store = build_store(dir.path());
     add_rank_three_variable(&store, "callable");
 
     let output = run_pbz([

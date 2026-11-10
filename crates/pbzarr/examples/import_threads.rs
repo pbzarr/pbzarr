@@ -4,9 +4,10 @@
 //!
 //! Usage: cargo run --release -p pbzarr --example import_threads -- <out.pbz> [workers]
 
+use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::{Import, PipelineOptions};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ReaderError, ValueReader};
-use pbzarr::{Contig, ExplicitArraySpec, Genome, PbzStore, TrackConfig};
+use pbzarr::{Contig, ExplicitArraySpec, Genome, TrackConfig};
 
 const SPEC: &str = r#"{
   "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1048576, 8]}},
@@ -75,15 +76,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "chr1".into(),
         length: 24_000_000,
     }])?;
-    let mut store = PbzStore::create(&path)?;
-    store.create_track(
-        "depth",
-        genome.clone(),
-        TrackConfig::new(Dtype::U32)
-            .columns((0..samples).map(|i| format!("s{i}")).collect())
-            .column_dim("sample")
-            .codecs(ExplicitArraySpec::parse(SPEC)?),
-    )?;
+    let mut dataset = Dataset::create(&path, Reference::new(genome.contigs().to_vec())?)?;
+    let config = TrackConfig::new(Dtype::U32)
+        .columns((0..samples).map(|i| format!("s{i}")).collect())
+        .column_dim("sample")
+        .codecs(ExplicitArraySpec::parse(SPEC)?);
     let readers = (0..samples as u64)
         .map(|seed| BusyReader {
             genome: genome.clone(),
@@ -92,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     Import::from_readers(readers)?
-        .into_track(store.track("depth").ok_or("no depth track")?)
+        .into_dataset(&mut dataset, vec![("depth".into(), config)])
         .readers_as_columns()
         .options(PipelineOptions {
             workers,

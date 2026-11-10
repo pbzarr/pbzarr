@@ -11,9 +11,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::{Config, Import, PipelineOptions, Source};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, Genome, PbzStore, TrackConfig};
+use pbzarr::{Contig, Genome, TrackConfig};
 use pbzarr_readers::from_d4;
 use tempfile::TempDir;
 
@@ -163,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .unwrap_or_else(|| tmp.path().join("profile.pbz"));
 
-    let mut store = PbzStore::create(&path)?;
+    let mut dataset = Dataset::create(&path, Reference::new(genome.contigs().to_vec())?)?;
 
     let import_cfg = Config {
         workers: args.workers,
@@ -175,11 +176,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let t0 = Instant::now();
     let report = if let Some(ref d4) = args.d4 {
-        // `from_d4` builds the genome and creates the (int32) track itself.
-        let sources: Vec<Source> = (0..args.cols).map(|_| Source::new(d4.clone())).collect();
-        from_d4(&mut store, "depth", &sources, import_cfg)?
+        // `from_d4` creates the (int32) track itself.
+        let sources: Vec<Source> = (0..args.cols)
+            .map(|i| Source::labeled(d4.clone(), format!("s{i}")))
+            .collect();
+        from_d4(&mut dataset, "depth", &sources, import_cfg)?
     } else {
-        // Synth path: create the u32 track ourselves, then drive the pipeline.
         let column_names: Vec<String> = (0..args.cols).map(|i| format!("s{i}")).collect();
         let mut cfg = TrackConfig::new(Dtype::U32)
             .columns(column_names)
@@ -189,13 +191,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(s) = args.shard_size {
             cfg = cfg.shard_size(s);
         }
-        store.create_track("depth", genome.clone(), cfg)?;
         let readers: Vec<SynthReader> = (0..args.cols)
             .map(|i| SynthReader::new(genome.clone(), 0x9E3779B9u32.wrapping_mul(i as u32 + 1)))
             .collect();
-        let track = store.track("depth").unwrap();
         Import::from_readers(readers)?
-            .into_track(track)
+            .into_dataset(&mut dataset, vec![("depth".into(), cfg)])
             .readers_as_columns()
             .options(PipelineOptions {
                 workers: args.workers,

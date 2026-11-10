@@ -1,29 +1,15 @@
 //! End-to-end: synthesize a bgzipped+tabix BED, import one selected column via
-//! `from_bed_matrix`, read back via `Track::read_region`.
+//! `from_bed_matrix`, read back via `Dataset::read_region`.
 
 mod common;
 
-use ndarray::Ix1;
+use pbzarr::dataset::Dataset;
 use pbzarr::genome::{Contig, Genome};
 use pbzarr::import::{Config, Source};
-use pbzarr::{PbzStore, Region};
 use pbzarr_readers::{BedImportOptions, from_bed_matrix};
 use tempfile::TempDir;
 
 use common::write_bed_bgzip_tabix;
-
-fn genome(contigs: &[(&str, u64)]) -> Genome {
-    Genome::new(
-        contigs
-            .iter()
-            .map(|(n, l)| Contig {
-                name: (*n).to_owned(),
-                length: *l,
-            })
-            .collect(),
-    )
-    .unwrap()
-}
 
 #[test]
 fn single_column_selection_imports_a_scalar_track() {
@@ -37,13 +23,15 @@ fn single_column_selection_imports_a_scalar_track() {
             ("chr1", 30, 60, vec!["9", "2.5"]),
         ],
     );
-    let store_path = dir.path().join("out.pbz");
-    let mut store = PbzStore::create(&store_path).unwrap();
-
+    let store = dir.path().join("out.pbz");
     from_bed_matrix(
-        &mut store,
+        store.as_path(),
         &[Source::labeled(bed, "s1")],
-        genome(&[("chr1", 60)]),
+        Genome::new(vec![Contig {
+            name: "chr1".into(),
+            length: 60,
+        }])
+        .unwrap(),
         &BedImportOptions {
             fields: Some(vec!["coverage".into()]),
             ..BedImportOptions::default()
@@ -52,18 +40,11 @@ fn single_column_selection_imports_a_scalar_track() {
     )
     .unwrap();
 
-    let track = store.track("coverage").unwrap();
-    assert_eq!(track.rank(), 1);
-    let region = Region {
-        contig: store.genome_for("coverage").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 60,
-    };
+    let ds = Dataset::open(&store).unwrap();
+    assert_eq!(ds.variables()["coverage"].dims, ["position"]);
     // Exhaustive inference min-widths 4..9 to uint8.
-    let a = track
-        .read_region::<u8>(&region)
-        .unwrap()
-        .into_dimensionality::<Ix1>()
+    let a = ds
+        .read_region::<u8>("coverage", &"chr1".parse().unwrap())
         .unwrap();
     assert_eq!(a.shape(), &[60]);
     assert!(a.iter().take(30).all(|&v| v == 4));
