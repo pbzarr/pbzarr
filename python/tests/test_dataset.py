@@ -12,7 +12,6 @@ import zarr
 import pbzarr
 from pbzarr import PbzError, Reference, RegionQuery
 from pbzarr._coord import NAME, ReferenceIndex, attach, same_reference
-from pbzarr._regions import regions_dataset
 
 from _helpers import write_pbz_store
 
@@ -200,13 +199,13 @@ def test_boolean_track_regions_keep_logical_values(cohort: Path) -> None:
     # decode it the same way plain reads do.
     with pbzarr.open(cohort) as ds:
         pbzarr.write(ds, {"high": ds["depth"].isel(sample=1) >= 110}).close()
+    intervals = ["chr1:95-115", "chr1:0-10"]
     with pbzarr.open(cohort) as ds:
-        direct = pbzarr.region(ds["high"], "chr1:95-115").values
-        packed = regions_dataset(ds[["high"]], Reference.from_xarray(ds), ["chr1:95-115"])[
-            "high"
-        ].values
-    assert packed.dtype == bool
-    np.testing.assert_array_equal(packed, direct)
+        direct = [pbzarr.region(ds["high"], query).values.max() for query in intervals]
+        reduced = pbzarr.reduce_regions(ds["high"], intervals, "max").values
+    assert reduced.dtype == bool
+    assert reduced.tolist() == [True, False]
+    np.testing.assert_array_equal(reduced, direct)
 
 
 def test_summit_reduces_an_opened_dataset(cohort: Path) -> None:

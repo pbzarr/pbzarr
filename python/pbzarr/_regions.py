@@ -1,1243 +1,453 @@
-"""Normalization and geometry resolution for PBZ region operations."""
+"""Interval parsing and the batch engine behind ``reduce_regions``."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import threading
+import warnings
 
-import dask
-import dask.array as da
-from dask._task_spec import Task
-from dask.base import tokenize
 from dask import delayed
-from dask.highlevelgraph import HighLevelGraph, MaterializedLayer
+import dask.array as da
 import numpy as np
 import xarray as xr
 import zarr
 
 from . import _zip
-from ._native import PbzError
 from ._region import RegionQuery, parse_region
 
 # Set by `open` on a track's Dask array: where the raw Zarr array lives, so
-# region tasks can reopen it instead of carrying the whole source graph.
+# region tasks can read it directly instead of through the source graph.
 _PBZ_SOURCE_ATTR = "_pbz_source"
-
 
 _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
-_I32_MAX = 2**31 - 1
-_TARGET_BYTES = 128 * 1024**2
-_MAX_SOURCE_BLOCKS = 16
-_PACKED_REDUCERS = frozenset(
-    {
-        "mean",
-        "sum",
-        "min",
-        "max",
-        "count",
-        "std",
-        "var",
-        "median",
-        "quantile",
-        "summit",
-    }
-)
-_PACKED_REGION_COORDS = (
-    "region_contig",
-    "region_start",
-    "region_end",
-    "region_input_index",
-    "region_storage_index",
-)
-_OPEN_ARRAYS = {}
-_OPEN_ARRAYS_LOCK = threading.Lock()
+# One task holds at most about this many bytes of rows, unless one region is larger.
+_BATCH_BYTES = 128 * 1024**2
+# One task touches about this many Dask position chunks at most.
+_BATCH_CHUNKS = 16
+
+REDUCERS = ("sum", "mean", "min", "max", "count", "std", "var", "median", "quantile", "summit")
+_OPTION_REDUCERS = {
+    "q": {"quantile"},
+    "by": {"summit"},
+    "ddof": {"std", "var"},
+    "skipna": {"sum", "mean", "min", "max", "std", "var", "median", "quantile"},
+}
 
 
-def _contains_task_function(value, function) -> bool:
-    if isinstance(value, Task):
-        if value.func is function:
-            return True
-        return any(
-            _contains_task_function(item, function)
-            for item in (*value.args, *value.kwargs.values())
-        )
-    if isinstance(value, dict):
-        return any(
-            _contains_task_function(item, function) for item in value.values()
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_task_function(item, function) for item in value)
-    return False
-
-
-def _fuse_region_reduction_tasks(values: da.Array) -> da.Array:
-    """Fuse each single-consumer PBZ gather into its reduction task."""
-    (optimized,) = dask.optimize(values)
-    graph = optimized.__dask_graph__().to_dict()
-    dependents: dict[object, set[object]] = {}
-    for consumer_key, node in graph.items():
-        for dependency in getattr(node, "dependencies", ()):
-            dependents.setdefault(dependency, set()).add(consumer_key)
-
-    fused = False
-    for key, node in list(graph.items()):
-        if not isinstance(node, Task) or not any(
-            _contains_task_function(node, function)
-            for function in (_gather_block, _read_gather_block)
-        ):
-            continue
-        producer_keys = [
-            dependency
-            for dependency in node.dependencies
-            if isinstance(graph.get(dependency), Task)
-        ]
-        if (
-            not producer_keys
-            or len(producer_keys) > _MAX_SOURCE_BLOCKS
-            or any(dependents.get(producer) != {key} for producer in producer_keys)
-        ):
-            continue
-        producers = [graph[producer] for producer in producer_keys]
-        graph[key] = Task.fuse(*producers, node, key=key)
-        for producer in producer_keys:
-            del graph[producer]
-        fused = True
-
-    if not fused:
-        return optimized
-    layer_name = f"pbz-region-reduction-{optimized.name}"
-    high_level_graph = HighLevelGraph(
-        {layer_name: MaterializedLayer(graph)},
-        {layer_name: set()},
-    )
-    meta = np.empty((0,) * optimized.ndim, dtype=optimized.dtype)
-    return da.Array(
-        high_level_graph,
-        optimized.name,
-        optimized.chunks,
-        dtype=optimized.dtype,
-        meta=meta,
-    )
-
-
-@dataclass(frozen=True)
-class RegionLayout:
-    contig_ids: np.ndarray
-    starts: np.ndarray
-    stops: np.ndarray
-    flat_starts: np.ndarray
-    flat_stops: np.ndarray
-    packed_offsets: np.ndarray
-    input_index: np.ndarray
-
-    @property
-    def n_regions(self) -> int:
-        return self.contig_ids.size
-
-    @property
-    def total_positions(self) -> int:
-        return int(self.packed_offsets[-1])
-
-
-def _validate_packed_dataset(ds: xr.Dataset) -> np.ndarray:
-    """Validate the packed contract and return read-only offsets."""
-    if ds.attrs.get("pbz:representation") != "packed-regions":
-        raise ValueError(
-            "reduce requires a Dataset with pbz:representation='packed-regions'"
-        )
-    if not ds.data_vars:
-        raise ValueError("packed regions must contain at least one data variable")
-    if "position" not in ds.sizes or "region" not in ds.sizes:
-        raise ValueError("packed regions must have position and region dimensions")
-    if "position" in ds.indexes or "region" in ds.indexes:
-        raise ValueError("packed position and region dimensions must be unindexed")
-
-    required = {"offsets", *_PACKED_REGION_COORDS}
-    missing = sorted(required.difference(ds.coords))
-    if missing:
-        raise ValueError(
-            "packed regions are missing required coordinates: "
-            + ", ".join(missing)
-        )
-    if ds["offsets"].dims != ("region_boundary",):
-        raise ValueError("offsets must have only the region_boundary dimension")
-    for name in _PACKED_REGION_COORDS:
-        if ds[name].dims != ("region",):
-            raise ValueError(f"{name} must have only the region dimension")
-
-    offsets_data = np.asarray(ds["offsets"].data)
-    if offsets_data.dtype.kind not in "iu":
-        raise ValueError("offsets must contain integers")
-    if not np.can_cast(offsets_data.dtype, np.dtype(np.int64), casting="safe"):
-        raise ValueError("offsets must fit in signed 64-bit integers")
-    offsets = offsets_data.astype(np.int64, copy=True)
-    n_regions = ds.sizes["region"]
-    if offsets.size != n_regions + 1:
-        raise ValueError("offsets must have one more element than region")
-    if offsets[0] != 0:
-        raise ValueError("offsets must start at zero")
-    if offsets[-1] != ds.sizes["position"]:
-        raise ValueError("offsets must end at the packed position size")
-    if np.any(np.diff(offsets) <= 0):
-        raise ValueError("offsets must be strictly increasing")
-
-    integer_coordinates = (
-        "region_start",
-        "region_end",
-        "region_input_index",
-        "region_storage_index",
-    )
-    normalized = {}
-    for name in integer_coordinates:
-        data = np.asarray(ds[name].data)
-        if data.dtype.kind not in "iu" or not np.can_cast(
-            data.dtype, np.dtype(np.int64), casting="safe"
-        ):
-            raise ValueError(f"{name} must contain integers that fit in int64")
-        normalized[name] = data.astype(np.int64, copy=False)
-
-    starts = normalized["region_start"]
-    stops = normalized["region_end"]
-    if np.any(stops <= starts):
-        raise ValueError("packed regions must have positive lengths")
-    if not np.array_equal(stops - starts, np.diff(offsets)):
-        raise ValueError("region lengths must match packed offsets")
-    storage_order = np.arange(n_regions, dtype=np.int64)
-    if not np.array_equal(normalized["region_storage_index"], storage_order):
-        raise ValueError("region_storage_index must equal packed storage order")
-    if not np.array_equal(
-        np.sort(normalized["region_input_index"]), storage_order
-    ):
-        raise ValueError("region_input_index must be a permutation of region indices")
-
-    contigs = np.asarray(ds["region_contig"].data)
-    if contigs.dtype.kind not in "OUT" or any(
-        not isinstance(value, str) or not value for value in contigs.tolist()
-    ):
-        raise ValueError("region_contig must contain non-empty strings")
-
-    for name, values in ds.data_vars.items():
-        if values.ndim not in {1, 2} or values.dims[0] != "position":
-            raise ValueError(f"{name} must be a scalar or 2D position-first variable")
-        if values.sizes["position"] != offsets[-1]:
-            raise ValueError(f"{name} does not cover the packed position axis")
-        if any("position" in coordinate.dims for coordinate in values.coords.values()):
-            raise ValueError(
-                f"{name} cannot have position-dependent coordinates"
-            )
-        if values.chunks is not None:
-            boundaries = np.cumsum(values.chunks[0], dtype=np.int64)
-            if not np.all(np.isin(boundaries, offsets)):
-                raise ValueError(
-                    f"{name} position chunks must end at complete-region boundaries"
-                )
-
-    offsets.setflags(write=False)
-    return offsets
-
-
-def _reduce_block(
-    block,
-    local_offsets,
-    dimensions,
-    attrs,
-    reducer,
-    kwargs,
-) -> np.ndarray:
-    local_values = xr.DataArray(np.asarray(block), dims=dimensions, attrs=attrs)
-    labels = np.repeat(
-        np.arange(len(local_offsets) - 1, dtype=np.int64),
-        np.diff(local_offsets),
-    )
-    groups = xr.DataArray(labels, dims=("position",), name="region")
-    method = getattr(local_values.groupby(groups), reducer)
-    return np.asarray(method(dim="position", **kwargs).data)
-
-
-def _reduction_template(
-    values: xr.DataArray, reducer: str, kwargs: dict
-) -> xr.DataArray:
-    shape = (2,) + (1,) * (values.ndim - 1)
-    dummy = xr.DataArray(
-        np.zeros(shape, dtype=values.dtype),
-        dims=values.dims,
-        attrs=values.attrs,
-    )
-    groups = xr.DataArray(
-        np.zeros(2, dtype=np.int64), dims=("position",), name="region"
-    )
-    method = getattr(dummy.groupby(groups), reducer)
-    return method(dim="position", **kwargs)
-
-
-def _validate_reducer(reducer: str, kwargs: dict) -> None:
-    if not isinstance(reducer, str) or reducer not in _PACKED_REDUCERS:
-        allowed = ", ".join(sorted(_PACKED_REDUCERS))
-        raise ValueError(f"unsupported reducer {reducer!r}; choose one of: {allowed}")
-    if "dim" in kwargs:
-        raise TypeError("reduce_regions controls dim='position'; do not pass dim")
+def reducer_options(reducer: str, **given) -> dict:
+    """Check the reducer and its options, and fill in the defaults."""
+    if not isinstance(reducer, str) or reducer not in REDUCERS:
+        raise ValueError(f"unsupported reducer {reducer!r}; choose one of: {', '.join(REDUCERS)}")
+    for name, value in given.items():
+        if value is not None and reducer not in _OPTION_REDUCERS[name]:
+            raise TypeError(f"reducer {reducer!r} does not take {name}=")
+    q = given["q"]
+    if reducer == "quantile":
+        if q is None:
+            raise TypeError("quantile needs q=")
+        q = np.asarray(q, dtype=np.float64)
+        if q.ndim > 1 or q.size == 0 or np.any(np.isnan(q)) or np.any((q < 0) | (q > 1)):
+            raise ValueError("q must be a number or a list of numbers in [0, 1]")
+    by = given["by"]
     if reducer == "summit":
-        unexpected = sorted(set(kwargs) - {"by"})
-        if unexpected:
-            names = ", ".join(unexpected)
-            raise TypeError(f"summit got unexpected keyword argument(s): {names}")
-        by = kwargs.get("by")
+        if isinstance(by, str):
+            by = (by,)
         if (
             not isinstance(by, (tuple, list))
             or not by
             or any(not isinstance(name, str) or not name for name in by)
         ):
-            raise TypeError("summit requires by=(variable, ...)")
+            raise TypeError("summit needs by=(variable, ...)")
         if len(set(by)) != len(by):
             raise ValueError("summit ranking variables must be unique")
-
-
-def _summit_block(source_blocks, local_offsets, region_starts, ranking_indices):
-    blocks = [np.asarray(block) for block in source_blocks]
-    if not blocks or any(block.shape != blocks[0].shape for block in blocks[1:]):
-        raise ValueError("summit variables must have matching shapes")
-
-    starts = np.asarray(local_offsets[:-1], dtype=np.int64)
-    lengths = np.diff(local_offsets).astype(np.int64, copy=False)
-    candidates = np.ones(blocks[0].shape, dtype=bool)
-    for index in ranking_indices:
-        key = blocks[index]
-        if key.dtype.kind == "f":
-            comparable = np.where(np.isnan(key), -np.inf, key)
-            minimum = -np.inf
-        elif key.dtype.kind == "i":
-            comparable = key
-            minimum = np.iinfo(key.dtype).min
-        elif key.dtype.kind == "u":
-            comparable = key
-            minimum = 0
-        elif key.dtype.kind == "b":
-            comparable = key
-            minimum = False
-        else:
-            raise TypeError("summit ranking variables must be numeric")
-        maxima = np.maximum.reduceat(
-            np.where(candidates, comparable, minimum), starts, axis=0
-        )
-        candidates &= comparable == np.repeat(maxima, lengths, axis=0)
-
-    row_shape = (blocks[0].shape[0],) + (1,) * (blocks[0].ndim - 1)
-    row_ids = np.broadcast_to(
-        np.arange(blocks[0].shape[0], dtype=np.int64).reshape(row_shape),
-        blocks[0].shape,
-    )
-    winners = np.minimum.reduceat(
-        np.where(candidates, row_ids, blocks[0].shape[0]), starts, axis=0
-    )
-    tail_indices = tuple(np.indices(winners.shape, sparse=False)[1:])
-    selected = tuple(block[(winners, *tail_indices)] for block in blocks)
-    start_shape = (len(region_starts),) + (1,) * (winners.ndim - 1)
-    summit_positions = (
-        np.asarray(region_starts, dtype=np.int64).reshape(start_shape)
-        + winners
-        - starts.reshape(start_shape)
-    )
-    return (*selected, summit_positions)
-
-
-def _summit_packed_dataset(
-    ds: xr.Dataset, offsets: np.ndarray, by
-) -> xr.Dataset:
-    names = list(ds.data_vars)
-    missing = [name for name in by if name not in ds.data_vars]
-    if missing:
-        raise ValueError(
-            "unknown summit ranking variable(s): " + ", ".join(missing)
-        )
-
-    first = ds[names[0]]
-    if any(ds[name].dims != first.dims for name in names[1:]):
-        raise ValueError("summit requires all variables to have matching dimensions")
-    if any(ds[name].shape != first.shape for name in names[1:]):
-        raise ValueError("summit requires all variables to have matching shapes")
-    if any(ds[name].dtype.kind not in "biuf" for name in by):
-        raise TypeError("summit ranking variables must be numeric")
-
-    ranking_indices = tuple(names.index(name) for name in by)
-    region_starts = np.asarray(ds["region_start"].data, dtype=np.int64)
-    output_dims = ("region", *first.dims[1:])
-    chunks = [ds[name].chunks for name in names]
-    if any((chunk is None) != (chunks[0] is None) for chunk in chunks[1:]):
-        raise ValueError("summit requires all variables to use the same array type")
-    if chunks[0] is not None and any(chunk != chunks[0] for chunk in chunks[1:]):
-        raise ValueError("summit requires all variables to have matching chunks")
-
-    if chunks[0] is None:
-        outputs = _summit_block(
-            [ds[name].data for name in names],
-            offsets,
-            region_starts,
-            ranking_indices,
-        )
-    else:
-        source_blocks = [ds[name].data.to_delayed() for name in names]
-        position_boundaries = np.empty(len(chunks[0][0]) + 1, dtype=np.int64)
-        position_boundaries[0] = 0
-        np.cumsum(chunks[0][0], out=position_boundaries[1:])
-        region_edges = np.searchsorted(offsets, position_boundaries)
-        rows = [[] for _ in range(len(names) + 1)]
-        for position_block in range(len(chunks[0][0])):
-            start_region = int(region_edges[position_block])
-            stop_region = int(region_edges[position_block + 1])
-            local_offsets = _local_offsets(
-                offsets,
-                start_region,
-                stop_region,
-                int(position_boundaries[position_block]),
-            )
-            column_blocks = (
-                range(len(chunks[0][1])) if first.ndim == 2 else range(1)
-            )
-            block_outputs = [[] for _ in range(len(names) + 1)]
-            for column_block in column_blocks:
-                source_key = (
-                    (position_block, column_block)
-                    if first.ndim == 2
-                    else (position_block,)
-                )
-                task = delayed(_summit_block)(
-                    [blocks[source_key] for blocks in source_blocks],
-                    local_offsets,
-                    region_starts[start_region:stop_region],
-                    ranking_indices,
-                )
-                output_shape = (stop_region - start_region,)
-                if first.ndim == 2:
-                    output_shape += (int(chunks[0][1][column_block]),)
-                for output_index, name in enumerate(names):
-                    block_outputs[output_index].append(
-                        da.from_delayed(
-                            task[output_index],
-                            shape=output_shape,
-                            dtype=ds[name].dtype,
-                        )
-                    )
-                block_outputs[-1].append(
-                    da.from_delayed(
-                        task[-1], shape=output_shape, dtype=np.int64
-                    )
-                )
-            for output_index, columns in enumerate(block_outputs):
-                rows[output_index].append(
-                    columns[0]
-                    if len(columns) == 1
-                    else da.concatenate(columns, axis=1)
-                )
-        outputs = tuple(
-            _fuse_region_reduction_tasks(
-                row[0] if len(row) == 1 else da.concatenate(row, axis=0)
-            )
-            for row in rows
-        )
-
-    data_variables = {
-        name: xr.Variable(output_dims, outputs[index], attrs=ds[name].attrs)
-        for index, name in enumerate(names)
+        by = tuple(by)
+    ddof = given["ddof"]
+    if ddof is None:
+        ddof = 0
+    elif isinstance(ddof, (bool, np.bool_)) or not isinstance(ddof, (int, np.integer)):
+        raise TypeError("ddof must be an integer")
+    elif ddof < 0:
+        raise ValueError("ddof must be nonnegative")
+    skipna = given["skipna"]
+    return {
+        "q": q,
+        "by": by,
+        "ddof": int(ddof),
+        "skipna": True if skipna is None else bool(skipna),
     }
-    coordinates = {
-        name: coordinate.variable
-        for name, coordinate in ds.coords.items()
-        if name != "offsets"
-        and "position" not in coordinate.dims
-        and "region_boundary" not in coordinate.dims
-    }
-    coordinates["summit_position"] = xr.Variable(output_dims, outputs[-1])
-    result = xr.Dataset(
-        data_vars=data_variables,
-        coords=xr.Coordinates(coordinates, indexes={}),
-        attrs={
-            key: value
-            for key, value in ds.attrs.items()
-            if not key.startswith("pbz:")
-        },
-    )
-    result.set_close(ds.close)
-    return result
 
 
-def _local_offsets(offsets, start_region, stop_region, position_start):
-    local = offsets[start_region : stop_region + 1] - position_start
-    if int(local[-1]) <= _I32_MAX:
-        local = local.astype(np.int32)
-    local.setflags(write=False)
-    return local
+@dataclass(frozen=True)
+class _Batch:
+    """The regions of one task and the flat rows it reads for them."""
+
+    regions: np.ndarray
+    spans: np.ndarray
+    sliced: bool
+    starts: np.ndarray
+    ends: np.ndarray
+
+    def rows(self) -> slice | np.ndarray:
+        return _rows(self.spans, self.sliced)
 
 
-def _reduce_packed_dataset(
-    ds: xr.Dataset, reducer: str, **kwargs
-) -> xr.Dataset:
-    offsets = _validate_packed_dataset(ds)
-    _validate_reducer(reducer, kwargs)
-    if reducer == "summit":
-        return _summit_packed_dataset(ds, offsets, kwargs["by"])
-    dask_region_batches = {}
+def _rows(spans: np.ndarray, sliced: bool) -> slice | np.ndarray:
+    """One range over all spans, or the exact rows of the spans."""
+    if sliced:
+        return slice(int(spans[0, 0]), int(spans[-1, 1]))
+    lengths = spans[:, 1] - spans[:, 0]
+    edges = np.cumsum(lengths) - lengths
+    return np.arange(int(lengths.sum()), dtype=np.int64) + np.repeat(spans[:, 0] - edges, lengths)
 
-    def eager_batches(values: xr.DataArray, template: xr.DataArray):
-        bytes_per_position = np.dtype(values.dtype).itemsize
-        for size in values.shape[1:]:
-            bytes_per_position *= size
-        region_edges = [0]
-        batch_bytes = 0
-        batch_start = 0
-        for region_index, length in enumerate(np.diff(offsets)):
-            region_bytes = int(length) * bytes_per_position
-            if region_index > batch_start and batch_bytes + region_bytes > _TARGET_BYTES:
-                region_edges.append(region_index)
-                batch_start = region_index
-                batch_bytes = 0
-            batch_bytes += region_bytes
-        region_edges.append(len(offsets) - 1)
-        blocks = []
-        for start_region, stop_region in zip(
-            region_edges[:-1], region_edges[1:], strict=True
-        ):
-            start = int(offsets[start_region])
-            stop = int(offsets[stop_region])
-            local_offsets = offsets[start_region : stop_region + 1] - start
-            blocks.append(
-                _reduce_block(
-                    values.data[start:stop],
-                    local_offsets,
-                    values.dims,
-                    values.attrs,
-                    reducer,
-                    kwargs,
-                )
-            )
-        return np.concatenate(blocks, axis=template.get_axis_num("region"))
 
-    def dask_batches(values: xr.DataArray, template: xr.DataArray):
-        source_blocks = values.data.to_delayed()
-        batch_key = values.chunks[0]
-        batches = dask_region_batches.get(batch_key)
-        if batches is None:
-            position_boundaries = np.empty(
-                len(values.chunks[0]) + 1, dtype=np.int64
-            )
-            position_boundaries[0] = 0
-            np.cumsum(values.chunks[0], out=position_boundaries[1:])
-            region_edges = np.searchsorted(offsets, position_boundaries)
-            batches = tuple(
-                (
-                    int(region_edges[position_block]),
-                    int(region_edges[position_block + 1]),
-                    _local_offsets(
-                        offsets,
-                        int(region_edges[position_block]),
-                        int(region_edges[position_block + 1]),
-                        int(position_boundaries[position_block]),
-                    ),
-                )
-                for position_block in range(len(values.chunks[0]))
-            )
-            dask_region_batches[batch_key] = batches
-        output_dims = template.dims
-        region_axis = output_dims.index("region")
-        rows = []
-        for position_block, (
-            start_region,
-            stop_region,
-            local_offsets,
-        ) in enumerate(batches):
-            region_size = stop_region - start_region
-            columns = []
-            column_blocks = (
-                range(len(values.chunks[1]))
-                if values.ndim == 2
-                else range(1)
-            )
-            for column_block in column_blocks:
-                source_key = (
-                    (position_block, column_block)
-                    if values.ndim == 2
-                    else (position_block,)
-                )
-                output_shape = []
-                for dimension in output_dims:
-                    if dimension == "region":
-                        output_shape.append(region_size)
-                    elif values.ndim == 2 and dimension == values.dims[1]:
-                        output_shape.append(int(values.chunks[1][column_block]))
-                    else:
-                        output_shape.append(template.sizes[dimension])
-                task = delayed(_reduce_block)(
-                    source_blocks[source_key],
-                    local_offsets,
-                    values.dims,
-                    values.attrs,
-                    reducer,
-                    kwargs,
-                )
-                columns.append(
-                    da.from_delayed(
-                        task,
-                        shape=tuple(output_shape),
-                        dtype=template.dtype,
-                    )
-                )
-            if len(columns) == 1:
-                rows.append(columns[0])
-            else:
-                rows.append(
-                    da.concatenate(
-                        columns, axis=output_dims.index(values.dims[1])
-                    )
-                )
-        reduced = da.concatenate(rows, axis=region_axis)
-        return _fuse_region_reduction_tasks(reduced)
+def _plan(
+    flat_starts: np.ndarray,
+    flat_ends: np.ndarray,
+    row_bytes: int,
+    boundaries: np.ndarray | None,
+) -> list[_Batch]:
+    """Batches of regions in position order, bounded by bytes and Dask chunks.
 
-    data_variables = {}
-    generated_coordinates = {}
-    for name, values in ds.data_vars.items():
-        template = _reduction_template(values, reducer, kwargs)
-        if values.chunks is None:
-            reduced = eager_batches(values, template)
+    Overlapping and adjacent regions share one span, so their rows are read
+    once. A batch reads one range when its spans cover at least half of it,
+    and the exact rows of the spans when they do not.
+    """
+    order = np.lexsort((flat_ends, flat_starts))
+    starts = flat_starts[order]
+    ends = flat_ends[order]
+    reach = np.maximum.accumulate(ends)
+    head = np.ones(order.size, dtype=bool)
+    head[1:] = starts[1:] > reach[:-1]
+    span_of = np.cumsum(head) - 1
+    heads = np.flatnonzero(head)
+    span_lo = starts[heads]
+    span_hi = reach[np.append(heads[1:] - 1, order.size - 1)]
+
+    span_bytes = (span_hi - span_lo) * max(row_bytes, 1)
+    batch = (np.cumsum(span_bytes) - span_bytes) // _BATCH_BYTES
+    if boundaries is not None:
+        first_chunk = np.searchsorted(boundaries, span_lo, side="right") - 1
+        last_chunk = np.searchsorted(boundaries, span_hi - 1, side="right") - 1
+        seen = np.concatenate(([-1], last_chunk[:-1]))
+        new_chunks = np.maximum(last_chunk - np.maximum(first_chunk, seen + 1) + 1, 0)
+        batch = np.maximum(batch, (np.cumsum(new_chunks) - new_chunks) // _BATCH_CHUNKS)
+
+    span_edges = np.concatenate(([0], np.flatnonzero(np.diff(batch)) + 1, [heads.size]))
+    region_edges = np.append(heads, order.size)[span_edges]
+    batches = []
+    for index in range(span_edges.size - 1):
+        a, b = int(span_edges[index]), int(span_edges[index + 1])
+        r0, r1 = int(region_edges[index]), int(region_edges[index + 1])
+        lo, hi = span_lo[a:b], span_hi[a:b]
+        region_starts, region_ends = starts[r0:r1], ends[r0:r1]
+        sliced = 2 * int((hi - lo).sum()) >= int(hi[-1] - lo[0])
+        if sliced:
+            local = region_starts - lo[0]
         else:
-            reduced = dask_batches(values, template)
-        data_variables[name] = xr.Variable(
-            template.dims,
-            reduced,
-            attrs=template.attrs,
-        )
-        for coordinate_name, coordinate in template.coords.items():
-            if coordinate_name != "region":
-                generated_coordinates[coordinate_name] = coordinate.variable
-
-    coordinates = {}
-    for name, coordinate in ds.coords.items():
-        if name == "offsets" or "position" in coordinate.dims:
-            continue
-        if "region_boundary" in coordinate.dims:
-            continue
-        coordinates[name] = coordinate.variable
-    coordinates.update(generated_coordinates)
-    result = xr.Dataset(
-        data_vars=data_variables,
-        coords=xr.Coordinates(coordinates, indexes={}),
-        attrs={
-            key: value
-            for key, value in ds.attrs.items()
-            if not key.startswith("pbz:")
-        },
-    )
-    result.set_close(ds.close)
-    return result
-
-
-def _plan_variable_regions(
-    values: xr.DataArray,
-    layout: RegionLayout,
-    *,
-    target_bytes: int,
-    max_source_blocks: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return batch_region_edges, batch_piece_edges, and structured pieces."""
-    if values.ndim not in {1, 2} or values.dims[0] != "position":
-        raise PbzError("packed region values must have position first")
-    if any("position" in coordinate.dims for coordinate in values.coords.values()):
-        raise PbzError(
-            "packed region values cannot have position-dependent coordinates"
-        )
-    if (
-        isinstance(target_bytes, (bool, np.bool_))
-        or not isinstance(target_bytes, (int, np.integer))
-        or target_bytes <= 0
-    ):
-        raise ValueError("target_bytes must be a positive integer")
-    if (
-        isinstance(max_source_blocks, (bool, np.bool_))
-        or not isinstance(max_source_blocks, (int, np.integer))
-        or max_source_blocks <= 0
-    ):
-        raise ValueError("max_source_blocks must be a positive integer")
-
-    chunks = values.chunks
-    if chunks is None:
-        position_chunks = (values.shape[0],)
-    else:
-        position_chunks = tuple(int(width) for width in chunks[0])
-    boundaries = np.empty(len(position_chunks) + 1, dtype=np.int64)
-    boundaries[0] = 0
-    np.cumsum(position_chunks, out=boundaries[1:])
-    if int(boundaries[-1]) != values.shape[0]:
-        raise PbzError("position chunks must cover the values position axis")
-    if (
-        np.any(layout.flat_starts < 0)
-        or np.any(layout.flat_stops <= layout.flat_starts)
-        or np.any(layout.flat_stops > values.shape[0])
-    ):
-        raise PbzError("region layout is outside the values position axis")
-
-    first_blocks = np.searchsorted(
-        boundaries[1:], layout.flat_starts, side="right"
-    )
-    last_blocks = np.searchsorted(
-        boundaries[1:], layout.flat_stops - 1, side="right"
-    )
-    piece_counts = last_blocks - first_blocks + 1
-    region_piece_edges = np.empty(layout.n_regions + 1, dtype=np.int64)
-    region_piece_edges[0] = 0
-    np.cumsum(piece_counts, out=region_piece_edges[1:])
-    n_pieces = int(region_piece_edges[-1])
-
-    piece_regions = np.repeat(
-        np.arange(layout.n_regions, dtype=np.int64), piece_counts
-    )
-    within_regions = np.arange(n_pieces, dtype=np.int64) - np.repeat(
-        region_piece_edges[:-1], piece_counts
-    )
-    piece_blocks = np.repeat(first_blocks, piece_counts) + within_regions
-    piece_flat_starts = np.maximum(
-        layout.flat_starts[piece_regions], boundaries[piece_blocks]
-    )
-    piece_flat_stops = np.minimum(
-        layout.flat_stops[piece_regions], boundaries[piece_blocks + 1]
-    )
-    source_starts = piece_flat_starts - boundaries[piece_blocks]
-    source_stops = piece_flat_stops - boundaries[piece_blocks]
-
-    bytes_per_position = int(np.dtype(values.dtype).itemsize)
-    if values.ndim == 2:
-        bytes_per_position *= values.shape[1]
-    component_edges = np.concatenate(
-        (
-            np.array([0], dtype=np.int64),
-            np.flatnonzero(first_blocks[1:] > last_blocks[:-1]) + 1,
-            np.array([layout.n_regions], dtype=np.int64),
-        )
-    )
-    region_edges = np.empty(layout.n_regions + 1, dtype=np.int64)
-    region_edges[0] = 0
-    edge_count = 1
-    batch_bytes = 0
-    batch_source_blocks = 0
-    batch_start = 0
-    for component_start, component_stop in zip(
-        component_edges[:-1], component_edges[1:], strict=True
-    ):
-        component_start = int(component_start)
-        component_stop = int(component_stop)
-        next_bytes = (
-            int(
-                layout.packed_offsets[component_stop]
-                - layout.packed_offsets[component_start]
+            span = span_of[r0:r1] - a
+            edges = np.cumsum(hi - lo) - (hi - lo)
+            local = edges[span] + (region_starts - lo[span])
+        batches.append(
+            _Batch(
+                regions=order[r0:r1],
+                spans=np.column_stack((lo, hi)),
+                sliced=sliced,
+                starts=local,
+                ends=local + (region_ends - region_starts),
             )
-            * bytes_per_position
         )
-        next_source_blocks = (
-            int(last_blocks[component_stop - 1])
-            - int(first_blocks[component_start])
-            + 1
-        )
-        if component_start > batch_start and (
-            batch_bytes + next_bytes > target_bytes
-            or batch_source_blocks + next_source_blocks > max_source_blocks
-        ):
-            region_edges[edge_count] = component_start
-            edge_count += 1
-            batch_start = component_start
-            batch_bytes = 0
-            batch_source_blocks = 0
-        batch_bytes += next_bytes
-        batch_source_blocks += next_source_blocks
-    region_edges[edge_count] = layout.n_regions
-    edge_count += 1
-    region_edges = region_edges[:edge_count]
-    piece_edges = region_piece_edges[region_edges]
-
-    largest_bound = max(
-        layout.n_regions,
-        n_pieces,
-        len(position_chunks),
-        max(position_chunks, default=0),
-    )
-    plan_dtype = np.dtype(np.int32 if largest_bound <= _I32_MAX else np.int64)
-    batch_region_edges = region_edges.astype(plan_dtype, copy=False)
-    batch_piece_edges = piece_edges.astype(plan_dtype, copy=False)
-    piece_dtype = np.dtype(
-        [
-            ("source_block", plan_dtype),
-            ("source_start", plan_dtype),
-            ("source_stop", plan_dtype),
-        ]
-    )
-    pieces = np.empty(n_pieces, dtype=piece_dtype)
-    pieces["source_block"] = piece_blocks
-    pieces["source_start"] = source_starts
-    pieces["source_stop"] = source_stops
-
-    piece_lengths = source_stops - source_starts
-    batch_positions = (
-        layout.packed_offsets[region_edges[1:]]
-        - layout.packed_offsets[region_edges[:-1]]
-    )
-    max_batch_positions = (
-        target_bytes // bytes_per_position if bytes_per_position else _I64_MAX
-    )
-    piece_block_starts = np.empty(n_pieces, dtype=bool)
-    piece_block_starts[0] = True
-    piece_block_starts[1:] = piece_blocks[1:] != piece_blocks[:-1]
-    batch_source_block_counts = np.add.reduceat(
-        piece_block_starts.astype(np.int64, copy=False),
-        piece_edges[:-1],
-    )
-    within_limits = (batch_positions <= max_batch_positions) & (
-        batch_source_block_counts <= max_source_blocks
-    )
-    legal_region_boundaries = np.empty(layout.n_regions + 1, dtype=bool)
-    legal_region_boundaries[0] = True
-    legal_region_boundaries[-1] = True
-    legal_region_boundaries[1:-1] = first_blocks[1:] > last_blocks[:-1]
-    unsplittable = np.fromiter(
-        (
-            not np.any(legal_region_boundaries[start + 1 : stop])
-            for start, stop in zip(
-                region_edges[:-1], region_edges[1:], strict=True
-            )
-        ),
-        dtype=bool,
-        count=len(region_edges) - 1,
-    )
-    def has_valid_plan() -> bool:
-        return (
-            batch_region_edges[0] == 0
-            and batch_region_edges[-1] == layout.n_regions
-            and batch_piece_edges[0] == 0
-            and batch_piece_edges[-1] == n_pieces
-            and np.all(np.diff(batch_region_edges) > 0)
-            and np.all(np.diff(batch_piece_edges) > 0)
-            and np.array_equal(piece_edges, region_piece_edges[region_edges])
-            and np.all(piece_blocks >= 0)
-            and np.all(piece_blocks < len(position_chunks))
-            and np.all(source_starts >= 0)
-            and np.all(source_stops > source_starts)
-            and np.all(
-                source_stops
-                <= boundaries[piece_blocks + 1] - boundaries[piece_blocks]
-            )
-            and np.all(piece_block_starts[piece_edges[:-1]])
-            and np.array_equal(
-                np.add.reduceat(piece_lengths, region_piece_edges[:-1]),
-                np.diff(layout.packed_offsets),
-            )
-            and int(piece_lengths.sum()) == layout.total_positions
-            and np.all(within_limits | unsplittable)
-        )
-
-    if not has_valid_plan():
-        raise AssertionError("invalid packed region plan")
-
-    for array in (batch_region_edges, batch_piece_edges, pieces):
-        array.setflags(write=False)
-    return batch_region_edges, batch_piece_edges, pieces
+    return batches
 
 
-def _gather_block(source_blocks, pieces, output_shape) -> np.ndarray:
-    if not source_blocks:
-        raise ValueError("a gather block must contain at least one piece")
+@dataclass(frozen=True)
+class _StoreRead:
+    """Rows of a stored Zarr array, read inside the task."""
 
-    first = np.asarray(source_blocks[0])
-    output = np.empty(output_shape, dtype=first.dtype)
-    block_ids = pieces["source_block"]
-    if np.any(block_ids < 0) or np.any(block_ids >= len(source_blocks)):
-        raise ValueError("piece references an unknown source block")
+    source: dict
+    spans: np.ndarray
+    sliced: bool
+    cols: slice | None
 
-    starts = pieces["source_start"].astype(np.int64, copy=False)
-    lengths = (
-        pieces["source_stop"].astype(np.int64, copy=False) - starts
-    )
-    destinations = np.empty(len(pieces) + 1, dtype=np.int64)
-    destinations[0] = 0
-    np.cumsum(lengths, out=destinations[1:])
-    if int(destinations[-1]) != output_shape[0]:
-        raise ValueError("piece lengths do not cover the gather output")
-    if len(pieces) == 0:
-        return output
-
-    run_starts = np.concatenate(
-        (
-            np.array([0], dtype=np.int64),
-            np.flatnonzero(block_ids[1:] != block_ids[:-1]) + 1,
-        )
-    )
-    run_stops = np.concatenate(
-        (run_starts[1:], np.array([len(pieces)], dtype=np.int64))
-    )
-    for piece_start, piece_stop in zip(run_starts, run_stops, strict=True):
-        piece_start = int(piece_start)
-        piece_stop = int(piece_stop)
-        source = np.asarray(source_blocks[int(block_ids[piece_start])])
-        output_start = int(destinations[piece_start])
-        output_stop = int(destinations[piece_stop])
-        run_size = output_stop - output_start
-        index_dtype = (
-            np.int32
-            if max(source.shape[0], run_size) <= _I32_MAX
-            else np.int64
-        )
-        relative_destinations = (
-            destinations[piece_start:piece_stop] - output_start
-        )
-        bases = (
-            starts[piece_start:piece_stop] - relative_destinations
-        ).astype(index_dtype, copy=False)
-        indices = np.arange(run_size, dtype=index_dtype)
-        indices += np.repeat(bases, lengths[piece_start:piece_stop])
-        output[output_start:output_stop] = np.take(source, indices, axis=0)
-    return output
-
-
-def _compact_source_reference(values: xr.DataArray):
-    reference = getattr(values.data, _PBZ_SOURCE_ATTR, None)
-    if not isinstance(reference, dict) or values.chunks is None:
-        return None
-    required = ("source", "array_path", "storage_options", "token")
-    if any(key not in reference for key in required):
-        return None
-    return {key: reference[key] for key in required}
-
-
-def _open_source_array(reference):
-    cache_key = tokenize(reference)
-    with _OPEN_ARRAYS_LOCK:
-        array = _OPEN_ARRAYS.get(cache_key)
-        if array is None:
-            kwargs = {}
-            if reference["storage_options"] is not None:
-                kwargs["storage_options"] = reference["storage_options"]
-            source = reference["source"]
-            zipped = _zip.zip_path(source)
-            if zipped is not None:
-                source = _zip.open_store(zipped)
+    def read(self) -> np.ndarray:
+        kwargs = {}
+        if self.source["storage_options"] is not None:
+            kwargs["storage_options"] = self.source["storage_options"]
+        location = self.source["source"]
+        zipped = _zip.zip_path(location)
+        store = _zip.open_store(zipped) if zipped is not None else None
+        try:
             array = zarr.open_array(
-                source,
+                store if store is not None else location,
                 mode="r",
-                path=reference["array_path"],
+                path=self.source["array_path"],
                 **kwargs,
             )
-            _OPEN_ARRAYS[cache_key] = array
-    return array
+            rows = _rows(self.spans, self.sliced)
+            selection = (rows,) if self.cols is None else (rows, self.cols)
+            if self.sliced:
+                return np.asarray(array[selection])
+            return np.asarray(array.get_orthogonal_selection(selection))
+        finally:
+            if store is not None:
+                store.close()
 
 
-def _read_gather_block(
-    reference,
-    source_slices,
-    pieces,
-    output_shape,
-) -> np.ndarray:
-    array = _open_source_array(reference)
-    blocks = tuple(
-        np.asarray(array[tuple(slice(start, stop) for start, stop in bounds)])
-        for bounds in source_slices
-    )
-    return _gather_block(blocks, pieces, output_shape)
+def _store_source(track: xr.DataArray) -> dict | None:
+    source = getattr(track.data, _PBZ_SOURCE_ATTR, None)
+    if track.chunks is None or not isinstance(source, dict):
+        return None
+    if any(key not in source for key in ("source", "array_path", "storage_options")):
+        return None
+    return source
+
+
+def _read(track: xr.DataArray, batch: _Batch, cols: slice | None):
+    """The rows of one batch: a store read, a Dask slice, or a NumPy array."""
+    source = _store_source(track)
+    if source is not None:
+        return _StoreRead(source, batch.spans, batch.sliced, cols)
+    rows = batch.rows()
+    key = (rows,) if cols is None else (rows, cols)
+    if track.chunks is not None:
+        return track.data[key]
+    return np.asarray(track.variable[key].values)
+
+
+def _reduce_batch(inputs, starts, ends, region_starts, reducer, options) -> tuple:
+    arrays = [item.read() if isinstance(item, _StoreRead) else np.asarray(item) for item in inputs]
+    arrays, offsets = _pack(arrays, np.asarray(starts), np.asarray(ends))
+    if reducer == "summit":
+        return _summit(arrays, offsets, np.asarray(region_starts), options["ranks"])
+    return (_reduce(reducer, arrays[0], offsets, options),)
+
+
+def _pack(arrays: list[np.ndarray], starts: np.ndarray, ends: np.ndarray):
+    """Rows of each region next to each other, and the region edges in them."""
+    lengths = ends - starts
+    offsets = np.zeros(lengths.size + 1, dtype=np.int64)
+    np.cumsum(lengths, out=offsets[1:])
+    if offsets[-1] == arrays[0].shape[0] and np.array_equal(starts, offsets[:-1]):
+        return arrays, offsets
+    rows = np.arange(offsets[-1], dtype=np.int64) + np.repeat(starts - offsets[:-1], lengths)
+    return [np.take(array, rows, axis=0) for array in arrays], offsets
+
+
+def _sum_dtype(dtype: np.dtype) -> np.dtype:
+    if dtype.kind in "bi":
+        return np.dtype(np.int64)
+    if dtype.kind == "u":
+        return np.dtype(np.uint64)
+    return dtype
+
+
+def _reduce(reducer: str, values: np.ndarray, offsets: np.ndarray, options: dict) -> np.ndarray:
+    heads = offsets[:-1]
+    lengths = np.diff(offsets)
+    floating = values.dtype.kind == "f"
+    skip = floating and options["skipna"]
+    if reducer in ("median", "quantile"):
+        q = 0.5 if reducer == "median" else options["q"]
+        return _quantiles(values, offsets, q, skip)
+    if reducer in ("min", "max"):
+        if skip:
+            ufunc = np.fmin if reducer == "min" else np.fmax
+        else:
+            ufunc = np.minimum if reducer == "min" else np.maximum
+        return ufunc.reduceat(values, heads, axis=0)
+
+    missing = np.isnan(values) if skip else None
+    if missing is None:
+        shape = (lengths.size,) + values.shape[1:]
+        counts = np.broadcast_to(lengths.reshape((-1,) + (1,) * (values.ndim - 1)), shape)
+    else:
+        counts = np.add.reduceat(~missing, heads, axis=0, dtype=np.int64)
+    if reducer == "count":
+        return np.ascontiguousarray(counts, dtype=np.int64)
+    clean = np.where(missing, 0, values) if skip else values
+    total = np.add.reduceat(clean, heads, axis=0, dtype=_sum_dtype(values.dtype))
+    if reducer == "sum":
+        return total
+
+    real = values.dtype if floating else np.dtype(np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = (total / counts).astype(real)
+        if reducer == "mean":
+            return mean
+        deviation = values - np.repeat(mean, lengths, axis=0)
+        square = deviation * deviation
+        if skip:
+            square[missing] = 0
+        dof = counts - options["ddof"]
+        var = np.where(dof > 0, np.add.reduceat(square, heads, axis=0) / dof, np.nan)
+    var = var.astype(real)
+    return var if reducer == "var" else np.sqrt(var)
+
+
+def _quantiles(values: np.ndarray, offsets: np.ndarray, q, skip: bool) -> np.ndarray:
+    function = np.nanquantile if skip else np.quantile
+    q = np.asarray(q, dtype=np.float64)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        parts = [
+            function(values[a:b], q, axis=0)
+            for a, b in zip(offsets[:-1].tolist(), offsets[1:].tolist())
+        ]
+    result = np.stack(parts)
+    return np.moveaxis(result, 1, -1) if q.ndim == 1 else result
+
+
+def _summit(arrays: list[np.ndarray], offsets: np.ndarray, region_starts: np.ndarray, ranks):
+    """At each region and column, the values at the row with the highest ``by`` keys.
+
+    Keys compare in order; ties go to the first row. NaN ranks lowest.
+    """
+    heads = offsets[:-1]
+    lengths = np.diff(offsets)
+    first = arrays[0]
+    candidates = np.ones(first.shape, dtype=bool)
+    for index in ranks:
+        key = arrays[index]
+        if key.dtype.kind == "f":
+            key = np.where(np.isnan(key), -np.inf, key)
+            floor = -np.inf
+        elif key.dtype.kind == "i":
+            floor = np.iinfo(key.dtype).min
+        else:
+            floor = 0 if key.dtype.kind == "u" else False
+        maxima = np.maximum.reduceat(np.where(candidates, key, floor), heads, axis=0)
+        candidates &= key == np.repeat(maxima, lengths, axis=0)
+
+    n = first.shape[0]
+    column_shape = (1,) * (first.ndim - 1)
+    row_ids = np.broadcast_to(np.arange(n, dtype=np.int64).reshape((n, *column_shape)), first.shape)
+    winners = np.minimum.reduceat(np.where(candidates, row_ids, n), heads, axis=0)
+    tail = tuple(np.indices(winners.shape, sparse=False)[1:])
+    selected = tuple(array[(winners, *tail)] for array in arrays)
+    shape = (heads.size, *column_shape)
+    positions = region_starts.reshape(shape) + winners - heads.reshape(shape)
+    return (*selected, positions.astype(np.int64))
+
+
+def _column_blocks(track: xr.DataArray) -> list[slice | None]:
+    if track.ndim == 1:
+        return [None]
+    if track.chunks is None:
+        return [slice(0, track.shape[1])]
+    edges = np.concatenate(([0], np.cumsum(track.chunks[1])))
+    return [slice(int(a), int(b)) for a, b in zip(edges[:-1], edges[1:])]
+
+
+def _row_bytes(track: xr.DataArray) -> int:
+    if track.ndim == 1:
+        return track.dtype.itemsize
+    width = max(track.chunks[1]) if track.chunks is not None else track.shape[1]
+    return track.dtype.itemsize * int(width)
+
+
+def _output_dtypes(group: list[xr.DataArray], reducer: str, options: dict) -> list[np.dtype]:
+    dummy = [np.zeros((2,) + (1,) * (track.ndim - 1), dtype=track.dtype) for track in group]
+    zero = np.zeros(1, dtype=np.int64)
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        outputs = _reduce_batch(dummy, zero, zero + 2, zero, reducer, options)
+    return [output.dtype for output in outputs]
+
+
+def _summit_ranks(tracks: list[xr.DataArray], by: tuple[str, ...]) -> tuple[int, ...]:
+    names = [track.name for track in tracks]
+    missing = [name for name in by if name not in names]
+    if missing:
+        raise ValueError("unknown summit ranking variable(s): " + ", ".join(map(str, missing)))
+    first = tracks[0]
+    if any(track.dims != first.dims or track.shape != first.shape for track in tracks[1:]):
+        raise ValueError("summit needs all variables to have the same dimensions and shape")
+    if any(tracks[names.index(name)].dtype.kind not in "biuf" for name in by):
+        raise TypeError("summit ranking variables must be numeric")
+    return tuple(names.index(name) for name in by)
 
 
 def reduce_regions_dataset(
-    ds: xr.Dataset,
-    reference,
-    intervals,
-    reducer: str,
-    /,
-    *,
-    target_bytes: int = _TARGET_BYTES,
-    max_source_blocks: int = _MAX_SOURCE_BLOCKS,
-    **kwargs,
+    ds: xr.Dataset, reference, intervals, reducer: str, options: dict
 ) -> xr.Dataset:
-    """Reduce genomic intervals, reopening unchanged PBZ arrays in each task."""
-    _validate_reducer(reducer, kwargs)
-    packed = regions_dataset(
-        ds,
-        reference,
-        intervals,
-        target_bytes=target_bytes,
-        max_source_blocks=max_source_blocks,
-    )
-    return _reduce_packed_dataset(packed, reducer, **kwargs)
+    """Reduce every position-first track of ``ds`` over each interval.
 
+    The result has one row per interval, in input order, and the coordinates
+    ``region_contig``, ``region_start`` and ``region_end``.
+    """
+    contig_ids, starts, ends = interval_columns(reference, intervals)
+    base = reference.offsets[contig_ids]
+    tracks = [ds[name] for name in ds.data_vars]
+    lazy = any(track.chunks is not None for track in tracks)
+    if lazy:
+        tracks = [track if track.chunks is not None else track.chunk() for track in tracks]
+    summit = reducer == "summit"
+    if summit:
+        options = {**options, "ranks": _summit_ranks(tracks, options["by"])}
+        groups = [tracks]
+    else:
+        groups = [[track] for track in tracks]
 
-def regions_dataset(
-    ds: xr.Dataset,
-    reference,
-    intervals,
-    *,
-    target_bytes: int = _TARGET_BYTES,
-    max_source_blocks: int = _MAX_SOURCE_BLOCKS,
-) -> xr.Dataset:
-    layout = _resolve_regions(ds, reference, intervals)
+    widths = [_row_bytes(track) for track in tracks]
+    row_bytes = sum(widths) if summit else max(widths)
+    boundaries = np.concatenate(([0], np.cumsum(tracks[0].chunks[0]))) if lazy else None
+    batches = _plan(base + starts, base + ends, row_bytes, boundaries)
+    order = np.concatenate([batch.regions for batch in batches])
+    rank = np.empty_like(order)
+    rank[order] = np.arange(order.size)
+    in_order = bool(np.array_equal(order, np.arange(order.size)))
+    stack = da.concatenate if lazy else np.concatenate
 
-    data_variables = {}
-    column_coordinates = {}
-    plans = {}
-    gather_batches = {}
-    for name, values in ds.data_vars.items():
-        plan_key = (
-            values.shape,
-            values.chunks,
-            np.dtype(values.dtype).itemsize,
-        )
-        plan = plans.get(plan_key)
-        if plan is None:
-            plan = _plan_variable_regions(
-                values,
-                layout,
-                target_bytes=target_bytes,
-                max_source_blocks=max_source_blocks,
+    vector_q = reducer == "quantile" and options["q"].ndim == 1
+    results = {}
+    for group in groups:
+        dtypes = _output_dtypes(group, reducer, options)
+        blocks = _column_blocks(group[0]) if lazy else [None]
+        outputs = [[] for _ in dtypes]
+        for batch in batches:
+            region_starts = starts[batch.regions] if summit else None
+            pieces = [[] for _ in dtypes]
+            for cols in blocks:
+                inputs = [_read(track, batch, cols) for track in group]
+                args = (inputs, batch.starts, batch.ends, region_starts, reducer, options)
+                if not lazy:
+                    for piece, value in zip(pieces, _reduce_batch(*args)):
+                        piece.append(value)
+                    continue
+                shape = (batch.regions.size,)
+                shape += group[0].shape[1:] if cols is None else (cols.stop - cols.start,)
+                if vector_q:
+                    shape += (options["q"].size,)
+                task = delayed(_reduce_batch, nout=len(dtypes))(*args)
+                for i, dtype in enumerate(dtypes):
+                    pieces[i].append(da.from_delayed(task[i], shape=shape, dtype=dtype))
+            for output, columns in zip(outputs, pieces):
+                output.append(columns[0] if len(columns) == 1 else stack(columns, axis=1))
+        joined = [rows[0] if len(rows) == 1 else stack(rows, axis=0) for rows in outputs]
+        if not in_order:
+            joined = [data[rank] for data in joined]
+        dims = ("region", *group[0].dims[1:])
+        for track, data in zip(group, joined):
+            results[track.name] = xr.Variable(
+                (*dims, "quantile") if vector_q else dims,
+                data,
+                attrs=track.attrs if summit else {},
             )
-            plans[plan_key] = plan
-        batch_regions, batch_pieces, pieces = plan
-        if values.chunks is None:
-            gathered = _gather_eager(values, pieces, layout.total_positions)
-        else:
-            batches = gather_batches.get(plan_key)
-            if batches is None:
-                batches = _prepare_gather_batches(
-                    values,
-                    layout,
-                    batch_regions,
-                    batch_pieces,
-                    pieces,
-                )
-                gather_batches[plan_key] = batches
-            gathered = _gather_dask(
-                values,
-                layout,
-                batch_regions,
-                batch_pieces,
-                pieces,
-                batches=batches,
-            )
-        data_variables[name] = xr.Variable(
-            values.dims,
-            gathered,
-            attrs=values.attrs,
-        )
-        for dimension in values.dims[1:]:
-            column_coordinates[dimension] = ds[dimension].variable
+        if summit:
+            summit_positions = xr.Variable(dims, joined[-1])
 
-    contigs = np.asarray(reference.names, dtype=object)
-    coordinates = xr.Coordinates(
-        {
-            "offsets": ("region_boundary", layout.packed_offsets),
-            "region_contig": ("region", contigs[layout.contig_ids]),
-            "region_start": ("region", layout.starts),
-            "region_end": ("region", layout.stops),
-            "region_input_index": ("region", layout.input_index),
-            "region_storage_index": (
-                "region",
-                np.arange(layout.n_regions, dtype=np.int64),
-            ),
-            **column_coordinates,
-        },
-        indexes={},
-    )
-    result = xr.Dataset(
-        data_vars=data_variables,
-        coords=coordinates,
-        attrs={
-            "pbz:representation": "packed-regions",
-            "pbz:coordinates": "0-based-half-open",
-        },
-    )
-    result.set_close(ds.close)
+    names = np.asarray(reference.names, dtype=object)
+    coords = {
+        "region_contig": xr.Variable("region", names[contig_ids]),
+        "region_start": xr.Variable("region", starts),
+        "region_end": xr.Variable("region", ends),
+    }
+    if summit:
+        coords["summit_position"] = summit_positions
+    result = xr.Dataset(results, coords=xr.Coordinates(coords, indexes={}))
+    if reducer == "quantile":
+        q = options["q"]
+        result = result.assign_coords(quantile=("quantile", q) if vector_q else q.item())
     return result
-
-
-def _prepare_gather_batches(
-    values: xr.DataArray,
-    layout: RegionLayout,
-    batch_region_edges: np.ndarray,
-    batch_piece_edges: np.ndarray,
-    pieces: np.ndarray,
-):
-    position_boundaries = np.concatenate(
-        ([0], np.cumsum(values.chunks[0], dtype=np.int64))
-    )
-    column_boundaries = (
-        np.concatenate(([0], np.cumsum(values.chunks[1], dtype=np.int64)))
-        if values.ndim == 2
-        else None
-    )
-
-    def source_slices(unique_source_blocks, column_block):
-        slices = []
-        for source_block in unique_source_blocks:
-            source_block = int(source_block)
-            bounds = [
-                (
-                    int(position_boundaries[source_block]),
-                    int(position_boundaries[source_block + 1]),
-                )
-            ]
-            if column_block is not None:
-                bounds.append(
-                    (
-                        int(column_boundaries[column_block]),
-                        int(column_boundaries[column_block + 1]),
-                    )
-                )
-            slices.append(tuple(bounds))
-        return tuple(slices)
-
-    batches = []
-    for batch_index in range(len(batch_region_edges) - 1):
-        region_start = int(batch_region_edges[batch_index])
-        region_stop = int(batch_region_edges[batch_index + 1])
-        piece_start = int(batch_piece_edges[batch_index])
-        piece_stop = int(batch_piece_edges[batch_index + 1])
-        batch_view = pieces[piece_start:piece_stop]
-        source_block_ids = batch_view["source_block"]
-        source_block_starts = np.empty(len(batch_view), dtype=bool)
-        source_block_starts[0] = True
-        source_block_starts[1:] = source_block_ids[1:] != source_block_ids[:-1]
-        unique_source_blocks = source_block_ids[source_block_starts]
-        local_pieces = batch_view.copy()
-        local_pieces["source_block"] = (
-            np.cumsum(source_block_starts, dtype=local_pieces.dtype["source_block"])
-            - 1
-        )
-        local_pieces.setflags(write=False)
-        position_size = int(
-            layout.packed_offsets[region_stop]
-            - layout.packed_offsets[region_start]
-        )
-        source_slices_by_column = tuple(
-            source_slices(unique_source_blocks, column_block)
-            for column_block in (
-                range(len(values.chunks[1])) if values.ndim == 2 else (None,)
-            )
-        )
-        batches.append(
-            (
-                unique_source_blocks,
-                local_pieces,
-                position_size,
-                source_slices_by_column,
-            )
-        )
-    return tuple(batches)
-
-
-def _gather_dask(
-    values: xr.DataArray,
-    layout: RegionLayout,
-    batch_region_edges: np.ndarray,
-    batch_piece_edges: np.ndarray,
-    pieces: np.ndarray,
-    *,
-    batches=None,
-):
-    if batches is None:
-        batches = _prepare_gather_batches(
-            values,
-            layout,
-            batch_region_edges,
-            batch_piece_edges,
-            pieces,
-        )
-    del layout, batch_region_edges, batch_piece_edges, pieces
-    reference = _compact_source_reference(values)
-    source_blocks = None if reference is not None else values.data.to_delayed()
-    rows = []
-    for (
-        unique_source_blocks,
-        local_pieces,
-        position_size,
-        source_slices_by_column,
-    ) in batches:
-        if values.ndim == 1:
-            if reference is None:
-                selected = tuple(
-                    source_blocks[(int(source_block),)]
-                    for source_block in unique_source_blocks
-                )
-                task = delayed(_gather_block)(
-                    selected,
-                    local_pieces,
-                    (position_size,),
-                )
-            else:
-                task = delayed(_read_gather_block)(
-                    reference,
-                    source_slices_by_column[0],
-                    local_pieces,
-                    (position_size,),
-                )
-            rows.append(
-                da.from_delayed(
-                    task,
-                    shape=(position_size,),
-                    dtype=values.dtype,
-                )
-            )
-            continue
-
-        columns = []
-        for column_block, column_size in enumerate(values.chunks[1]):
-            if reference is None:
-                selected = tuple(
-                    source_blocks[(int(source_block), column_block)]
-                    for source_block in unique_source_blocks
-                )
-                task = delayed(_gather_block)(
-                    selected,
-                    local_pieces,
-                    (position_size, int(column_size)),
-                )
-            else:
-                task = delayed(_read_gather_block)(
-                    reference,
-                    source_slices_by_column[column_block],
-                    local_pieces,
-                    (position_size, int(column_size)),
-                )
-            columns.append(
-                da.from_delayed(
-                    task,
-                    shape=(position_size, int(column_size)),
-                    dtype=values.dtype,
-                )
-            )
-        rows.append(
-            columns[0]
-            if len(columns) == 1
-            else da.concatenate(columns, axis=1)
-        )
-    return rows[0] if len(rows) == 1 else da.concatenate(rows, axis=0)
-
-
-def _gather_eager(
-    values: xr.DataArray,
-    pieces: np.ndarray,
-    total_positions: int,
-) -> np.ndarray:
-    selected = []
-    local_pieces = pieces.copy()
-    lengths = pieces["source_stop"] - pieces["source_start"]
-    for piece in pieces:
-        source_start = int(piece["source_start"])
-        source_stop = int(piece["source_stop"])
-        selected.append(
-            np.asarray(
-                values.isel(position=slice(source_start, source_stop)).values
-            )
-        )
-    local_pieces["source_block"] = np.arange(
-        len(local_pieces), dtype=local_pieces.dtype["source_block"]
-    )
-    local_pieces["source_start"] = 0
-    local_pieces["source_stop"] = lengths
-    return _gather_block(
-        tuple(selected),
-        local_pieces,
-        (total_positions, *values.shape[1:]),
-    )
 
 
 def _normalize_one(query) -> RegionQuery:
@@ -1283,32 +493,6 @@ def _resolve_one(
     return resolved, reference.rows(resolved)
 
 
-def _resolve_regions(ds: xr.Dataset, reference, intervals) -> RegionLayout:
-    if "pbz:representation" in ds.attrs:
-        raise PbzError("regions() requires a normal PBZ track Dataset")
-    _check_tracks(ds, reference)
-
-    contig_ids, starts, stops = interval_columns(reference, intervals)
-    offsets = reference.offsets
-    input_index = np.arange(contig_ids.size, dtype=np.int64)
-    order = np.lexsort((input_index, starts, contig_ids))
-    contig_ids = contig_ids[order]
-    starts = starts[order]
-    stops = stops[order]
-    input_index = input_index[order]
-    if np.any((contig_ids[1:] == contig_ids[:-1]) & (starts[1:] < stops[:-1])):
-        raise ValueError("regions must not overlap")
-
-    return _build_region_layout(
-        contig_ids,
-        starts,
-        stops,
-        offsets[contig_ids] + starts,
-        offsets[contig_ids] + stops,
-        input_index,
-    )
-
-
 def interval_columns(reference, intervals) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Contig indexes and contig-local starts and ends of ``intervals``, in input order."""
     if isinstance(intervals, (RegionQuery, str)) or (
@@ -1348,21 +532,6 @@ def interval_columns(reference, intervals) -> tuple[np.ndarray, np.ndarray, np.n
     if np.any(stops > contig_lengths):
         raise ValueError("region end exceeds contig length")
     return contig_ids, starts, stops
-
-
-def _check_tracks(ds: xr.Dataset, reference) -> None:
-    if not ds.data_vars:
-        raise PbzError("regions() needs at least one position-first track")
-    size = reference.size("position")
-    for name, values in ds.data_vars.items():
-        if values.ndim not in {1, 2} or values.dims[0] != "position":
-            raise PbzError(f"track {name!r} must have position first")
-        if values.shape[0] != size:
-            raise PbzError(
-                f"track {name!r} has {values.shape[0]} positions; the reference has {size}"
-            )
-        if values.ndim == 2 and values.dims[1] not in ds.coords:
-            raise PbzError(f"track {name!r} is missing {values.dims[1]!r} labels")
 
 
 def _query_columns(intervals, reference):
@@ -1468,27 +637,3 @@ def _contig_ids(contigs: np.ndarray, names: np.ndarray) -> np.ndarray:
     return order[positions].astype(np.int64, copy=False)
 
 
-def _build_region_layout(
-    contig_ids: np.ndarray,
-    starts: np.ndarray,
-    stops: np.ndarray,
-    flat_starts: np.ndarray,
-    flat_stops: np.ndarray,
-    input_index: np.ndarray,
-) -> RegionLayout:
-    lengths = stops - starts
-    packed_offsets = np.empty(lengths.size + 1, dtype=np.int64)
-    packed_offsets[0] = 0
-    np.cumsum(lengths, out=packed_offsets[1:])
-    arrays = (
-        contig_ids,
-        starts,
-        stops,
-        flat_starts,
-        flat_stops,
-        packed_offsets,
-        input_index,
-    )
-    for array in arrays:
-        array.setflags(write=False)
-    return RegionLayout(*arrays)

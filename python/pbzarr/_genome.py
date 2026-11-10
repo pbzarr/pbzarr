@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import partial
 from typing import TypeVar
+import warnings
 
 import dask.array as da
 import numpy as np
@@ -15,7 +17,7 @@ from ._locus import locus_coords
 from ._native import PbzError
 from ._reference import Reference, bin_width
 from ._region import RegionQuery
-from ._regions import interval_columns, reduce_regions_dataset
+from ._regions import interval_columns, reduce_regions_dataset, reducer_options
 
 T = TypeVar("T", xr.DataArray, xr.Dataset)
 
@@ -29,26 +31,40 @@ def reduce_regions(
     /,
     *,
     reference: Reference | None = None,
-    **kwargs,
+    q: float | Sequence[float] | None = None,
+    by: str | Sequence[str] | None = None,
+    ddof: int | None = None,
+    skipna: bool | None = None,
 ) -> T:
-    """One statistic per interval, along ``position``, in one pass.
+    """One statistic per interval, along ``position``.
 
     ``obj`` is a whole-genome DataArray or Dataset. The result has the same
-    type, with a ``region`` dimension in place of ``position``. On a Dataset,
-    variables without ``position`` pass through unchanged. ``reference=``
-    overrides the ``reference`` coordinate, or supplies it when ``obj`` has
-    none. The result carries the reference that was used.
+    type, with a ``region`` dimension in place of ``position``. Row ``i`` of
+    the result is interval ``i`` of the input, and intervals may overlap. The
+    result carries ``region_contig``, ``region_start`` and ``region_end``.
+
+    ``reducer`` is one of ``sum``, ``mean``, ``min``, ``max``, ``count``,
+    ``std``, ``var``, ``median``, ``quantile`` (needs ``q=``) or ``summit``
+    (needs ``by=``). ``ddof=`` applies to ``std`` and ``var``. ``skipna=``
+    (default True) ignores NaN values.
+
+    On a Dataset, variables without a genomic dimension pass through
+    unchanged, and variables on a ``bin_N`` dimension are left out with a
+    warning. ``reference=`` overrides the ``reference`` coordinate, or
+    supplies it when ``obj`` has none. The result carries the reference that
+    was used.
     """
     if not isinstance(obj, (xr.DataArray, xr.Dataset)):
         raise TypeError("reduce_regions needs an xarray DataArray or Dataset")
+    options = reducer_options(reducer, q=q, by=by, ddof=ddof, skipna=skipna)
     ref = reference if reference is not None else Reference.from_xarray(obj)
     _check_full(obj, ref)
     if isinstance(obj, xr.Dataset):
-        return _reduce_dataset(obj, ref, intervals, reducer, kwargs)
+        return _reduce_dataset(obj, ref, intervals, reducer, options)
     if "position" not in obj.dims:
         raise ValueError("reduce_regions needs an array with a 'position' dimension")
     name = _UNNAMED if obj.name is None else obj.name
-    result = _reduce_dataset(obj.to_dataset(name=name), ref, intervals, reducer, kwargs)[name]
+    result = _reduce_dataset(obj.to_dataset(name=name), ref, intervals, reducer, options)[name]
     result.name = obj.name
     return result
 
@@ -155,7 +171,7 @@ def _position_chunks(obj: xr.DataArray | xr.Dataset) -> tuple[int, ...] | None:
 
 
 def _reduce_dataset(
-    ds: xr.Dataset, reference: Reference, intervals, reducer: str, kwargs: dict
+    ds: xr.Dataset, reference: Reference, intervals, reducer: str, options: dict
 ) -> xr.Dataset:
     tracks = [name for name, value in ds.data_vars.items() if "position" in value.dims]
     if not tracks:
@@ -166,11 +182,22 @@ def _reduce_dataset(
                 f"track {name!r} has {ds[name].ndim} dimensions; region operations "
                 "handle position plus at most one more"
             )
+    binned = [
+        name
+        for name, value in ds.data_vars.items()
+        if name not in tracks and any(_on_bins(dim) for dim in value.dims)
+    ]
+    if binned:
+        warnings.warn(
+            "reduce_regions reduces 'position' only; it leaves out the bin_N "
+            "variables " + ", ".join(map(repr, binned)),
+            UserWarning,
+            stacklevel=3,
+        )
     work = ds[tracks]
     work = work.drop_vars(
         [name for name, coord in work.coords.items() if "position" in coord.dims]
     )
-    # The planner needs position first. A transposed array loses the fast path.
     work = work.assign(
         {
             name: value.transpose("position", ...)
@@ -178,10 +205,16 @@ def _reduce_dataset(
             if value.dims[0] != "position"
         }
     )
-    reduced = reduce_regions_dataset(work, reference, intervals, reducer, **kwargs)
+    reduced = reduce_regions_dataset(work, reference, intervals, reducer, options)
 
-    rest = ds.drop_vars([*tracks, _coord.NAME], errors="ignore")
-    rest = rest.drop_vars([name for name, coord in rest.coords.items() if "position" in coord.dims])
+    rest = ds.drop_vars([*tracks, *binned, _coord.NAME], errors="ignore")
+    rest = rest.drop_vars(
+        [
+            name
+            for name, coord in rest.coords.items()
+            if any(_on_bins(dim) or dim == "position" for dim in coord.dims)
+        ]
+    )
     out = rest.drop_attrs(deep=False)
     for name in tracks:
         out[name] = reduced[name].variable
@@ -191,3 +224,7 @@ def _reduce_dataset(
     out = _coord.attach(out, reference)
     out.set_close(ds.close)
     return out
+
+
+def _on_bins(dim) -> bool:
+    return dim != "position" and bin_width(dim) is not None

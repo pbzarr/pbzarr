@@ -78,7 +78,7 @@ peak_means = pbzarr.reduce_regions(ds, peaks, "mean")
 result = peak_means.compute()
 ```
 
-The result has one mean for each peak and sample. Other reductions include `sum`, `min`, `max`, `count`, `std`, `var`, `median`, and `quantile`. Regions can also be a list of strings such as `"chr1:100000-100200"`, or a dataframe with `chrom`, `start`, and `end` columns.
+The result has one mean for each peak and sample. Row `i` of the result is peak `i` of the input, and the peaks can overlap. Other reductions include `sum`, `min`, `max`, `count`, `std`, `var`, `median`, `quantile` (with `q=`), and `summit` (with `by=`). Regions can also be a list of strings such as `"chr1:100000-100200"`, or a dataframe with `chrom`, `start`, and `end` columns. Tracks on a `bin_N` dimension are left out of the result, with a warning.
 
 Dask keeps reads and calculations lazy until `compute()`. The computed result must still fit in memory.
 
