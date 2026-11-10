@@ -1,7 +1,6 @@
 //! `PbzStore`: top-level handle for a PBZ on-disk store.
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use hashbrown::{HashMap, HashSet};
@@ -123,7 +122,6 @@ impl PbzStore {
 
             let genome = rehydrate_genome(&storage, &name, attrs.genome_name.as_deref())?;
 
-            let sealed = group.attributes().contains_key("multiscales");
             track_handles.insert(
                 name.clone(),
                 Track {
@@ -134,7 +132,6 @@ impl PbzStore {
                     column_dim,
                     storage: Arc::clone(&storage),
                     values: RwLock::new(Some(Arc::new(values))),
-                    sealed: AtomicBool::new(sealed),
                 },
             );
         }
@@ -400,7 +397,6 @@ impl PbzStore {
             column_dim: col_dim,
             storage: Arc::clone(&self.storage),
             values: RwLock::new(None),
-            sealed: AtomicBool::new(false),
         };
         PendingTrack::new(track, &config)
     }

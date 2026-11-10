@@ -134,7 +134,7 @@ use crate::array::{
 use crate::import::destination::Destination;
 use crate::{Genome, Track};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{RwLock, atomic::AtomicBool};
+use std::sync::RwLock;
 use zarrs::array::codec::api::ArrayToBytesCodecTraits;
 use zarrs::storage::StoreKey;
 
@@ -383,7 +383,6 @@ impl Dataset {
                 column_dim,
                 storage: self.storage.clone(),
                 values: RwLock::new(Some(array)),
-                sealed: AtomicBool::new(false),
             };
             targets.push(Destination::Root {
                 track: Box::new(track),
@@ -524,11 +523,6 @@ impl Dataset {
         if let Support::Unsupported { reason } = &info.logical_support {
             return Err(PbzError::UnsupportedEncoding(format!(
                 "append: {name:?}: {reason}"
-            )));
-        }
-        if info.attrs().get("multiscales").is_some() {
-            return Err(PbzError::Metadata(format!(
-                "append: {name:?} publishes a multiscales pyramid, so its base data is sealed"
             )));
         }
         if info.dims.len() != 2 || info.dims[0] != "position" {
@@ -680,7 +674,6 @@ impl Dataset {
                 column_dim: Some(dim.clone()),
                 storage: self.storage.clone(),
                 values: RwLock::new(Some(array)),
-                sealed: AtomicBool::new(false),
             };
             targets.push(Destination::Root {
                 track: Box::new(track),
