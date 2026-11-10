@@ -23,11 +23,13 @@
 //! shard with no data elides its file; the fallback path elides per column
 //! shard. An absent chunk already reads back as the fill value.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::ops::Range;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -442,10 +444,14 @@ impl SpanGate {
         }
     }
 
+    fn lock(&self) -> MutexGuard<'_, (usize, bool)> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn acquire(&self) {
-        let mut s = self.state.lock().expect("span gate poisoned");
+        let mut s = self.lock();
         while s.0 >= self.cap && !s.1 {
-            s = self.cv.wait(s).expect("span gate poisoned");
+            s = self.cv.wait(s).unwrap_or_else(PoisonError::into_inner);
         }
         if !s.1 {
             s.0 += 1;
@@ -453,14 +459,14 @@ impl SpanGate {
     }
 
     fn release(&self) {
-        let mut s = self.state.lock().expect("span gate poisoned");
+        let mut s = self.lock();
         s.0 = s.0.saturating_sub(1);
         drop(s);
         self.cv.notify_one();
     }
 
     fn abort(&self) {
-        self.state.lock().expect("span gate poisoned").1 = true;
+        self.lock().1 = true;
         self.cv.notify_all();
     }
 }
@@ -526,8 +532,8 @@ struct ShardGroup {
 /// Idle forks of one reader, capped at `capacity` live forks. Forks are
 /// created on demand, so a reader no worker ever decodes opens nothing.
 struct HandlePool<R> {
-    /// `(idle handles, handles created)`.
-    idle: Mutex<(Vec<R>, usize)>,
+    /// `(idle handles, handles created, aborted)`.
+    state: Mutex<(Vec<R>, usize, bool)>,
     cv: Condvar,
     capacity: usize,
 }
@@ -535,20 +541,23 @@ struct HandlePool<R> {
 impl<R: ValueReader> HandlePool<R> {
     fn new(capacity: usize) -> Self {
         Self {
-            idle: Mutex::new((Vec::new(), 0)),
+            state: Mutex::new((Vec::new(), 0, false)),
             cv: Condvar::new(),
             capacity: capacity.max(1),
         }
     }
 
+    fn lock(&self) -> MutexGuard<'_, (Vec<R>, usize, bool)> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Blocks while every handle is checked out; returns `Ok(None)` once the
-    /// engine has aborted so a waiting worker can drain.
+    /// pool is aborted so a waiting worker can drain.
     fn checkout(
         &self,
         fork: impl FnOnce() -> std::result::Result<R, crate::io::ReaderError>,
-        aborted: &AtomicBool,
     ) -> Result<Option<R>> {
-        let mut guard = self.idle.lock().expect("handle pool poisoned");
+        let mut guard = self.lock();
         loop {
             if let Some(handle) = guard.0.pop() {
                 return Ok(Some(handle));
@@ -559,31 +568,27 @@ impl<R: ValueReader> HandlePool<R> {
                 return match fork() {
                     Ok(handle) => Ok(Some(handle)),
                     Err(e) => {
-                        self.idle.lock().expect("handle pool poisoned").1 -= 1;
+                        self.lock().1 -= 1;
                         self.cv.notify_one();
                         Err(PbzError::Reader(e))
                     }
                 };
             }
-            if aborted.load(Ordering::Relaxed) {
+            if guard.2 {
                 return Ok(None);
             }
-            // The timeout is what lets a blocked checkout notice an abort.
-            guard = self
-                .cv
-                .wait_timeout(guard, Duration::from_millis(50))
-                .expect("handle pool poisoned")
-                .0;
+            guard = self.cv.wait(guard).unwrap_or_else(PoisonError::into_inner);
         }
     }
 
     fn checkin(&self, handle: R) {
-        self.idle
-            .lock()
-            .expect("handle pool poisoned")
-            .0
-            .push(handle);
+        self.lock().0.push(handle);
         self.cv.notify_one();
+    }
+
+    fn abort(&self) {
+        self.lock().2 = true;
+        self.cv.notify_all();
     }
 }
 
@@ -669,7 +674,10 @@ impl EngineState {
     }
 
     fn record_err(&self, err: PbzError) {
-        let mut slot = self.first_err.lock().expect("error slot poisoned");
+        let mut slot = self
+            .first_err
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if slot.is_none() {
             debug!("import worker failed: {err}");
             *slot = Some(err);
@@ -680,6 +688,14 @@ impl EngineState {
         self.err_flag.store(true, Ordering::Relaxed);
         self.gate.abort();
     }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic payload")
 }
 
 /// Everything workers share.
@@ -1527,6 +1543,9 @@ pub(crate) fn run_import<R: ValueReader>(
     let pools: Vec<HandlePool<R>> = (0..n_readers).map(|_| HandlePool::new(pool_size)).collect();
 
     let (piece_tx, piece_rx) = bounded::<Piece>((workers * 2).max(1));
+    // One receiver per worker and none kept here, so a send fails once every
+    // worker has exited.
+    let receivers = Mutex::new(vec![piece_rx; workers]);
 
     // Decode workers and zarrs' subchunk encoding share this one pool, so
     // `workers` bounds the busy threads: a worker that writes a buffer helps
@@ -1543,59 +1562,80 @@ pub(crate) fn run_import<R: ValueReader>(
         let ctx = &ctx;
         let originals = &originals;
         let pools = &pools;
-        let piece_rx = &piece_rx;
+        let receivers = &receivers;
         let pool = &pool;
         scope.spawn(move || {
             pool.broadcast(|_| {
+                let Some(piece_rx) = receivers
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .pop()
+                else {
+                    return;
+                };
+                let fail = |e: PbzError| {
+                    ctx.state.record_err(e);
+                    pools.iter().for_each(HandlePool::abort);
+                };
                 let mut busy = Duration::ZERO;
                 let mut idle = Duration::ZERO;
-                loop {
-                    let wait_start = Instant::now();
-                    let Ok(piece) = piece_rx.recv() else { break };
-                    idle += wait_start.elapsed();
-                    let work_start = Instant::now();
-                    // Stalling on a pool is not work, so it comes back out of
-                    // `busy` below and is reported as its own stage.
-                    let mut stalled = Duration::ZERO;
-                    'piece: {
-                        if ctx.state.has_err() {
-                            // Drain so the channel closes cleanly; the gate is
-                            // already aborted, so nothing blocks on us.
-                            break 'piece;
-                        }
-                        let checkout_start = Instant::now();
-                        let checked_out = pools[piece.reader].checkout(
-                            || {
+                let run = panic::catch_unwind(AssertUnwindSafe(|| {
+                    loop {
+                        let wait_start = Instant::now();
+                        let Ok(piece) = piece_rx.recv() else { break };
+                        idle += wait_start.elapsed();
+                        let work_start = Instant::now();
+                        // Stalling on a pool is not work, so it comes back out of
+                        // `busy` below and is reported as its own stage.
+                        let mut stalled = Duration::ZERO;
+                        'piece: {
+                            if ctx.state.has_err() {
+                                // Drain so the channel closes cleanly; the gate is
+                                // already aborted, so nothing blocks on us.
+                                break 'piece;
+                            }
+                            let checkout_start = Instant::now();
+                            let checked_out = pools[piece.reader].checkout(|| {
                                 originals[piece.reader]
                                     .lock()
                                     .expect("base reader poisoned")
                                     .fork()
-                            },
-                            &ctx.state.err_flag,
-                        );
-                        stalled = checkout_start.elapsed();
-                        ctx.state.timings.handle_wait.record(stalled);
-                        let mut reader = match checked_out {
-                            Ok(Some(reader)) => reader,
-                            Ok(None) => break 'piece,
-                            Err(e) => {
-                                ctx.state.record_err(e);
+                            });
+                            stalled = checkout_start.elapsed();
+                            ctx.state.timings.handle_wait.record(stalled);
+                            let mut reader = match checked_out {
+                                Ok(Some(reader)) => reader,
+                                Ok(None) => break 'piece,
+                                Err(e) => {
+                                    fail(e);
+                                    break 'piece;
+                                }
+                            };
+                            let result = process_piece(ctx, &mut reader, piece);
+                            pools[piece.reader].checkin(reader);
+                            if let Err(e) = result {
+                                fail(e);
                                 break 'piece;
                             }
-                        };
-                        let result = process_piece(ctx, &mut reader, piece);
-                        pools[piece.reader].checkin(reader);
-                        if let Err(e) = result {
-                            ctx.state.record_err(e);
-                            break 'piece;
+                            if ctx.state.span_remaining[piece.span].fetch_sub(1, Ordering::AcqRel)
+                                == 1
+                            {
+                                ctx.state.gate.release();
+                            }
                         }
-                        if ctx.state.span_remaining[piece.span].fetch_sub(1, Ordering::AcqRel) == 1
-                        {
-                            ctx.state.gate.release();
-                        }
+                        busy += work_start.elapsed().saturating_sub(stalled);
                     }
-                    busy += work_start.elapsed().saturating_sub(stalled);
+                }));
+                // A panic loses this worker's handle and span count, so the
+                // gate and every pool must abort or the others could wait
+                // forever.
+                if let Err(payload) = run {
+                    fail(PbzError::Metadata(format!(
+                        "import worker panicked: {}",
+                        panic_message(&*payload)
+                    )));
                 }
+                drop(piece_rx);
                 let timings = &ctx.state.timings;
                 timings
                     .worker_busy_ns
@@ -1701,7 +1741,12 @@ pub(crate) fn run_import<R: ValueReader>(
         timings.handle_wait.max_secs(),
     );
 
-    if let Some(e) = state.first_err.lock().expect("error slot poisoned").take() {
+    let first_err = state
+        .first_err
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    if let Some(e) = first_err {
         return Err(e);
     }
 
@@ -2489,5 +2534,73 @@ mod tests {
             .into_dimensionality::<Ix2>()
             .unwrap();
         assert_eq!(values[[5, 2]], 300 + 5);
+    }
+
+    /// Panics on any read that reaches past `panic_at`.
+    #[derive(Clone)]
+    struct PanicReader {
+        genome: Reference,
+        schema: OutputSchema,
+        panic_at: u64,
+    }
+
+    impl ValueReader for PanicReader {
+        fn contigs(&self) -> &Reference {
+            &self.genome
+        }
+
+        fn output_schema(&self) -> &OutputSchema {
+            &self.schema
+        }
+
+        fn read_into(
+            &mut self,
+            _contig: &str,
+            _start: u64,
+            end: u64,
+            outputs: &mut [OutputSinkMut<'_>],
+        ) -> std::result::Result<(), crate::io::ReaderError> {
+            if end > self.panic_at {
+                panic!("test reader panic");
+            }
+            outputs[0].as_i32_mut()?.fill(1);
+            Ok(())
+        }
+
+        fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
+            Ok(self.clone())
+        }
+    }
+
+    /// One handle for many workers: the panicking worker never checks its
+    /// handle in, and the import still returns an error.
+    #[test]
+    fn worker_panic_fails_the_import() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let dir = TempDir::new().unwrap();
+            let genome = one_contig(64);
+            let mut ds = dataset(&dir.path().join("panic.pbz"), &genome);
+            let reader = PanicReader {
+                genome: genome.clone(),
+                schema: OutputSchema::single("value", Dtype::I32),
+                panic_at: 32,
+            };
+            let cfg = TrackConfig::new(Dtype::I32).chunk_size(4);
+            let result = import(&mut ds, "v", cfg, vec![reader])
+                .options(PipelineOptions {
+                    workers: 4,
+                    decode_chunks: 1,
+                    ..PipelineOptions::default()
+                })
+                .handle_budget(1)
+                .run();
+            let _ = tx.send(result.map(|_| ()).map_err(|e| e.to_string()));
+        });
+        let result = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("import did not return after a worker panic");
+        let err = result.unwrap_err();
+        assert!(err.contains("panicked"), "{err}");
     }
 }
