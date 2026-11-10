@@ -1,16 +1,15 @@
 //! `pbz view`: stream one track as bedGraph-like text.
 
-use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
-use noodles_bgzf as bgzf;
 use pbzarr::io::{Dtype, Numeric};
 use pbzarr::{Dataset, Measurement, RegionQuery};
 use rayon::prelude::*;
 
+use crate::output::Output;
 use crate::regions::{NamedRegion, select_regions};
 
 /// Target bytes fetched per batch over the selected columns.
@@ -30,16 +29,7 @@ pub(crate) struct ViewSpec {
 }
 
 pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
-    if !(1..=17).contains(&spec.precision) {
-        bail!("--precision must be between 1 and 17 significant digits");
-    }
-    // One rayon pool serves both zarrs chunk decode and BGZF compression.
-    if let Some(threads) = spec.threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads.get())
-            .build_global()
-            .context("configure worker thread pool")?;
-    }
+    let precision = crate::output::prepare(spec.precision, spec.threads)?;
     let store = open_store(&spec.store)?;
     let measurement = resolve_measurement(&store, spec.track.as_deref())?;
     let (columns, names) = resolve_columns(&measurement, &spec.columns)?;
@@ -48,57 +38,17 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
         &spec.regions,
         spec.regions_file.as_ref(),
     )?;
-    let precision = usize::from(spec.precision);
-    match spec.output.as_deref() {
-        None => {
-            let mut out = BufWriter::new(io::stdout());
-            stream(
-                &measurement,
-                &regions,
-                &columns,
-                &names,
-                spec.no_header,
-                precision,
-                &mut out,
-            )?;
-            out.flush()?;
-        }
-        Some(path)
-            if path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("gz")) =>
-        {
-            let file =
-                File::create(path).with_context(|| format!("create output {}", path.display()))?;
-            // Deflate dominates the export cost; compress blocks on a pool.
-            let mut out = bgzf::io::MultithreadedWriter::new(file);
-            stream(
-                &measurement,
-                &regions,
-                &columns,
-                &names,
-                spec.no_header,
-                precision,
-                &mut out,
-            )?;
-            out.finish()?;
-        }
-        Some(path) => {
-            let file =
-                File::create(path).with_context(|| format!("create output {}", path.display()))?;
-            let mut out = BufWriter::new(file);
-            stream(
-                &measurement,
-                &regions,
-                &columns,
-                &names,
-                spec.no_header,
-                precision,
-                &mut out,
-            )?;
-            out.flush()?;
-        }
-    }
+    let mut out = Output::create(spec.output.as_deref())?;
+    stream(
+        &measurement,
+        &regions,
+        &columns,
+        &names,
+        spec.no_header,
+        precision,
+        &mut out,
+    )?;
+    out.finish()?;
     Ok(())
 }
 

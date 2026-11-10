@@ -3,30 +3,16 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
 use tempfile::TempDir;
+
+mod common;
+use common::{run_pbz, stdout_of};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/d4")
         .join(name)
-}
-
-fn run_pbz(args: impl IntoIterator<Item = OsString>) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pbz"))
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn stdout_of(output: &Output) -> String {
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout.clone()).unwrap()
 }
 
 fn labeled(path: &Path, label: &str) -> OsString {

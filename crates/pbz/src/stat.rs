@@ -1,16 +1,15 @@
 //! `pbz stat`: summary statistics for one track.
 
-use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result, bail};
-use noodles_bgzf as bgzf;
+use anyhow::Result;
 use pbzarr::stat::{StatKind, StatOptions, StatOutput, StatResult, StatValue};
 use pbzarr::{Region, RegionQuery};
 
 use crate::fmt::write_g;
+use crate::output::Output;
 use crate::regions::{NamedRegion, select_regions};
 
 pub(crate) struct StatSpec {
@@ -27,17 +26,8 @@ pub(crate) struct StatSpec {
 }
 
 pub(crate) fn run_stat(spec: &StatSpec) -> Result<()> {
-    if !(1..=17).contains(&spec.precision) {
-        bail!("--precision must be between 1 and 17 significant digits");
-    }
+    let precision = crate::output::prepare(spec.precision, spec.threads)?;
     let kind = spec.stat;
-    // One rayon pool serves zarrs chunk decode, stat batches, and BGZF.
-    if let Some(threads) = spec.threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads.get())
-            .build_global()
-            .context("configure worker thread pool")?;
-    }
     let store = crate::view::open_store(&spec.store)?;
     let measurement = crate::view::resolve_measurement(&store, spec.track.as_deref())?;
     let named = select_regions(
@@ -50,32 +40,9 @@ pub(crate) fn run_stat(spec: &StatSpec) -> Result<()> {
         columns: (!spec.columns.is_empty()).then(|| spec.columns.clone()),
     };
     let result = pbzarr::stat::run(&measurement, &regions, kind, &options)?;
-    let precision = usize::from(spec.precision);
-    match spec.output.as_deref() {
-        None => {
-            let mut out = BufWriter::new(io::stdout());
-            write_output(&named, kind, &result, spec.no_header, precision, &mut out)?;
-            out.flush()?;
-        }
-        Some(path)
-            if path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("gz")) =>
-        {
-            let file =
-                File::create(path).with_context(|| format!("create output {}", path.display()))?;
-            let mut out = bgzf::io::MultithreadedWriter::new(file);
-            write_output(&named, kind, &result, spec.no_header, precision, &mut out)?;
-            out.finish()?;
-        }
-        Some(path) => {
-            let file =
-                File::create(path).with_context(|| format!("create output {}", path.display()))?;
-            let mut out = BufWriter::new(file);
-            write_output(&named, kind, &result, spec.no_header, precision, &mut out)?;
-            out.flush()?;
-        }
-    }
+    let mut out = Output::create(spec.output.as_deref())?;
+    write_output(&named, kind, &result, spec.no_header, precision, &mut out)?;
+    out.finish()?;
     Ok(())
 }
 

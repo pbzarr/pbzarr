@@ -11,8 +11,7 @@ use noodles_csi::{self as csi, binning_index::index::reference_sequence::bin::Ch
 use noodles_tabix as tabix;
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, TrackConfig};
-use pbzarr::{Dataset, Reference};
+use pbzarr::{Contig, Dataset, Reference, TrackConfig};
 
 fn genome() -> Reference {
     Reference::new(vec![
@@ -149,8 +148,7 @@ impl ValueReader for ColumnReader {
 #[allow(dead_code)]
 pub fn build_store(dir: &Path) -> PathBuf {
     let path = dir.join("store.pbz");
-    let reference = genome().clone();
-    let mut dataset = Dataset::create(&path, reference).unwrap();
+    let mut dataset = Dataset::create(&path, genome()).unwrap();
     let depth = Column::Ints(vec![vec![5, 5, 5, 7, 7, 0, 0, 0, 0, 0], vec![0; 6]]);
     Import::from_readers(vec![ColumnReader::new(depth)])
         .unwrap()
