@@ -7,7 +7,7 @@ import json
 import os
 from typing import TypeAlias
 
-from . import _native
+from . import _native, _zip
 
 PathLike: TypeAlias = str | os.PathLike[str]
 Source: TypeAlias = PathLike | tuple[PathLike, str]
@@ -90,6 +90,7 @@ def _destination(value: object) -> str:
     path = _path(value, "destination")
     if "://" in path:
         raise ValueError("import writes local stores only; give a local path")
+    _zip.refuse(path)
     return path
 
 

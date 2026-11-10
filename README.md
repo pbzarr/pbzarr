@@ -167,6 +167,14 @@ An output path that ends in `.zip` also writes a zip store, so `--zip` is option
 
 A zip store is written once. `pbz import` cannot add tracks to it, and `pbz append` refuses it. Without a shard flag or `--codecs`, each shard holds 64 position chunks and all columns. An import refuses `--codecs` without a `sharding_indexed` codec. `pbz view` and `pbz stat` read zip stores.
 
+Open a zip store in Python:
+
+```python
+ds = pbzarr.open("cohort.pbz.zip")
+```
+
+The open is read-only. The Dataset works as one from a directory store. `pbzarr.write` and the Python imports refuse a zip path.
+
 ## Format
 
 A `.pbz` store is one Zarr v3 group. Tracks and coordinates are arrays directly under the root.

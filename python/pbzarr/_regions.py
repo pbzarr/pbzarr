@@ -15,6 +15,7 @@ import numpy as np
 import xarray as xr
 import zarr
 
+from . import _zip
 from ._native import PbzError
 from ._region import RegionQuery, parse_region
 
@@ -910,8 +911,12 @@ def _open_source_array(reference):
             kwargs = {}
             if reference["storage_options"] is not None:
                 kwargs["storage_options"] = reference["storage_options"]
+            source = reference["source"]
+            zipped = _zip.zip_path(source)
+            if zipped is not None:
+                source = _zip.open_store(zipped)
             array = zarr.open_array(
-                reference["source"],
+                source,
                 mode="r",
                 path=reference["array_path"],
                 **kwargs,

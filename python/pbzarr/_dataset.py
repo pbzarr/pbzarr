@@ -14,7 +14,7 @@ import xarray as xr
 from xarray import AlignmentError
 import zarr
 
-from . import _coord, _native
+from . import _coord, _native, _zip
 from ._native import PbzError
 from ._reference import Reference, bin_width
 from ._regions import _PBZ_SOURCE_ATTR
@@ -215,10 +215,12 @@ def open(
     data = _read(source, storage_options, chunks).data
     if tracks is not None:
         try:
-            data = _select(data, [tracks] if isinstance(tracks, str) else list(tracks))
+            selected = _select(data, [tracks] if isinstance(tracks, str) else list(tracks))
         except Exception:
             data.close()
             raise
+        selected.set_close(data._close)
+        data = selected
     return data
 
 
@@ -243,6 +245,7 @@ def create(
         raise ValueError(
             "create makes local stores only; give a local path and no storage_options"
         )
+    _zip.refuse(path)
     if os.path.lexists(path):
         raise FileExistsError(f"destination already exists: {path}")
     if not isinstance(reference, Mapping) or not reference:
@@ -278,6 +281,7 @@ def write(
     against a crash.
     """
     source = _target_source(target)
+    _zip.refuse(source)
     if not isinstance(variables, Mapping) or not variables:
         raise TypeError("variables must be a nonempty mapping of name to DataArray")
     encoding = dict(encoding or {})
@@ -343,8 +347,35 @@ def _read(source, storage_options, chunks, *, listed: bool = False) -> _Store:
     one. ``listed=True`` lists the store instead, for writes."""
     if isinstance(source, (str, os.PathLike)):
         source = os.fspath(source)
+    zipped = _zip.zip_path(source)
+    if zipped is None:
+        return _read_store(source, source, storage_options, chunks, listed=listed)
+    if storage_options is not None:
+        raise ValueError("a zip store is a local file; give no storage_options")
+    store = _zip.open_store(zipped)
+    try:
+        result = _read_store(store, zipped, None, chunks, listed=False)
+    except BaseException:
+        store.close()
+        raise
+    data = result.data
+    data.encoding["source"] = zipped
+    close = data._close
+
+    def _close() -> None:
+        try:
+            if close is not None:
+                close()
+        finally:
+            store.close()
+
+    data.set_close(_close)
+    return result
+
+
+def _read_store(store, source, storage_options, chunks, *, listed: bool) -> _Store:
     group = zarr.open_group(
-        source, mode="r", use_consolidated=False if listed else None,
+        store, mode="r", use_consolidated=False if listed else None,
         **_storage_kwargs(storage_options),
     )
     root_attrs = dict(group.attrs)
@@ -352,7 +383,7 @@ def _read(source, storage_options, chunks, *, listed: bool = False) -> _Store:
     catalog = _catalog(group)
 
     data = xr.open_zarr(
-        source,
+        store,
         chunks=None if chunks is _STORED_CHUNKS else chunks,
         consolidated=group.metadata.consolidated_metadata is not None,
         storage_options=_options(storage_options),
