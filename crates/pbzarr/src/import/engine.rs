@@ -159,15 +159,6 @@ pub(crate) fn soft_fd_limit() -> u64 {
     1024
 }
 
-fn dtype_bytes(d: Dtype) -> u64 {
-    match d {
-        Dtype::U8 | Dtype::I8 | Dtype::Bool => 1,
-        Dtype::U16 | Dtype::I16 => 2,
-        Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
-        Dtype::F64 => 8,
-    }
-}
-
 trait FillDecode: Sized {
     fn decode(fill: &FillValue) -> Result<Self>;
 }
@@ -191,7 +182,7 @@ macro_rules! fill_decode_num {
     )* };
 }
 
-fill_decode_num!(u8, u16, u32, i8, i16, i32, f32, f64);
+fill_decode_num!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
 
 impl FillDecode for bool {
     fn decode(fill: &FillValue) -> Result<Self> {
@@ -346,9 +337,11 @@ tile_buffer! {
     U8 => u8,
     U16 => u16,
     U32 => u32,
+    U64 => u64,
     I8 => i8,
     I16 => i16,
     I32 => i32,
+    I64 => i64,
     F32 => f32,
     F64 => f64,
     Bool => bool,
@@ -760,7 +753,7 @@ impl RunCtx<'_> {
 
     fn record_written(&self, geom: &TargetGeom<'_>, chunk: Range<u64>, columns: Range<u64>) {
         let bytes =
-            (chunk.end - chunk.start) * (columns.end - columns.start) * dtype_bytes(geom.dtype);
+            (chunk.end - chunk.start) * (columns.end - columns.start) * geom.dtype.size() as u64;
         self.state.bytes_written.fetch_add(bytes, Ordering::Relaxed);
         self.state.chunks_written.fetch_add(1, Ordering::Relaxed);
         if let Some(p) = self.progress {
@@ -1426,7 +1419,7 @@ pub(crate) fn run_import<R: ValueReader>(
     if let Some(progress) = &options.progress {
         let total_bytes: u64 = geoms
             .iter()
-            .map(|g| total * (g.columns.end - g.columns.start) * dtype_bytes(g.dtype))
+            .map(|g| total * (g.columns.end - g.columns.start) * g.dtype.size() as u64)
             .sum();
         progress.set_total(total_bytes);
     }
@@ -1468,14 +1461,14 @@ pub(crate) fn run_import<R: ValueReader>(
     // workers. Both are whole chunks.
     let chunk_row_bytes: u64 = geoms
         .iter()
-        .map(|g| chunk_len * (g.columns.end - g.columns.start) * dtype_bytes(g.dtype))
+        .map(|g| chunk_len * (g.columns.end - g.columns.start) * g.dtype.size() as u64)
         .sum();
     let scratch_chunk_bytes: u64 = touch_plan
         .iter()
         .map(|entries| {
             entries
                 .iter()
-                .map(|e| chunk_len * e.fields.len() as u64 * dtype_bytes(geoms[e.t_idx].dtype))
+                .map(|e| chunk_len * e.fields.len() as u64 * geoms[e.t_idx].dtype.size() as u64)
                 .sum::<u64>()
         })
         .max()

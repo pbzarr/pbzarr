@@ -325,7 +325,7 @@ pub(crate) fn plan_batches(ranges: &[FlatRange], chunk: u64, max_chunks: u64) ->
 /// batch is read one column tile at a time, so its budget covers one tile.
 pub(crate) fn plan(measurement: &Measurement, ranges: &[FlatRange]) -> Result<Vec<Batch>> {
     let (inner_pos, inner_col) = measurement.inner_chunk_shape()?;
-    let tile_bytes = inner_pos * inner_col * dtype_size(measurement.dtype()) as u64;
+    let tile_bytes = inner_pos * inner_col * measurement.dtype().size() as u64;
     let max_chunks = (BATCH_TARGET_BYTES / tile_bytes.max(1)).max(1);
     Ok(plan_batches(ranges, inner_pos, max_chunks))
 }
@@ -500,15 +500,6 @@ fn resolve_columns(
     Ok((indices, requested.clone()))
 }
 
-fn dtype_size(dtype: Dtype) -> usize {
-    match dtype {
-        Dtype::Bool | Dtype::U8 | Dtype::I8 => 1,
-        Dtype::U16 | Dtype::I16 => 2,
-        Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
-        Dtype::F64 => 8,
-    }
-}
-
 fn dispatch(
     measurement: &Measurement,
     batches: &[Batch],
@@ -534,6 +525,11 @@ fn dispatch(
                         v.into()
                     })
                 }
+                Dtype::U64 => {
+                    float_rows::<u64>(measurement, batches, n_regions, selected, kind, |v| {
+                        v as f64
+                    })
+                }
                 Dtype::I8 => {
                     float_rows::<i8>(measurement, batches, n_regions, selected, kind, |v| {
                         v.into()
@@ -547,6 +543,11 @@ fn dispatch(
                 Dtype::I32 => {
                     float_rows::<i32>(measurement, batches, n_regions, selected, kind, |v| {
                         v.into()
+                    })
+                }
+                Dtype::I64 => {
+                    float_rows::<i64>(measurement, batches, n_regions, selected, kind, |v| {
+                        v as f64
                     })
                 }
                 Dtype::F32 => {
@@ -638,6 +639,22 @@ fn dispatch(
                         }
                     },
                     |v| v.into(),
+                ),
+                Dtype::U64 => count_accs::<u64>(
+                    measurement,
+                    batches,
+                    n_regions,
+                    selected,
+                    || CountAcc::windowed(0, 256),
+                    |v| i64::try_from(v).unwrap_or(i64::MAX),
+                ),
+                Dtype::I64 => count_accs::<i64>(
+                    measurement,
+                    batches,
+                    n_regions,
+                    selected,
+                    || CountAcc::windowed(0, 256),
+                    |v| v,
                 ),
                 Dtype::Bool => count_accs::<bool>(
                     measurement,

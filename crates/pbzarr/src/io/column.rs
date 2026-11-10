@@ -8,6 +8,7 @@ use std::fmt::Display;
 
 use ndarray::ArrayViewMut1;
 
+use crate::io::Dtype;
 use crate::io::error::{ReaderError, Result};
 
 /// A borrowing, dtype-tagged view a reader fills. The reader hands raw cells to
@@ -17,9 +18,11 @@ pub enum ColumnSinkMut<'a> {
     U8(ArrayViewMut1<'a, u8>),
     U16(ArrayViewMut1<'a, u16>),
     U32(ArrayViewMut1<'a, u32>),
+    U64(ArrayViewMut1<'a, u64>),
     I8(ArrayViewMut1<'a, i8>),
     I16(ArrayViewMut1<'a, i16>),
     I32(ArrayViewMut1<'a, i32>),
+    I64(ArrayViewMut1<'a, i64>),
     F32(ArrayViewMut1<'a, f32>),
     F64(ArrayViewMut1<'a, f64>),
     Bool(ArrayViewMut1<'a, bool>),
@@ -28,34 +31,23 @@ pub enum ColumnSinkMut<'a> {
 impl ColumnSinkMut<'_> {
     /// Parse `cell` into this sink's dtype and write it across `[lo, hi)`.
     pub fn fill_run(&mut self, lo: usize, hi: usize, cell: &str) -> Result<()> {
+        macro_rules! fill_parsed {
+            ($v:expr, $variant:ident) => {
+                $v.slice_mut(ndarray::s![lo..hi])
+                    .fill(parse_cell(cell, Dtype::$variant)?)
+            };
+        }
         match self {
-            ColumnSinkMut::U8(v) => v
-                .slice_mut(ndarray::s![lo..hi])
-                .fill(parse_cell(cell, "uint8")?),
-            ColumnSinkMut::U16(v) => v
-                .slice_mut(ndarray::s![lo..hi])
-                .fill(parse_cell(cell, "uint16")?),
-            ColumnSinkMut::U32(v) => v
-                .slice_mut(ndarray::s![lo..hi])
-                .fill(parse_cell(cell, "uint32")?),
-            ColumnSinkMut::I8(v) => v
-                .slice_mut(ndarray::s![lo..hi])
-                .fill(parse_cell(cell, "int8")?),
-            ColumnSinkMut::I16(v) => v
-                .slice_mut(ndarray::s![lo..hi])
-                .fill(parse_cell(cell, "int16")?),
-            ColumnSinkMut::I32(v) => {
-                v.slice_mut(ndarray::s![lo..hi])
-                    .fill(parse_cell(cell, "int32")?);
-            }
-            ColumnSinkMut::F32(v) => {
-                v.slice_mut(ndarray::s![lo..hi])
-                    .fill(parse_cell(cell, "float32")?);
-            }
-            ColumnSinkMut::F64(v) => {
-                v.slice_mut(ndarray::s![lo..hi])
-                    .fill(parse_cell(cell, "float64")?);
-            }
+            ColumnSinkMut::U8(v) => fill_parsed!(v, U8),
+            ColumnSinkMut::U16(v) => fill_parsed!(v, U16),
+            ColumnSinkMut::U32(v) => fill_parsed!(v, U32),
+            ColumnSinkMut::U64(v) => fill_parsed!(v, U64),
+            ColumnSinkMut::I8(v) => fill_parsed!(v, I8),
+            ColumnSinkMut::I16(v) => fill_parsed!(v, I16),
+            ColumnSinkMut::I32(v) => fill_parsed!(v, I32),
+            ColumnSinkMut::I64(v) => fill_parsed!(v, I64),
+            ColumnSinkMut::F32(v) => fill_parsed!(v, F32),
+            ColumnSinkMut::F64(v) => fill_parsed!(v, F64),
             ColumnSinkMut::Bool(v) => {
                 let x = parse_bool(cell).ok_or_else(|| {
                     ReaderError::Other(anyhow::anyhow!(
@@ -69,7 +61,7 @@ impl ColumnSinkMut<'_> {
     }
 }
 
-fn parse_cell<T: std::str::FromStr>(cell: &str, dtype: &str) -> Result<T>
+fn parse_cell<T: std::str::FromStr>(cell: &str, dtype: Dtype) -> Result<T>
 where
     T::Err: Display,
 {
@@ -127,6 +119,8 @@ mod tests {
         check_parse!(I8, i8, "-128", -128);
         check_parse!(I16, i16, "-32768", -32768);
         check_parse!(I32, i32, "-2147483648", -2_147_483_648);
+        check_parse!(U64, u64, "18446744073709551615", u64::MAX);
+        check_parse!(I64, i64, "-9223372036854775808", i64::MIN);
         check_parse!(F32, f32, "1.5", 1.5);
         check_parse!(F64, f64, "1.5", 1.5);
         check_parse!(Bool, bool, "true", true);

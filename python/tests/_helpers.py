@@ -1,9 +1,23 @@
 from pathlib import Path
+import shutil
+import subprocess
 
 import numpy as np
+import pytest
 import zarr
 
 PBZ_UUID = "d5bd7bea-0388-4e0a-9844-707c034e9add"
+_REPO = Path(__file__).resolve().parents[2]
+
+
+def pbz_binary() -> Path:
+    """The debug pbz CLI. Build it when it is missing."""
+    binary = _REPO / "target" / "debug" / "pbz"
+    if not binary.exists():
+        if shutil.which("cargo") is None:
+            pytest.skip("the pbz CLI is not built and cargo is not on PATH")
+        subprocess.run(["cargo", "build", "-p", "pbz"], cwd=_REPO, check=True)
+    return binary
 
 
 def write_pbz_store(store, reference: dict[str, int], name: str, values: np.ndarray,

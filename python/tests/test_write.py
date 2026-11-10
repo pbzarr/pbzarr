@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import numpy as np
 import pytest
 import xarray as xr
 
 import pbzarr
-from _helpers import write_bed_bgzip_tabix, write_sizes
+from _helpers import pbz_binary, write_bed_bgzip_tabix, write_sizes
 
 
 def _create(destination, *, reference):
@@ -236,3 +237,34 @@ def test_import_d4_codecs_override_controls_zarr_metadata(tmp_path, d4_fixture):
             chunk_size=100,
             codecs=[{"name": "zstd", "configuration": {"level": 3, "checksum": False}}],
         )
+
+
+def test_cli_reads_64_bit_integer_tracks_from_write(tmp_path):
+    destination = tmp_path / "wide.pbz"
+    big = 2**40
+    signed = np.asarray([-big] * 4 + [7] * 6, dtype=np.int64)
+    unsigned = np.asarray([big] * 4 + [0] * 6, dtype=np.uint64)
+    with pbzarr.create(destination, reference={"chr1": 10}):
+        pass
+    pbzarr.write(destination, {
+        "signed": xr.DataArray(signed, dims=("position",)),
+        "unsigned": xr.DataArray(unsigned, dims=("position",)),
+    }).close()
+
+    def pbz(*args):
+        return subprocess.run(
+            [pbz_binary(), *args], check=True, capture_output=True, text=True
+        ).stdout
+
+    assert pbz("view", destination, "signed") == (
+        f"#chrom\tstart\tend\tsigned\nchr1\t0\t4\t{-big}\nchr1\t4\t10\t7\n"
+    )
+    assert pbz("view", destination, "unsigned") == (
+        f"#chrom\tstart\tend\tunsigned\nchr1\t0\t4\t{big}\nchr1\t4\t10\t0\n"
+    )
+    assert pbz("stat", "-s", "hist", destination, "signed") == (
+        f"#value\tcount\n{-big}\t4\n7\t6\n"
+    )
+    assert pbz("stat", "-s", "max", destination, "unsigned") == (
+        f"#chrom\tstart\tend\tmax\nchr1\t0\t10\t{big}\n"
+    )

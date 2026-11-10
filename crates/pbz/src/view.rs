@@ -220,9 +220,11 @@ fn stream<W: Write>(
         Dtype::U8 => export::<u8, _>(measurement, columns, precision, out),
         Dtype::U16 => export::<u16, _>(measurement, columns, precision, out),
         Dtype::U32 => export::<u32, _>(measurement, columns, precision, out),
+        Dtype::U64 => export::<u64, _>(measurement, columns, precision, out),
         Dtype::I8 => export::<i8, _>(measurement, columns, precision, out),
         Dtype::I16 => export::<i16, _>(measurement, columns, precision, out),
         Dtype::I32 => export::<i32, _>(measurement, columns, precision, out),
+        Dtype::I64 => export::<i64, _>(measurement, columns, precision, out),
         Dtype::F32 => export::<f32, _>(measurement, columns, precision, out),
         Dtype::F64 => export::<f64, _>(measurement, columns, precision, out),
         Dtype::Bool => export::<bool, _>(measurement, columns, precision, out),
@@ -257,7 +259,7 @@ macro_rules! impl_cell_int {
     };
 }
 
-impl_cell_int!(u8, u16, u32, i8, i16, i32);
+impl_cell_int!(u8, u16, u32, u64, i8, i16, i32, i64);
 
 macro_rules! impl_cell_float {
     ($($ty:ty),*) => {
@@ -295,15 +297,6 @@ impl Cell for bool {
     }
     fn write_to(self, out: &mut impl Write, _sig: usize) -> io::Result<()> {
         write!(out, "{}", u8::from(self))
-    }
-}
-
-fn dtype_size(dtype: Dtype) -> usize {
-    match dtype {
-        Dtype::Bool | Dtype::U8 | Dtype::I8 => 1,
-        Dtype::U16 | Dtype::I16 => 2,
-        Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
-        Dtype::F64 => 8,
     }
 }
 
@@ -345,7 +338,7 @@ fn export<T: Cell, W: Write>(
     precision: usize,
     out: &mut W,
 ) -> Result<()> {
-    let per_row = measurement.columns_count()? * dtype_size(measurement.dtype());
+    let per_row = measurement.columns_count()? * measurement.dtype().size();
     let batch_rows = (BATCH_TARGET_BYTES / per_row.max(1)).clamp(1, 4 << 20) as u64;
     let offsets = measurement.genome().offsets();
     for (id, contig) in measurement.genome().iter() {

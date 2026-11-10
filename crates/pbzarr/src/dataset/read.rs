@@ -1,5 +1,6 @@
 use super::ValidationStatus;
 use super::{Dataset, VariableInfo};
+use crate::io::Dtype;
 use crate::{PbzError, Result};
 use base64::Engine;
 use ndarray::{ArrayD, IxDyn};
@@ -161,24 +162,28 @@ impl Dataset {
                 values.into_iter().map($convert).collect()
             }};
         }
-        Ok(match info.metadata["data_type"].as_str().unwrap_or("") {
-            "string" => load!(String, CoordinateValue::String),
-            "uint8" => load!(u8, |v| CoordinateValue::Unsigned(v.into())),
-            "uint16" => load!(u16, |v| CoordinateValue::Unsigned(v.into())),
-            "uint32" => load!(u32, |v| CoordinateValue::Unsigned(v.into())),
-            "uint64" => load!(u64, CoordinateValue::Unsigned),
-            "int8" => load!(i8, |v| CoordinateValue::Signed(v.into())),
-            "int16" => load!(i16, |v| CoordinateValue::Signed(v.into())),
-            "int32" => load!(i32, |v| CoordinateValue::Signed(v.into())),
-            "int64" => load!(i64, CoordinateValue::Signed),
-            "float32" => load!(f32, |v| CoordinateValue::Float(v.into())),
-            "float64" => load!(f64, CoordinateValue::Float),
-            other => {
-                return Err(PbzError::UnsupportedEncoding(format!(
-                    "{}: unsupported coordinate type {other}",
-                    info.name
-                )));
-            }
+        let stored = info.metadata["data_type"].as_str().unwrap_or("");
+        if stored == "string" {
+            return Ok(load!(String, CoordinateValue::String));
+        }
+        let unsupported = || {
+            PbzError::UnsupportedEncoding(format!(
+                "{}: unsupported coordinate type {stored}",
+                info.name
+            ))
+        };
+        Ok(match Dtype::from_str(stored).map_err(|_| unsupported())? {
+            Dtype::U8 => load!(u8, |v| CoordinateValue::Unsigned(v.into())),
+            Dtype::U16 => load!(u16, |v| CoordinateValue::Unsigned(v.into())),
+            Dtype::U32 => load!(u32, |v| CoordinateValue::Unsigned(v.into())),
+            Dtype::U64 => load!(u64, CoordinateValue::Unsigned),
+            Dtype::I8 => load!(i8, |v| CoordinateValue::Signed(v.into())),
+            Dtype::I16 => load!(i16, |v| CoordinateValue::Signed(v.into())),
+            Dtype::I32 => load!(i32, |v| CoordinateValue::Signed(v.into())),
+            Dtype::I64 => load!(i64, CoordinateValue::Signed),
+            Dtype::F32 => load!(f32, |v| CoordinateValue::Float(v.into())),
+            Dtype::F64 => load!(f64, CoordinateValue::Float),
+            Dtype::Bool => return Err(unsupported()),
         })
     }
 }

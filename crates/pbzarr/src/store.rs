@@ -519,7 +519,7 @@ fn rehydrate_genome(
 /// Built per-array so `typesize` matches the element size. Returns the
 /// vec-form that `ArrayBuilder::bytes_to_bytes_codecs` consumes.
 pub(crate) fn default_data_codecs(dtype: Dtype) -> Result<Vec<Arc<dyn BytesToBytesCodecTraits>>> {
-    let typesize = dtype_size(dtype);
+    let typesize = dtype.size();
     let clevel = BloscCompressionLevel::try_from(5u8)
         .map_err(|e| PbzError::Store(format!("invalid blosc clevel: {e}")))?;
     let codec = BloscCodec::new(
@@ -562,25 +562,17 @@ pub(crate) fn apply_explicit_spec(
     Ok(())
 }
 
-/// Element size in bytes for each dtype. Drives the blosc `typesize`.
-fn dtype_size(d: Dtype) -> usize {
-    match d {
-        Dtype::U8 | Dtype::I8 | Dtype::Bool => 1,
-        Dtype::U16 | Dtype::I16 => 2,
-        Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
-        Dtype::F64 => 8,
-    }
-}
-
 /// Map `Dtype` → a zarrs `DataType` value.
 pub(crate) fn dtype_to_zarrs(d: Dtype) -> zarrs::array::DataType {
     match d {
         Dtype::U8 => data_type::uint8(),
         Dtype::U16 => data_type::uint16(),
         Dtype::U32 => data_type::uint32(),
+        Dtype::U64 => data_type::uint64(),
         Dtype::I8 => data_type::int8(),
         Dtype::I16 => data_type::int16(),
         Dtype::I32 => data_type::int32(),
+        Dtype::I64 => data_type::int64(),
         Dtype::F32 => data_type::float32(),
         Dtype::F64 => data_type::float64(),
         Dtype::Bool => data_type::bool(),
@@ -604,6 +596,7 @@ pub(crate) fn resolve_fill_value(d: Dtype, custom: Option<&Value>) -> Result<Fil
         Dtype::U32 => {
             FillValue::from(u32::try_from(v.as_u64().ok_or_else(&bad)?).map_err(|_| bad())?)
         }
+        Dtype::U64 => FillValue::from(v.as_u64().ok_or_else(&bad)?),
         Dtype::I8 => {
             FillValue::from(i8::try_from(v.as_i64().ok_or_else(&bad)?).map_err(|_| bad())?)
         }
@@ -613,6 +606,7 @@ pub(crate) fn resolve_fill_value(d: Dtype, custom: Option<&Value>) -> Result<Fil
         Dtype::I32 => {
             FillValue::from(i32::try_from(v.as_i64().ok_or_else(&bad)?).map_err(|_| bad())?)
         }
+        Dtype::I64 => FillValue::from(v.as_i64().ok_or_else(&bad)?),
         Dtype::F32 => FillValue::from(v.as_f64().ok_or_else(&bad)? as f32),
         Dtype::F64 => FillValue::from(v.as_f64().ok_or_else(&bad)?),
         Dtype::Bool => FillValue::from(v.as_bool().ok_or_else(&bad)?),
@@ -626,9 +620,11 @@ fn default_fill_value(d: Dtype) -> FillValue {
         Dtype::U8 => FillValue::from(0u8),
         Dtype::U16 => FillValue::from(0u16),
         Dtype::U32 => FillValue::from(0u32),
+        Dtype::U64 => FillValue::from(0u64),
         Dtype::I8 => FillValue::from(0i8),
         Dtype::I16 => FillValue::from(0i16),
         Dtype::I32 => FillValue::from(0i32),
+        Dtype::I64 => FillValue::from(0i64),
         Dtype::F32 => FillValue::from(f32::NAN),
         Dtype::F64 => FillValue::from(f64::NAN),
         Dtype::Bool => FillValue::from(false),
@@ -649,9 +645,11 @@ mod tests {
             Dtype::U8,
             Dtype::U16,
             Dtype::U32,
+            Dtype::U64,
             Dtype::I8,
             Dtype::I16,
             Dtype::I32,
+            Dtype::I64,
             Dtype::F32,
             Dtype::F64,
             Dtype::Bool,

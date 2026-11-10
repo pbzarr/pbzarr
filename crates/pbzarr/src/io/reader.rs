@@ -97,9 +97,11 @@ output_sink! {
     U8 => u8, as_u8_mut;
     U16 => u16, as_u16_mut;
     U32 => u32, as_u32_mut;
+    U64 => u64, as_u64_mut;
     I8 => i8, as_i8_mut;
     I16 => i16, as_i16_mut;
     I32 => i32, as_i32_mut;
+    I64 => i64, as_i64_mut;
     F32 => f32, as_f32_mut;
     F64 => f64, as_f64_mut;
     Bool => bool, as_bool_mut;

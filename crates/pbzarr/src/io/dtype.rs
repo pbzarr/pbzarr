@@ -1,12 +1,14 @@
-/// Runtime tag for the  numeric types supported by `ValueReader` impls.
+/// Runtime tag for the numeric types supported by `ValueReader` impls.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Dtype {
     U8,
     U16,
     U32,
+    U64,
     I8,
     I16,
     I32,
+    I64,
     F32,
     F64,
     Bool,
@@ -19,9 +21,11 @@ impl Dtype {
             Dtype::U8 => "uint8",
             Dtype::U16 => "uint16",
             Dtype::U32 => "uint32",
+            Dtype::U64 => "uint64",
             Dtype::I8 => "int8",
             Dtype::I16 => "int16",
             Dtype::I32 => "int32",
+            Dtype::I64 => "int64",
             Dtype::F32 => "float32",
             Dtype::F64 => "float64",
             Dtype::Bool => "bool",
@@ -35,9 +39,11 @@ impl Dtype {
             "uint8" => Dtype::U8,
             "uint16" => Dtype::U16,
             "uint32" => Dtype::U32,
+            "uint64" => Dtype::U64,
             "int8" => Dtype::I8,
             "int16" => Dtype::I16,
             "int32" => Dtype::I32,
+            "int64" => Dtype::I64,
             "float32" => Dtype::F32,
             "float64" => Dtype::F64,
             "bool" => Dtype::Bool,
@@ -47,6 +53,16 @@ impl Dtype {
                 });
             }
         })
+    }
+
+    /// Element size in bytes.
+    pub fn size(self) -> usize {
+        match self {
+            Dtype::U8 | Dtype::I8 | Dtype::Bool => 1,
+            Dtype::U16 | Dtype::I16 => 2,
+            Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
+            Dtype::U64 | Dtype::I64 | Dtype::F64 => 8,
+        }
     }
 }
 
@@ -62,12 +78,16 @@ impl Dtype {
             Ok(Dtype::U16)
         } else if *dt == data_type::uint32() {
             Ok(Dtype::U32)
+        } else if *dt == data_type::uint64() {
+            Ok(Dtype::U64)
         } else if *dt == data_type::int8() {
             Ok(Dtype::I8)
         } else if *dt == data_type::int16() {
             Ok(Dtype::I16)
         } else if *dt == data_type::int32() {
             Ok(Dtype::I32)
+        } else if *dt == data_type::int64() {
+            Ok(Dtype::I64)
         } else if *dt == data_type::float32() {
             Ok(Dtype::F32)
         } else if *dt == data_type::float64() {
@@ -110,6 +130,9 @@ impl Numeric for u16 {
 impl Numeric for u32 {
     const DTYPE: Dtype = Dtype::U32;
 }
+impl Numeric for u64 {
+    const DTYPE: Dtype = Dtype::U64;
+}
 impl Numeric for i8 {
     const DTYPE: Dtype = Dtype::I8;
 }
@@ -118,6 +141,9 @@ impl Numeric for i16 {
 }
 impl Numeric for i32 {
     const DTYPE: Dtype = Dtype::I32;
+}
+impl Numeric for i64 {
+    const DTYPE: Dtype = Dtype::I64;
 }
 impl Numeric for f32 {
     const DTYPE: Dtype = Dtype::F32;
