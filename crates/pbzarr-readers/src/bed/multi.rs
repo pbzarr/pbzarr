@@ -16,9 +16,7 @@ use noodles_csi::BinningIndex;
 
 use pbzarr::Reference;
 use pbzarr::import::{Axes, Config, Report, Source, Target};
-use pbzarr::io::{
-    ColumnSinkMut, Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, ValueReader,
-};
+use pbzarr::io::{Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, ValueReader};
 use pbzarr::{PbzError, Result, TrackConfig, validate_node_name};
 
 use crate::coords::noodles_query_interval;
@@ -427,7 +425,7 @@ fn scatter_line(
     contig_name: &str,
     win_start: u64,
     win_end: u64,
-    sinks: &mut [ColumnSinkMut<'_>],
+    sinks: &mut [OutputSinkMut<'_>],
 ) -> IoResult<()> {
     let text = std::str::from_utf8(line).map_err(|e| {
         ReaderError::Other(anyhow::anyhow!(
@@ -483,7 +481,7 @@ fn scatter_region(
     contig_name: &str,
     start: u64,
     end: u64,
-    sinks: &mut [ColumnSinkMut<'_>],
+    sinks: &mut [OutputSinkMut<'_>],
 ) -> IoResult<()> {
     let Some(interval) = noodles_query_interval(start, end)? else {
         return Ok(());
@@ -526,24 +524,6 @@ fn scatter_region(
     Ok(())
 }
 
-/// Reborrow an output sink as a [`ColumnSinkMut`], whose `fill_run` parses raw
-/// text cells into the sink's dtype.
-fn column_sink<'a>(output: &'a mut OutputSinkMut<'_>) -> ColumnSinkMut<'a> {
-    match output {
-        OutputSinkMut::U8(v) => ColumnSinkMut::U8(v.view_mut()),
-        OutputSinkMut::U16(v) => ColumnSinkMut::U16(v.view_mut()),
-        OutputSinkMut::U32(v) => ColumnSinkMut::U32(v.view_mut()),
-        OutputSinkMut::U64(v) => ColumnSinkMut::U64(v.view_mut()),
-        OutputSinkMut::I8(v) => ColumnSinkMut::I8(v.view_mut()),
-        OutputSinkMut::I16(v) => ColumnSinkMut::I16(v.view_mut()),
-        OutputSinkMut::I32(v) => ColumnSinkMut::I32(v.view_mut()),
-        OutputSinkMut::I64(v) => ColumnSinkMut::I64(v.view_mut()),
-        OutputSinkMut::F32(v) => ColumnSinkMut::F32(v.view_mut()),
-        OutputSinkMut::F64(v) => ColumnSinkMut::F64(v.view_mut()),
-        OutputSinkMut::Bool(v) => ColumnSinkMut::Bool(v.view_mut()),
-    }
-}
-
 impl ValueReader for BedMultiReader {
     fn contigs(&self) -> &Reference {
         &self.shared.genome
@@ -582,8 +562,7 @@ impl ValueReader for BedMultiReader {
             });
         }
         let Self { shared, bgzf } = self;
-        let mut sinks: Vec<ColumnSinkMut<'_>> = outputs.iter_mut().map(column_sink).collect();
-        scatter_region(shared, bgzf, contig, start, end, &mut sinks)
+        scatter_region(shared, bgzf, contig, start, end, outputs)
     }
 
     fn fork(&self) -> IoResult<Self> {

@@ -1,34 +1,13 @@
-//! `ColumnSinkMut`: a borrowing, dtype-tagged view whose [`fill_run`] parses
-//! raw text cells into the sink's dtype, so text readers (BED) stay
-//! dtype-blind.
-//!
-//! [`fill_run`]: ColumnSinkMut::fill_run
+//! Text cell parsing for [`OutputSinkMut::fill_run`], so text readers (BED)
+//! stay dtype-blind.
 
 use std::fmt::Display;
 
-use ndarray::ArrayViewMut1;
-
 use crate::io::Dtype;
 use crate::io::error::{ReaderError, Result};
+use crate::io::reader::OutputSinkMut;
 
-/// A borrowing, dtype-tagged view a reader fills. The reader hands raw cells to
-/// `fill_run`; the parse into the concrete dtype happens here, so the reader
-/// stays dtype-blind.
-pub enum ColumnSinkMut<'a> {
-    U8(ArrayViewMut1<'a, u8>),
-    U16(ArrayViewMut1<'a, u16>),
-    U32(ArrayViewMut1<'a, u32>),
-    U64(ArrayViewMut1<'a, u64>),
-    I8(ArrayViewMut1<'a, i8>),
-    I16(ArrayViewMut1<'a, i16>),
-    I32(ArrayViewMut1<'a, i32>),
-    I64(ArrayViewMut1<'a, i64>),
-    F32(ArrayViewMut1<'a, f32>),
-    F64(ArrayViewMut1<'a, f64>),
-    Bool(ArrayViewMut1<'a, bool>),
-}
-
-impl ColumnSinkMut<'_> {
+impl OutputSinkMut<'_> {
     /// Parse `cell` into this sink's dtype and write it across `[lo, hi)`.
     pub fn fill_run(&mut self, lo: usize, hi: usize, cell: &str) -> Result<()> {
         macro_rules! fill_parsed {
@@ -38,17 +17,17 @@ impl ColumnSinkMut<'_> {
             };
         }
         match self {
-            ColumnSinkMut::U8(v) => fill_parsed!(v, U8),
-            ColumnSinkMut::U16(v) => fill_parsed!(v, U16),
-            ColumnSinkMut::U32(v) => fill_parsed!(v, U32),
-            ColumnSinkMut::U64(v) => fill_parsed!(v, U64),
-            ColumnSinkMut::I8(v) => fill_parsed!(v, I8),
-            ColumnSinkMut::I16(v) => fill_parsed!(v, I16),
-            ColumnSinkMut::I32(v) => fill_parsed!(v, I32),
-            ColumnSinkMut::I64(v) => fill_parsed!(v, I64),
-            ColumnSinkMut::F32(v) => fill_parsed!(v, F32),
-            ColumnSinkMut::F64(v) => fill_parsed!(v, F64),
-            ColumnSinkMut::Bool(v) => {
+            OutputSinkMut::U8(v) => fill_parsed!(v, U8),
+            OutputSinkMut::U16(v) => fill_parsed!(v, U16),
+            OutputSinkMut::U32(v) => fill_parsed!(v, U32),
+            OutputSinkMut::U64(v) => fill_parsed!(v, U64),
+            OutputSinkMut::I8(v) => fill_parsed!(v, I8),
+            OutputSinkMut::I16(v) => fill_parsed!(v, I16),
+            OutputSinkMut::I32(v) => fill_parsed!(v, I32),
+            OutputSinkMut::I64(v) => fill_parsed!(v, I64),
+            OutputSinkMut::F32(v) => fill_parsed!(v, F32),
+            OutputSinkMut::F64(v) => fill_parsed!(v, F64),
+            OutputSinkMut::Bool(v) => {
                 let x = parse_bool(cell).ok_or_else(|| {
                     ReaderError::Other(anyhow::anyhow!(
                         "parse {cell:?} as bool (want 0/1/true/false)"
@@ -87,7 +66,7 @@ mod tests {
     #[test]
     fn fill_run_writes_parsed_values_over_subrange() {
         let mut buf = Array1::<i32>::zeros(10);
-        ColumnSinkMut::I32(buf.slice_mut(ndarray::s![2..6]))
+        OutputSinkMut::I32(buf.slice_mut(ndarray::s![2..6]))
             .fill_run(0, 4, "42")
             .unwrap();
         assert_eq!(buf[1], 0);
@@ -98,7 +77,7 @@ mod tests {
     #[test]
     fn f32_parse_error_is_reported() {
         let mut buf = Array1::<f32>::zeros(3);
-        let mut s = ColumnSinkMut::F32(buf.view_mut());
+        let mut s = OutputSinkMut::F32(buf.view_mut());
         assert!(s.fill_run(0, 3, "notanumber").is_err());
     }
 
@@ -107,7 +86,7 @@ mod tests {
         macro_rules! check_parse {
             ($variant:ident, $ty:ty, $cell:expr, $expected:expr) => {{
                 let mut buf = Array1::<$ty>::from_elem(1, <$ty>::default());
-                ColumnSinkMut::$variant(buf.view_mut())
+                OutputSinkMut::$variant(buf.view_mut())
                     .fill_run(0, 1, $cell)
                     .unwrap();
                 assert_eq!(buf[0], $expected);

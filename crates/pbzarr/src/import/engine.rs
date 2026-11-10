@@ -380,8 +380,9 @@ struct ContigWindow<'g> {
 
 fn contig_windows(reference: &Reference, start: u64, end: u64) -> Vec<ContigWindow<'_>> {
     let offsets = reference.offsets();
+    let first = offsets.partition_point(|&o| o <= start).saturating_sub(1);
     let mut windows = Vec::new();
-    for (i, contig) in reference.contigs().iter().enumerate() {
+    for (i, contig) in reference.contigs().iter().enumerate().skip(first) {
         let c_start = offsets[i];
         if c_start >= end {
             break;

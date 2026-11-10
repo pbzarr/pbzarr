@@ -40,8 +40,7 @@ pub fn from_bigwig<'t>(
         .iter()
         .map(|s| {
             debug!("opening bigWig source {}", s.path.display());
-            BigWigReader::open(&s.path)
-                .map_err(|e| PbzError::Store(format!("open {}: {e}", s.path.display())))
+            BigWigReader::open(&s.path).map_err(|e| PbzError::Store(e.to_string()))
         })
         .collect::<Result<_>>()?;
 

@@ -265,7 +265,7 @@ impl GenomicAxis {
         if width.is_empty() || width.starts_with('0') || !width.bytes().all(|b| b.is_ascii_digit())
         {
             return Err(PbzError::Metadata(format!(
-                "G1: noncanonical genomic dimension {name}"
+                "noncanonical genomic dimension {name}"
             )));
         }
         let bound = i64::MAX.to_string();

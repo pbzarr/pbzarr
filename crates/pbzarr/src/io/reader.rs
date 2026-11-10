@@ -44,14 +44,10 @@ impl OutputSchema {
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
     }
-
-    pub fn dtypes(&self) -> Vec<Dtype> {
-        self.fields.iter().map(|f| f.dtype).collect()
-    }
 }
 
 macro_rules! output_sink {
-    ($( $variant:ident => $ty:ty, $as_mut:ident );* $(;)?) => {
+    ($( $variant:ident => $ty:ty $(, $as_mut:ident)? );* $(;)?) => {
         /// A borrowing, dtype-tagged mutable view a reader fills.
         pub enum OutputSinkMut<'a> {
             $( $variant(ArrayViewMut1<'a, $ty>), )*
@@ -74,7 +70,7 @@ macro_rules! output_sink {
                 self.len() == 0
             }
 
-            $(
+            $($(
                 /// `SchemaMismatch` when the sink holds a different dtype.
                 pub fn $as_mut(&mut self) -> Result<&mut ArrayViewMut1<'a, $ty>, ReaderError> {
                     match self {
@@ -88,22 +84,22 @@ macro_rules! output_sink {
                         }),
                     }
                 }
-            )*
+            )?)*
         }
     };
 }
 
 output_sink! {
-    U8 => u8, as_u8_mut;
-    U16 => u16, as_u16_mut;
+    U8 => u8;
+    U16 => u16;
     U32 => u32, as_u32_mut;
-    U64 => u64, as_u64_mut;
-    I8 => i8, as_i8_mut;
-    I16 => i16, as_i16_mut;
+    U64 => u64;
+    I8 => i8;
+    I16 => i16;
     I32 => i32, as_i32_mut;
-    I64 => i64, as_i64_mut;
+    I64 => i64;
     F32 => f32, as_f32_mut;
-    F64 => f64, as_f64_mut;
+    F64 => f64;
     Bool => bool, as_bool_mut;
 }
 
