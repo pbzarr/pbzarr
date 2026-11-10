@@ -85,7 +85,7 @@ fn pipeline_writes_constants_into_cohort_track() {
         .run()
         .unwrap();
     assert!(report.bytes_written > 0);
-    assert_eq!(report.contigs_written, 2);
+    assert_eq!(report.positions, 6_500);
 
     for (name, len) in [("chr1", 5_000usize), ("chr2", 1_500)] {
         let region = Region {
@@ -142,7 +142,7 @@ fn cohort_pipeline_tiles_columns_with_multiple_workers() {
         .run()
         .unwrap();
 
-    assert_eq!(report.tasks_completed, 4);
+    assert_eq!(report.chunks_written, 4);
     let region = Region {
         contig: genome.id("chr1").unwrap(),
         start: 0,

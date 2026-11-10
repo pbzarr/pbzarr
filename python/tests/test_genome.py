@@ -84,7 +84,7 @@ def test_region_of_a_data_array(store: Path) -> None:
     np.testing.assert_array_equal(locus.values, VALUES[7:10])
     np.testing.assert_array_equal(locus["pos"].values, [1, 2, 3])
     assert list(locus["position"].values) == ["chr2:1", "chr2:2", "chr2:3"]
-    assert (locus.region_contig.item(), locus.region_start.item(), locus.region_stop.item()) == (
+    assert (locus.region_contig.item(), locus.region_start.item(), locus.region_end.item()) == (
         "chr2", 1, 4,
     )
     assert Reference.from_xarray(locus).lengths.tolist() == [6, 4]

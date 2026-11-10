@@ -26,7 +26,7 @@ def test_create_opens_an_empty_store_and_refuses_an_existing_destination(tmp_pat
         pbzarr.create(destination, reference={"chr1": 1000})
 
 
-def test_import_d4_one_labeled_source_with_column_dim_is_two_dimensional(
+def test_import_d4_one_labeled_source_with_dim_is_two_dimensional(
     tmp_path, d4_fixture
 ):
     destination = tmp_path / "d4.pbz"
@@ -39,9 +39,9 @@ def test_import_d4_one_labeled_source_with_column_dim_is_two_dimensional(
         destination,
         "depth",
         (d4_fixture, "depth-a"),
-        column_dim="replicate",
+        dim="replicate",
     )
-    assert report["contigs_written"] == 1
+    assert report["positions"] == 1000
 
     with pbzarr.open(destination, chunks=None) as dataset:
         assert dataset["depth"].dims == ("position", "replicate")
@@ -61,7 +61,7 @@ def test_import_d4_cohort_opens_as_one_xarray_dataset(tmp_path, cohort_fixtures)
         "depth",
         list(zip(cohort_fixtures, ["s0", "s1"])),
     )
-    assert report["contigs_written"] == 1
+    assert report["positions"] == 10_000
 
     with xr.open_zarr(destination, consolidated=False) as dataset:
         assert set(dataset.data_vars) == {"depth"}
@@ -83,8 +83,8 @@ def test_import_bigwig_path_list_defaults_to_sample_axis(tmp_path, write_bigwig)
     destination = tmp_path / "bigwig.pbz"
     _create(destination, reference={"chr1": 20})
 
-    report = pbzarr.import_bigwig(destination, "signal", [first, second])
-    assert report["contigs_written"] == 1
+    report = pbzarr.import_bigwig(destination, "signal", [first, second], threads=2)
+    assert report["positions"] == 20
 
     with pbzarr.open(destination, chunks=None) as dataset:
         assert dataset["signal"].dims == ("position", "sample")
@@ -111,7 +111,7 @@ def test_import_bed_single_column_is_scalar(tmp_path):
         column="coverage",
         dtype="int32",
     )
-    assert report["contigs_written"] == 1
+    assert report["positions"] == 20
 
     with pbzarr.open(destination, chunks=None) as dataset:
         assert dataset["depth"].dims == ("position",)
@@ -139,7 +139,7 @@ def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
         genome=genome,
         schema={"coverage": "int32", "score": None, "is_max": None},
     )
-    assert report["contigs_written"] == 1
+    assert report["positions"] == 20
 
     with pbzarr.open(destination, chunks=None) as dataset:
         assert set(dataset.data_vars) == {"coverage", "score", "is_max"}
@@ -166,7 +166,7 @@ def test_import_bed_wide_form_gathers_fields_into_one_track(tmp_path):
         bed,
         genome=genome,
         track="stats",
-        column_dim="metric",
+        dim="metric",
     )
 
     with pbzarr.open(destination, chunks=None) as dataset:
@@ -197,7 +197,7 @@ def test_import_bed_multi_source_matrix(tmp_path):
         destination,
         [(first, "tumor"), (second, "normal")],
         genome=genome,
-        column_dim="sample",
+        dim="sample",
     )
 
     with pbzarr.open(destination, chunks=None) as dataset:

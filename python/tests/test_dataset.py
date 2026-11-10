@@ -32,7 +32,7 @@ def cohort(tmp_path: Path, cohort_fixtures: list[Path]) -> Path:
         path,
         "depth",
         [(cohort_fixtures[0], "s0"), (cohort_fixtures[1], "s1")],
-        column_dim="sample",
+        dim="sample",
         chunk_size=1000,
         column_chunk_size=1,
         shard_size=4000,

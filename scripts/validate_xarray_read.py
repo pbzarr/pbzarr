@@ -27,7 +27,7 @@ def main() -> int:
         out = Path(tmp) / "cohort.pbz"
         pbzarr.create(out, reference={"chr1": 10_000}).close()
         pbzarr.import_d4(
-            out, "depth", [(COHORT[0], "s0"), (COHORT[1], "s1")], column_dim="sample"
+            out, "depth", [(COHORT[0], "s0"), (COHORT[1], "s1")], dim="sample"
         )
 
         released = xr.open_zarr(out, consolidated=False)

@@ -31,7 +31,7 @@ fn import_args(
         genome.as_os_str().to_owned(),
         "--schema".into(),
         schema.as_os_str().to_owned(),
-        "--column-dim".into(),
+        "--dim".into(),
         column_dim.into(),
         "--infer-rows".into(),
         "all".into(),
@@ -389,6 +389,6 @@ fn schema_help_describes_unique_and_grouped_target_tracks() {
         help.contains("BED column, target track, inferred dtype"),
         "{help}"
     );
-    assert!(help.contains("-c metric --schema schema.tsv"), "{help}");
+    assert!(help.contains("--dim metric --schema schema.tsv"), "{help}");
     assert!(!help.contains("own scalar track"), "{help}");
 }

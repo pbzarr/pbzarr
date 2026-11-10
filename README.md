@@ -48,7 +48,7 @@ pbzarr.import_d4(
     "depth.pbz",
     "depth",
     [("brain.d4", "brain"), ("liver.d4", "liver")],
-    column_dim="sample",
+    dim="sample",
 )
 ```
 
@@ -127,7 +127,7 @@ The import reads chromosome lengths from the bigWig header and stores values as 
 Import several files as labeled columns:
 
 ```sh
-pbz import bigwig -o cohort.pbz --track signal -c sample brain.bw:brain liver.bw:liver
+pbz import bigwig -o cohort.pbz --track signal --dim sample brain.bw:brain liver.bw:liver
 ```
 
 All sources must describe the same genome. Without explicit labels, the import uses each file's stem as its column label.

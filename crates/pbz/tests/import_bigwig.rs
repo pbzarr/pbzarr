@@ -124,7 +124,7 @@ fn labeled_cohorts_accept_positional_sources_and_a_manifest() {
             args.extend([
                 "--file-list".into(),
                 manifest.as_os_str().to_owned(),
-                "--column-dim".into(),
+                "--dim".into(),
                 "context".into(),
                 "--chunk-size".into(),
                 "4".into(),

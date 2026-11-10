@@ -45,7 +45,7 @@ _PACKED_REDUCERS = frozenset(
 _PACKED_REGION_COORDS = (
     "region_contig",
     "region_start",
-    "region_stop",
+    "region_end",
     "region_input_index",
     "region_storage_index",
 )
@@ -183,7 +183,7 @@ def _validate_packed_dataset(ds: xr.Dataset) -> np.ndarray:
 
     integer_coordinates = (
         "region_start",
-        "region_stop",
+        "region_end",
         "region_input_index",
         "region_storage_index",
     )
@@ -197,7 +197,7 @@ def _validate_packed_dataset(ds: xr.Dataset) -> np.ndarray:
         normalized[name] = data.astype(np.int64, copy=False)
 
     starts = normalized["region_start"]
-    stops = normalized["region_stop"]
+    stops = normalized["region_end"]
     if np.any(stops <= starts):
         raise ValueError("packed regions must have positive lengths")
     if not np.array_equal(stops - starts, np.diff(offsets)):
@@ -1022,7 +1022,7 @@ def regions_dataset(
             "offsets": ("region_boundary", layout.packed_offsets),
             "region_contig": ("region", contigs[layout.contig_ids]),
             "region_start": ("region", layout.starts),
-            "region_stop": ("region", layout.stops),
+            "region_end": ("region", layout.stops),
             "region_input_index": ("region", layout.input_index),
             "region_storage_index": (
                 "region",
@@ -1245,7 +1245,7 @@ def _normalize_one(query) -> RegionQuery:
     else:
         raise TypeError(
             "region query must be a RegionQuery, string, or "
-            "(contig, start, stop) tuple"
+            "(contig, start, end) tuple"
         )
 
     if not isinstance(normalized.contig, str) or not normalized.contig:
@@ -1253,7 +1253,7 @@ def _normalize_one(query) -> RegionQuery:
     return RegionQuery(
         normalized.contig,
         _normalize_coordinate(normalized.start, "start"),
-        _normalize_coordinate(normalized.stop, "stop"),
+        _normalize_coordinate(normalized.end, "end"),
     )
 
 
@@ -1300,7 +1300,7 @@ def _resolve_regions(ds: xr.Dataset, reference, intervals) -> RegionLayout:
         return _build_region_layout(
             np.asarray([int(contig_id[0])], dtype=np.int64),
             np.asarray([resolved.start], dtype=np.int64),
-            np.asarray([resolved.stop], dtype=np.int64),
+            np.asarray([resolved.end], dtype=np.int64),
             np.asarray([flat_slice.start], dtype=np.int64),
             np.asarray([flat_slice.stop], dtype=np.int64),
             np.asarray([0], dtype=np.int64),
@@ -1322,9 +1322,9 @@ def _resolve_regions(ds: xr.Dataset, reference, intervals) -> RegionLayout:
     if np.any(starts < 0):
         raise ValueError("region start must be nonnegative")
     if np.any(stops <= starts):
-        raise ValueError("region must be nonempty with start less than stop")
+        raise ValueError("region must be nonempty with start less than end")
     if np.any(stops > contig_lengths):
-        raise ValueError("region stop exceeds contig length")
+        raise ValueError("region end exceeds contig length")
 
     input_index = np.arange(contig_ids.size, dtype=np.int64)
     order = np.lexsort((input_index, starts, contig_ids))
@@ -1370,7 +1370,7 @@ def _query_columns(intervals, reference):
     return (
         np.asarray([r.contig for r in resolved], dtype=object),
         np.asarray([r.start for r in resolved], dtype=np.int64),
-        np.asarray([r.stop for r in resolved], dtype=np.int64),
+        np.asarray([r.end for r in resolved], dtype=np.int64),
     )
 
 
@@ -1380,12 +1380,12 @@ def _dataframe_columns(intervals):
     names = list(intervals.columns)
     contig_names = [name for name in names if name in {"contig", "chrom", "#chrom"}]
     start_names = [name for name in names if name == "start"]
-    stop_names = [name for name in names if name in {"stop", "end"}]
-    if len(contig_names) != 1 or len(start_names) != 1 or len(stop_names) != 1:
-        raise ValueError("region columns require one contig, start, and stop/end alias")
+    end_names = [name for name in names if name == "end"]
+    if len(contig_names) != 1 or len(start_names) != 1 or len(end_names) != 1:
+        raise ValueError("region columns require one contig, start, and end column")
     return tuple(
         _as_array(intervals[name])
-        for name in (contig_names[0], start_names[0], stop_names[0])
+        for name in (contig_names[0], start_names[0], end_names[0])
     )
 
 
@@ -1409,7 +1409,7 @@ def _row_columns(intervals):
     try:
         contigs, starts, stops = zip(*rows, strict=True)
     except (TypeError, ValueError) as error:
-        raise TypeError("each region row must have contig, start, and stop") from error
+        raise TypeError("each region row must have contig, start, and end") from error
     return np.asarray(contigs), np.asarray(starts), np.asarray(stops)
 
 
@@ -1421,7 +1421,7 @@ def _as_array(column) -> np.ndarray:
 def _validate_columns(contigs, starts, stops) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     contigs = np.asarray(contigs)
     starts = _integer_column(starts, "start")
-    stops = _integer_column(stops, "stop")
+    stops = _integer_column(stops, "end")
     if contigs.ndim != 1:
         raise ValueError("region contig column must be one-dimensional")
     if contigs.size != starts.size or starts.size != stops.size:

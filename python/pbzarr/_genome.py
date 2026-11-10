@@ -62,7 +62,7 @@ def region(
     Every genomic dimension present (``position`` and each ``bin_N``) is
     sliced to the locus, and variables with no genomic dimension pass through.
     The view carries the 0-d coordinates ``region_contig``, ``region_start``
-    and ``region_stop``. With ``position``, it also carries a numeric ``pos``
+    and ``region_end``. With ``position``, it also carries a numeric ``pos``
     coordinate and ``"contig:pos"`` labels as the ``position`` coordinate.
     Positions are 0-based and contig-local, like ``region_start``.
     """
@@ -78,11 +78,11 @@ def region(
     coords = {
         "region_contig": ((), np.array(locus.contig, dtype=object)),
         "region_start": ((), locus.start),
-        "region_stop": ((), locus.stop),
+        "region_end": ((), locus.end),
     }
     view = view.drop_vars(_coord.NAME, errors="ignore").assign_coords(coords)
     if "position" in view.dims:
-        view = view.assign_coords(locus_coords(locus.contig, locus.start, locus.stop))
+        view = view.assign_coords(locus_coords(locus.contig, locus.start, locus.end))
     return _coord.attach(view, ref)
 
 

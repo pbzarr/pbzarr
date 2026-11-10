@@ -158,7 +158,7 @@ struct AppendTarget {
 
 #[derive(Debug, Args)]
 struct AppendOptions {
-    /// Number of append workers.
+    /// Worker threads for the append.
     #[arg(short = 't', long, default_value_t = 4)]
     threads: usize,
     /// Position chunks each reader decodes per read pass. Default: auto.
@@ -214,7 +214,7 @@ struct AppendBigWigArgs {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz append bam -o depth.pbz --track depth s3.bam\n  pbz append bam -o comp.pbz --track depth --mode composition --reference ref.fa s3.cram"
+    after_help = "Examples:\n  pbz append bam -o depth.pbz --track depth s3.bam\n  pbz append bam -o comp.pbz --track depth --mode composition --fasta ref.fa s3.cram"
 )]
 struct AppendBamArgs {
     #[command(flatten)]
@@ -262,7 +262,7 @@ enum ImportCommand {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth -c sample s1.bed.gz s2.bed.gz\n  pbz import bed -o mask.pbz --genome genome.fai --track callable regions.bed.gz\n  pbz import bed -o stats.pbz --genome genome.fai -c metric --schema schema.tsv wide.bed.gz\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth -c sample --codecs '[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},{\"name\":\"zstd\",\"configuration\":{\"level\":3,\"checksum\":false}}]' s1.bed.gz s2.bed.gz"
+    after_help = "Examples:\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth --dim sample s1.bed.gz s2.bed.gz\n  pbz import bed -o mask.pbz --genome genome.fai --track callable regions.bed.gz\n  pbz import bed -o stats.pbz --genome genome.fai --dim metric --schema schema.tsv wide.bed.gz\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth --dim sample --codecs '[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},{\"name\":\"zstd\",\"configuration\":{\"level\":3,\"checksum\":false}}]' s1.bed.gz s2.bed.gz"
 )]
 struct BedArgs {
     #[command(flatten)]
@@ -318,7 +318,7 @@ fn init_logging(global: &GlobalOptions) {
 
 #[derive(Debug, Args)]
 struct ImportOptions {
-    /// Number of import workers.
+    /// Worker threads for the import.
     #[arg(short = 't', long, default_value_t = 4)]
     threads: usize,
     /// Position chunks each reader decodes per read pass. Default: auto
@@ -337,10 +337,13 @@ struct ImportOptions {
     /// Column shard size for multi-source imports.
     #[arg(long)]
     shard_column_size: Option<usize>,
-    /// Name for the column dimension of a 2D track (required whenever the
-    /// output is 2D: several sources, or several BED columns in one track).
-    #[arg(short = 'c', long)]
-    column_dim: Option<String>,
+    /// Name of the second dimension of a 2D track. A single source with
+    /// --dim still makes a 2D track. Default: `sample` for several d4,
+    /// bigWig or BAM sources. BED import has no default: it needs --dim
+    /// whenever the output is 2D (several sources, or several BED columns in
+    /// one track).
+    #[arg(short = 'c', long, value_name = "NAME")]
+    dim: Option<String>,
     /// Zarr v3 codec metadata for created `values` arrays: a `codecs` JSON
     /// array, or a `{"chunk_grid": ..., "codecs": [...]}` fragment. Pass
     /// `@path` to read the JSON from a file. Replaces the default
@@ -369,7 +372,7 @@ impl ImportOptions {
             column_chunk_size: self.column_chunk_size,
             shard_size: self.shard_size,
             shard_column_size: self.shard_column_size,
-            column_dim: self.column_dim.clone(),
+            column_dim: self.dim.clone(),
             codecs: self.parse_codecs()?,
             progress: (!self.no_progress).then(|| make_sink(label)),
         })
@@ -536,7 +539,7 @@ struct BedOptions {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bam -o depth.pbz --track depth s1.bam s2.bam\n  pbz import bam -o comp.pbz --track depth --mode composition --reference ref.fa sample.cram"
+    after_help = "Examples:\n  pbz import bam -o depth.pbz --track depth s1.bam s2.bam\n  pbz import bam -o comp.pbz --track depth --mode composition --fasta ref.fa sample.cram"
 )]
 struct BamArgs {
     #[command(flatten)]
@@ -569,9 +572,9 @@ struct BamDecodeOptions {
     /// emitting `{track}_{field}` for a, c, g, t, n, ins, del, ref_skip.
     #[arg(long, value_enum, default_value_t = ImportModeArg::Depth)]
     mode: ImportModeArg,
-    /// Reference FASTA for CRAM sources (ignored for BAM).
-    #[arg(long)]
-    reference: Option<PathBuf>,
+    /// FASTA for CRAM sources (ignored for BAM).
+    #[arg(long, value_name = "FASTA")]
+    fasta: Option<PathBuf>,
     /// Minimum mapping quality for a read to count.
     #[arg(long, default_value_t = 0)]
     min_mapq: u8,
@@ -637,7 +640,7 @@ struct D4Options {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bigwig -o signal.pbz --track signal sample.bw\n  pbz import bigwig -o cohort.pbz --track signal -c sample brain.bw:brain liver.bw:liver"
+    after_help = "Examples:\n  pbz import bigwig -o signal.pbz --track signal sample.bw\n  pbz import bigwig -o cohort.pbz --track signal --dim sample brain.bw:brain liver.bw:liver"
 )]
 struct BigWigArgs {
     #[command(flatten)]
@@ -859,13 +862,8 @@ fn import_bam(args: BamArgs) -> Result<()> {
     let output = args.bam.output;
     let mut destination = open_or_create(&output, || {
         let source = &sources[0];
-        let reader = BamReader::open(
-            &source.path,
-            args.bam.decode.reference.as_deref(),
-            mode,
-            filter,
-        )
-        .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
+        let reader = BamReader::open(&source.path, args.bam.decode.fasta.as_deref(), mode, filter)
+            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
         Ok(reader.contigs().contigs().to_vec())
     })?;
 
@@ -875,21 +873,12 @@ fn import_bam(args: BamArgs) -> Result<()> {
         &sources,
         mode,
         filter,
-        args.bam.decode.reference,
+        args.bam.decode.fasta,
         config,
     )
     .context("import BAM/CRAM")?;
 
-    debug!(
-        "bam import wrote {} bytes across {} contig(s)",
-        report.bytes_written, report.contigs_written
-    );
-    println!(
-        "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
-        output.display(),
-        report.tasks_completed,
-        report.tasks_skipped
-    );
+    print_report("imported", n_sources, &output, &report);
     Ok(())
 }
 
@@ -921,16 +910,7 @@ fn import_d4(args: D4Args) -> Result<()> {
     let report =
         from_d4(destination.target(), &args.d4.track, &sources, config).context("import d4")?;
 
-    debug!(
-        "d4 import wrote {} bytes across {} contig(s)",
-        report.bytes_written, report.contigs_written
-    );
-    println!(
-        "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
-        output.display(),
-        report.tasks_completed,
-        report.tasks_skipped
-    );
+    print_report("imported", n_sources, &output, &report);
     Ok(())
 }
 
@@ -962,16 +942,7 @@ fn import_bigwig(args: BigWigArgs) -> Result<()> {
     let report = from_bigwig(destination.target(), &args.bigwig.track, &sources, config)
         .context("import bigWig")?;
 
-    debug!(
-        "bigWig import wrote {} bytes across {} contig(s)",
-        report.bytes_written, report.contigs_written
-    );
-    println!(
-        "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
-        output.display(),
-        report.tasks_completed,
-        report.tasks_skipped
-    );
+    print_report("imported", n_sources, &output, &report);
     Ok(())
 }
 
@@ -1022,15 +993,20 @@ fn open_append(path: &Path, track: &str) -> Result<(Dataset, String)> {
 }
 
 fn report_append(target: &AppendTarget, sources: usize, report: &pbzarr::import::Report) {
+    print_report("appended", sources, &target.output, report);
+}
+
+fn print_report(verb: &str, sources: usize, path: &Path, report: &pbzarr::import::Report) {
     debug!(
-        "append wrote {} bytes across {} contig(s)",
-        report.bytes_written, report.contigs_written
+        "wrote {} bytes in {:.1}s",
+        report.bytes_written, report.wall_seconds
     );
     println!(
-        "appended {sources} sources -> {} ({} tasks, {} skipped)",
-        target.output.display(),
-        report.tasks_completed,
-        report.tasks_skipped
+        "{verb} {sources} sources -> {} ({} positions, {} chunks written, {} skipped)",
+        path.display(),
+        report.positions,
+        report.chunks_written,
+        report.chunks_skipped
     );
 }
 
@@ -1092,7 +1068,7 @@ fn append_bam(args: AppendBamArgs) -> Result<()> {
         &sources,
         mode,
         filter,
-        args.decode.reference,
+        args.decode.fasta,
         config,
     )
     .context("append BAM/CRAM")?;
@@ -1355,5 +1331,20 @@ mod tests {
         }
         let err = Cli::try_parse_from(["pbz", "scale", "-z", "s.pbz", "-t", "depth"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn dim_and_fasta_replace_the_old_flags() {
+        let bam = |flags: &[&str]| {
+            let mut args = vec!["pbz", "import", "bam", "-o", "out.pbz", "--track", "depth"];
+            args.extend_from_slice(flags);
+            args.push("in.cram");
+            Cli::try_parse_from(args)
+        };
+        assert!(bam(&["--dim", "sample", "--fasta", "ref.fa", "--threads", "2"]).is_ok());
+        for flag in [&["--column-dim", "sample"][..], &["--reference", "ref.fa"]] {
+            let err = bam(flag).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
     }
 }

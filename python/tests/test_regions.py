@@ -166,6 +166,19 @@ def test_resolve_regions_rejects_out_of_range_and_overlapping_intervals(interval
         _resolve_regions(_track_dataset(), REFERENCE, intervals)
 
 
+def test_resolve_regions_refuses_a_stop_column():
+    frame = _Frame(
+        ["chrom", "start", "stop"],
+        {
+            "chrom": _Columns(["chr1"]),
+            "start": _Columns([0]),
+            "stop": _Columns([2]),
+        },
+    )
+    with pytest.raises(ValueError, match="end column"):
+        _resolve_regions(_track_dataset(), REFERENCE, frame)
+
+
 def test_resolve_regions_allows_adjacent_unsorted_intervals():
     layout = _resolve_regions(
         _track_dataset(),
@@ -226,7 +239,7 @@ def test_single_region_is_lazy_and_reads_only_intersecting_chunks():
     assert result["depth"].dtype == expected.dtype
     assert result["region_contig"].values.tolist() == ["chr2"]
     assert result["region_start"].values.tolist() == [1]
-    assert result["region_stop"].values.tolist() == [5]
+    assert result["region_end"].values.tolist() == [5]
     assert not _value_reads(store)
 
     np.testing.assert_array_equal(result["depth"].compute(), expected[5:9])
@@ -260,7 +273,7 @@ def test_regions_returns_stable_packed_dataset_without_indexes(intervals):
     np.testing.assert_array_equal(result["offsets"], [0, 2, 5])
     np.testing.assert_array_equal(result["region_contig"], ["chr1", "chr2"])
     np.testing.assert_array_equal(result["region_start"], [1, 1])
-    np.testing.assert_array_equal(result["region_stop"], [3, 4])
+    np.testing.assert_array_equal(result["region_end"], [3, 4])
     np.testing.assert_array_equal(result["region_input_index"], [1, 0])
     np.testing.assert_array_equal(result["region_storage_index"], [0, 1])
     assert not _value_reads(store)

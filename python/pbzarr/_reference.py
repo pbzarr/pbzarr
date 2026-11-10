@@ -98,35 +98,35 @@ class Reference(Mapping[str, int]):
         return int(self._axis_offsets(dim)[1][-1])
 
     def resolve(self, query) -> RegionQuery:
-        """One region with contig-local ``start`` and ``stop`` filled in.
+        """One region with contig-local ``start`` and ``end`` filled in.
 
         ``query`` takes the forms of ``rows``. An open start is 0 and an open
-        stop is the contig end. Empty and out-of-range regions are refused.
+        end is the contig end. Empty and out-of-range regions are refused.
         """
         region = _query(query)
         if region.contig not in self._index:
             raise KeyError(f"unknown contig {region.contig!r}")
         length = int(self._lengths[self._index[region.contig]])
         start = 0 if region.start is None else region.start
-        stop = length if region.stop is None else region.stop
-        if start < 0 or start >= stop or stop > length:
+        end = length if region.end is None else region.end
+        if start < 0 or start >= end or end > length:
             raise ValueError(
-                f"{region.contig}:[{start},{stop}) is empty or outside length {length}"
+                f"{region.contig}:[{start},{end}) is empty or outside length {length}"
             )
-        return RegionQuery(region.contig, start, stop)
+        return RegionQuery(region.contig, start, end)
 
     def rows(self, query, dim: str = "position") -> slice:
         """Flat rows of ``dim`` covering one region.
 
         ``query`` is ``"chr1"``, ``"chr1:1000"`` (to the contig end),
-        ``"chr1:1000-2000"``, a ``RegionQuery`` or a ``(contig, start, stop)``
+        ``"chr1:1000-2000"``, a ``RegionQuery`` or a ``(contig, start, end)``
         tuple. On ``bin_N`` the rows are the bins that intersect the region.
         Empty and out-of-range regions are refused.
         """
         region = self.resolve(query)
         width, offsets = self._axis_offsets(dim)
         base = int(offsets[self._index[region.contig]])
-        return slice(base + region.start // width, base + -(-region.stop // width))
+        return slice(base + region.start // width, base + -(-region.end // width))
 
     def interval(self, row: int, dim: str = "position") -> RegionQuery:
         """The contig-local interval one row of ``dim`` covers."""
@@ -138,8 +138,8 @@ class Reference(Mapping[str, int]):
             raise ValueError(f"row {row} is outside {dim}")
         index = int(np.searchsorted(offsets, row, side="right")) - 1
         start = (row - int(offsets[index])) * width
-        stop = min(start + width, int(self._lengths[index]))
-        return RegionQuery(self._names[index], start, stop)
+        end = min(start + width, int(self._lengths[index]))
+        return RegionQuery(self._names[index], start, end)
 
     def __getitem__(self, name: str) -> int:
         return int(self._lengths[self._index[name]])
@@ -165,10 +165,10 @@ def _query(query) -> RegionQuery:
         region = RegionQuery(*query)
     else:
         raise TypeError(
-            "region must be a string, RegionQuery, or (contig, start, stop) tuple"
+            "region must be a string, RegionQuery, or (contig, start, end) tuple"
         )
     bounds = []
-    for name in ("start", "stop"):
+    for name in ("start", "end"):
         value = getattr(region, name)
         if value is not None and (
             isinstance(value, (bool, np.bool_))

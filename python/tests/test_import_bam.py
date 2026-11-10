@@ -50,11 +50,18 @@ def test_import_bam_depth_single_source_matches_hand_computed_vector(tmp_path):
     pbzarr.create(destination, reference={contig: length}).close()
 
     report = pbzarr.import_bam(destination, "depth", bam, mode="depth")
-    assert report["contigs_written"] == 1
-    # length=50 is one write-unit under the default 1,000,000-position chunk
-    # size, and the reads give it data, so exactly one task runs, none skipped.
-    assert report["tasks_completed"] == 1
-    assert report["tasks_skipped"] == 0
+    assert set(report) == {
+        "positions",
+        "chunks_written",
+        "chunks_skipped",
+        "bytes_written",
+        "wall_seconds",
+    }
+    assert report["positions"] == length
+    # length=50 is one chunk under the default 1,000,000-position chunk
+    # size, and the reads give it data, so one chunk is written, none skipped.
+    assert report["chunks_written"] == 1
+    assert report["chunks_skipped"] == 0
     assert report["bytes_written"] > 0
 
     with pbzarr.open(destination, chunks=None) as dataset:

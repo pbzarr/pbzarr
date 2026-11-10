@@ -110,27 +110,13 @@ impl Config {
 
 /// Summary of a finished import.
 pub struct Report {
-    pub contigs_written: usize,
-    /// Pieces dispatched: decode spans times readers.
-    pub pieces: usize,
+    /// Positions the import covered, summed over every contig.
+    pub positions: u64,
+    /// Chunk buffers written.
+    pub chunks_written: usize,
+    /// Chunk buffers skipped because no reader covered them.
+    pub chunks_skipped: usize,
     pub bytes_written: u64,
-    /// Number of buffers written.
-    pub tasks_completed: usize,
-    /// Number of buffers elided because no reader covered them.
-    pub tasks_skipped: usize,
     /// Wall-clock duration of the engine run.
     pub wall_seconds: f64,
-    /// Summed per-piece decode time across workers: the source read, and
-    /// the merges and chunk writes the stream runs inside it.
-    pub decode_seconds: f64,
-    /// Summed encode+write time across workers.
-    pub write_seconds: f64,
-    /// Summed worker time spent processing pieces.
-    pub worker_busy_seconds: f64,
-    /// Summed worker time spent blocked on the piece channel.
-    pub worker_idle_seconds: f64,
-    /// Producer time blocked on the span gate.
-    pub gate_wait_seconds: f64,
-    /// Summed time workers spent blocked on reader handle checkout.
-    pub handle_wait_seconds: f64,
 }

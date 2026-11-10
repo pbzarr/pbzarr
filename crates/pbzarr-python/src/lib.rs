@@ -75,15 +75,15 @@ impl Output {
 /// The track is created from the source headers; it must NOT already exist.
 /// d4 stores depths as `int32` natively, so import is zero-conversion.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (store_path, track, sources, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_d4(
     py: Python<'_>,
     store_path: String,
     track: String,
     sources: Vec<(String, Option<String>)>,
-    column_dim: Option<String>,
-    workers: Option<usize>,
+    dim: Option<String>,
+    threads: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
     shard_size: Option<usize>,
@@ -102,11 +102,11 @@ fn import_d4(
             })
             .collect();
         let mut config = Config {
-            column_dim,
+            column_dim: dim,
             ..Config::default()
         };
-        if let Some(w) = workers {
-            config.workers = w;
+        if let Some(n) = threads {
+            config.workers = n;
         }
         if let Some(n) = decode_chunks {
             config.decode_chunks = n;
@@ -149,15 +149,15 @@ fn import_d4(
 /// uncovered base, so uncovered positions read back as `NaN` and reductions
 /// skip them.
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (store_path, track, sources, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bigwig(
     py: Python<'_>,
     store_path: String,
     track: String,
     sources: Vec<(String, Option<String>)>,
-    column_dim: Option<String>,
-    workers: Option<usize>,
+    dim: Option<String>,
+    threads: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
     shard_size: Option<usize>,
@@ -176,11 +176,11 @@ fn import_bigwig(
             })
             .collect();
         let mut config = Config {
-            column_dim,
+            column_dim: dim,
             ..Config::default()
         };
-        if let Some(w) = workers {
-            config.workers = w;
+        if let Some(n) = threads {
+            config.workers = n;
         }
         if let Some(n) = decode_chunks {
             config.decode_chunks = n;
@@ -325,10 +325,10 @@ fn build_bed_schema(
 ///   as one wide track when a single source has `track` set, else as one
 ///   track per column.
 ///
-/// Any 2D output (several sources, or a wide track) requires `column_dim`.
+/// Any 2D output (several sources, or a wide track) requires `dim`.
 /// Returns the import report dict.
 #[pyfunction]
-#[pyo3(signature = (store_path, sources, genome, schema=None, track=None, column=None, dtype=None, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (store_path, sources, genome, schema=None, track=None, column=None, dtype=None, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bed(
     py: Python<'_>,
@@ -339,8 +339,8 @@ fn import_bed(
     track: Option<String>,
     column: Option<String>,
     dtype: Option<String>,
-    column_dim: Option<String>,
-    workers: Option<usize>,
+    dim: Option<String>,
+    threads: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
     shard_size: Option<usize>,
@@ -363,11 +363,11 @@ fn import_bed(
         let genome = Genome::from_fai(&genome).map_err(|e| PbzError::new_err(format!("{e}")))?;
 
         let mut config = Config {
-            column_dim,
+            column_dim: dim,
             ..Config::default()
         };
-        if let Some(w) = workers {
-            config.workers = w;
+        if let Some(n) = threads {
+            config.workers = n;
         }
         if let Some(n) = decode_chunks {
             config.decode_chunks = n;
@@ -450,18 +450,11 @@ fn import_bed(
 /// Turn a `Report` into the `dict` handed back to Python callers.
 fn report_to_dict(py: Python<'_>, report: &Report) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
-    dict.set_item("contigs_written", report.contigs_written)?;
+    dict.set_item("positions", report.positions)?;
+    dict.set_item("chunks_written", report.chunks_written)?;
+    dict.set_item("chunks_skipped", report.chunks_skipped)?;
     dict.set_item("bytes_written", report.bytes_written)?;
-    dict.set_item("tasks_completed", report.tasks_completed)?;
-    dict.set_item("tasks_skipped", report.tasks_skipped)?;
-    dict.set_item("pieces", report.pieces)?;
     dict.set_item("wall_seconds", report.wall_seconds)?;
-    dict.set_item("decode_seconds", report.decode_seconds)?;
-    dict.set_item("write_seconds", report.write_seconds)?;
-    dict.set_item("worker_busy_seconds", report.worker_busy_seconds)?;
-    dict.set_item("worker_idle_seconds", report.worker_idle_seconds)?;
-    dict.set_item("gate_wait_seconds", report.gate_wait_seconds)?;
-    dict.set_item("handle_wait_seconds", report.handle_wait_seconds)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -470,12 +463,12 @@ fn report_to_dict(py: Python<'_>, report: &Report) -> PyResult<Py<PyAny>> {
 ///
 /// `mode` is `"depth"` (single `track` output) or `"composition"` (`track`
 /// plus one `track_{field}` per composition field, per `from_bam`'s track
-/// naming). CRAM sources need `reference`; BAM sources ignore it. `overlap`
+/// naming). CRAM sources need `fasta`; BAM sources ignore it. `overlap`
 /// is `"proper"` (default, mosdepth-matched: only PROPER_PAIR-flagged
 /// overlapping mates are deduped), `"all"` (riker/samtools-mpileup-style
 /// unconditional dedup), or `"none"` (dedup disabled).
 #[pyfunction]
-#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), reference=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, column_dim=None, workers=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (store_path, track, sources, mode="depth".to_string(), fasta=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bam(
     py: Python<'_>,
@@ -483,14 +476,14 @@ fn import_bam(
     track: String,
     sources: Vec<(String, Option<String>)>,
     mode: String,
-    reference: Option<String>,
+    fasta: Option<String>,
     min_mapq: u8,
     exclude_flags: u16,
     min_bq: u8,
     overlap: String,
     count_deletions: bool,
-    column_dim: Option<String>,
-    workers: Option<usize>,
+    dim: Option<String>,
+    threads: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
     shard_size: Option<usize>,
@@ -535,11 +528,11 @@ fn import_bam(
             })
             .collect();
         let mut config = Config {
-            column_dim,
+            column_dim: dim,
             ..Config::default()
         };
-        if let Some(w) = workers {
-            config.workers = w;
+        if let Some(n) = threads {
+            config.workers = n;
         }
         if let Some(n) = decode_chunks {
             config.decode_chunks = n;
@@ -575,7 +568,7 @@ fn import_bam(
             &bam_sources,
             mode,
             filter,
-            reference.map(PathBuf::from),
+            fasta.map(PathBuf::from),
             config,
         )
         .map_err(|e| PbzError::new_err(format!("{e}")))

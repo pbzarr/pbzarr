@@ -209,8 +209,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let per_contig_total: u64 = genome.contigs().iter().map(|c| c.length).sum();
     let logical_bytes = (per_contig_total as usize) * args.cols * std::mem::size_of::<u32>();
     println!(
-        "imported {} contigs, {} tasks, {} logical bytes, wall {:.2}s",
-        report.contigs_written, report.tasks_completed, logical_bytes, secs,
+        "imported {} positions, {} chunks, {} logical bytes, wall {:.2}s",
+        report.positions, report.chunks_written, logical_bytes, secs,
     );
     println!(
         "  throughput (logical): {}",

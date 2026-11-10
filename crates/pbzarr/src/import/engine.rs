@@ -663,8 +663,8 @@ struct EngineState {
     gate: SpanGate,
     span_remaining: Vec<AtomicUsize>,
     bytes_written: AtomicU64,
-    tasks_completed: AtomicUsize,
-    tasks_skipped: AtomicUsize,
+    chunks_written: AtomicUsize,
+    chunks_skipped: AtomicUsize,
     timings: RunTimings,
     err_flag: AtomicBool,
     first_err: Mutex<Option<PbzError>>,
@@ -755,14 +755,14 @@ impl RunCtx<'_> {
     }
 
     fn record_skipped(&self) {
-        self.state.tasks_skipped.fetch_add(1, Ordering::Relaxed);
+        self.state.chunks_skipped.fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_written(&self, geom: &TargetGeom<'_>, chunk: Range<u64>, columns: Range<u64>) {
         let bytes =
             (chunk.end - chunk.start) * (columns.end - columns.start) * dtype_bytes(geom.dtype);
         self.state.bytes_written.fetch_add(bytes, Ordering::Relaxed);
-        self.state.tasks_completed.fetch_add(1, Ordering::Relaxed);
+        self.state.chunks_written.fetch_add(1, Ordering::Relaxed);
         if let Some(p) = self.progress {
             p.tick(bytes);
         }
@@ -1502,8 +1502,8 @@ pub(crate) fn run_import<R: ValueReader>(
         gate: SpanGate::new(in_flight),
         span_remaining: (0..n_spans).map(|_| AtomicUsize::new(n_readers)).collect(),
         bytes_written: AtomicU64::new(0),
-        tasks_completed: AtomicUsize::new(0),
-        tasks_skipped: AtomicUsize::new(0),
+        chunks_written: AtomicUsize::new(0),
+        chunks_skipped: AtomicUsize::new(0),
         timings: RunTimings::default(),
         err_flag: AtomicBool::new(false),
         first_err: Mutex::new(None),
@@ -1647,8 +1647,8 @@ pub(crate) fn run_import<R: ValueReader>(
         progress.done();
     }
 
-    let completed = state.tasks_completed.load(Ordering::Relaxed);
-    let skipped = state.tasks_skipped.load(Ordering::Relaxed);
+    let completed = state.chunks_written.load(Ordering::Relaxed);
+    let skipped = state.chunks_skipped.load(Ordering::Relaxed);
     let bytes = state.bytes_written.load(Ordering::Relaxed);
     info!(
         "import pipeline finished: {completed} buffer(s) written, {skipped} elided, \
@@ -1734,18 +1734,11 @@ pub(crate) fn run_import<R: ValueReader>(
     }
 
     Ok(Report {
-        contigs_written: genome.iter().filter(|(_, c)| c.length > 0).count(),
-        pieces,
+        positions: total,
+        chunks_written: completed,
+        chunks_skipped: skipped,
         bytes_written: bytes,
-        tasks_completed: completed,
-        tasks_skipped: skipped,
         wall_seconds: wall,
-        decode_seconds: timings.decode.total_secs(),
-        write_seconds: timings.write.total_secs(),
-        worker_busy_seconds: busy,
-        worker_idle_seconds: idle,
-        gate_wait_seconds: gate_wait,
-        handle_wait_seconds: timings.handle_wait.total_secs(),
     })
 }
 
@@ -1975,7 +1968,7 @@ mod tests {
             store
                 .create_track("v", genome.clone(), cfg.columns(labels.clone()))
                 .unwrap();
-            let report = Import::from_readers(readers())
+            Import::from_readers(readers())
                 .unwrap()
                 .into_track(store.track("v").unwrap())
                 .readers_as_columns()
@@ -1987,7 +1980,7 @@ mod tests {
                 })
                 .run()
                 .unwrap();
-            (store, report)
+            store
         };
         let sharded = || {
             TrackConfig::new(Dtype::I32)
@@ -1997,9 +1990,9 @@ mod tests {
                 .shard_column_size(2)
         };
         let dir = TempDir::new().unwrap();
-        let (a, ra) = run(dir.path(), "a.pbz", sharded(), 3);
-        let (b, _) = run(dir.path(), "b.pbz", sharded(), 1);
-        let (c, _) = run(
+        let a = run(dir.path(), "a.pbz", sharded(), 3);
+        let b = run(dir.path(), "b.pbz", sharded(), 1);
+        let c = run(
             dir.path(),
             "c.pbz",
             TrackConfig::new(Dtype::I32)
@@ -2007,7 +2000,6 @@ mod tests {
                 .column_chunk_size(2),
             3,
         );
-        assert_eq!(ra.pieces, (len.div_ceil(48) as usize) * 4);
         let read = |s: &PbzStore| -> ndarray::Array2<i32> {
             s.track("v")
                 .unwrap()
@@ -2047,8 +2039,7 @@ mod tests {
             })
             .run()
             .unwrap();
-        assert_eq!(report.pieces, 1);
-        assert_eq!(report.tasks_skipped, 2);
+        assert_eq!(report.chunks_skipped, 2);
         assert_eq!(chunk_file_count(&dir.path().join("elide.pbz/v/values")), 2);
     }
 
@@ -2084,8 +2075,8 @@ mod tests {
             })
             .run()
             .unwrap();
-        assert_eq!(report.tasks_completed, 3);
-        assert_eq!(report.tasks_skipped, 2);
+        assert_eq!(report.chunks_written, 3);
+        assert_eq!(report.chunks_skipped, 2);
         assert_eq!(chunk_file_count(&dir.path().join("shard.pbz/v/values")), 1);
         let values = store
             .track("v")
@@ -2140,9 +2131,8 @@ mod tests {
             })
             .run()
             .unwrap();
-        assert_eq!(report.pieces, 1);
-        assert_eq!(report.tasks_completed, 4);
-        assert_eq!(report.tasks_skipped, 0);
+        assert_eq!(report.chunks_written, 4);
+        assert_eq!(report.chunks_skipped, 0);
 
         for (contig, len) in [("chr1", 10u64), ("chr2", 22u64)] {
             let region = Region {
@@ -2221,8 +2211,8 @@ mod tests {
             .run()
             .unwrap();
         // Chunks 16,16,8: only the middle has coverage.
-        assert_eq!(report.tasks_completed, 1);
-        assert_eq!(report.tasks_skipped, 2);
+        assert_eq!(report.chunks_written, 1);
+        assert_eq!(report.chunks_skipped, 2);
 
         let values = store
             .track("signal")
@@ -2400,7 +2390,7 @@ mod tests {
                 })
                 .run()
                 .unwrap();
-            assert!(report.tasks_completed > 0);
+            assert!(report.chunks_written > 0);
         }
 
         let plain_data = plain
@@ -2497,8 +2487,8 @@ mod tests {
                 .run()
                 .unwrap();
             // 6 chunks x 4 column chunks; chunks 64..96 have no coverage.
-            assert_eq!(report.tasks_completed, 16);
-            assert_eq!(report.tasks_skipped, 8);
+            assert_eq!(report.chunks_written, 16);
+            assert_eq!(report.chunks_skipped, 8);
         }
 
         let plain_data = plain
@@ -2580,7 +2570,7 @@ mod tests {
     }
 
     /// One reader, many workers, a budget of two handles: forks never exceed
-    /// the pool size, every piece completes, and the wait is accounted.
+    /// the pool size, and every piece completes.
     #[test]
     fn handle_pool_caps_forks_and_completes() {
         let dir = TempDir::new().unwrap();
@@ -2614,15 +2604,7 @@ mod tests {
             .unwrap();
         let peak = peak.load(Ordering::SeqCst);
         assert!(peak <= 2, "peak forks {peak}");
-        assert_eq!(report.tasks_completed, 16);
-        // Six of the eight workers stall on the two handles, so the stall
-        // outweighs the work. Counting the stall as busy would invert this.
-        assert!(
-            report.worker_busy_seconds < report.handle_wait_seconds,
-            "handle wait leaked into worker busy time: busy {} vs wait {}",
-            report.worker_busy_seconds,
-            report.handle_wait_seconds
-        );
+        assert_eq!(report.chunks_written, 16);
 
         let values = store
             .track("v")
