@@ -207,6 +207,8 @@ pub(super) fn missing(info: &VariableInfo, value: &CoordinateValue) -> bool {
         CoordinateValue::Float(v) => v.is_nan() || float_fill(info).ok().flatten() == Some(*v),
     }
 }
+use super::GenomicAxis;
+use crate::RegionQuery;
 use std::ops::Range;
 use zarrs::array::ElementOwned;
 
@@ -222,6 +224,41 @@ impl Dataset {
         ranges: &[Range<u64>],
     ) -> Result<ArrayD<T>> {
         self.read(name, ranges, true)
+    }
+
+    /// Read physical values of `name` in one region of its genomic axis.
+    ///
+    /// The other axes are read at full width. A region with no start or end
+    /// reads to that edge of the contig.
+    pub fn read_region<T: ElementOwned>(
+        &self,
+        name: &str,
+        region: &RegionQuery,
+    ) -> Result<ArrayD<T>> {
+        let info = self
+            .variables
+            .get(name)
+            .ok_or_else(|| PbzError::Metadata(format!("unknown array: {name}")))?;
+        let mut genomic = None;
+        let mut ranges = Vec::with_capacity(info.dims.len());
+        for (dim, &len) in info.dims.iter().zip(&info.shape) {
+            match GenomicAxis::from_dimension(dim)? {
+                Some(axis) if genomic.is_none() => {
+                    ranges.push(self.reference()?.rows(&axis, region)?);
+                    genomic = Some(axis);
+                }
+                Some(_) => {
+                    return Err(PbzError::UnsupportedEncoding(format!(
+                        "{name}: more than one genomic axis"
+                    )));
+                }
+                None => ranges.push(0..len),
+            }
+        }
+        if genomic.is_none() {
+            return Err(PbzError::Metadata(format!("{name} has no genomic axis")));
+        }
+        self.read_raw(name, &ranges)
     }
 
     /// `read_raw` without the scope check, for a caller that ran

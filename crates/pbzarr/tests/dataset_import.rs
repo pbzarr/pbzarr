@@ -478,3 +478,71 @@ fn a_sharded_cohort_shards_one_column_chunk_at_any_width() {
         ndarray::ArrayD::from_elem(ndarray::IxDyn(&[12, 5]), 7)
     );
 }
+
+#[derive(Clone)]
+struct PositionReader {
+    genome: Genome,
+    schema: OutputSchema,
+    column: u32,
+}
+impl ValueReader for PositionReader {
+    fn contigs(&self) -> &Genome {
+        &self.genome
+    }
+    fn output_schema(&self) -> &OutputSchema {
+        &self.schema
+    }
+    fn fork(&self) -> pbzarr::io::Result<Self> {
+        Ok(self.clone())
+    }
+    fn read_into(
+        &mut self,
+        contig: &str,
+        start: u64,
+        _: u64,
+        outputs: &mut [OutputSinkMut<'_>],
+    ) -> pbzarr::io::Result<()> {
+        let base = if contig == "chr1" { 0 } else { 100 } + 1000 * self.column;
+        for (i, v) in outputs[0].as_u32_mut()?.iter_mut().enumerate() {
+            *v = base + start as u32 + i as u32;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn read_region_selects_contig_rows_at_full_width() {
+    let (mut ds, _, _) = traced_dataset();
+    let readers: Vec<PositionReader> = (0..2)
+        .map(|column| PositionReader {
+            genome: Genome::new(reference().contigs().to_vec()).unwrap(),
+            schema: OutputSchema::new(vec![OutputField {
+                name: None,
+                dtype: Dtype::U32,
+            }]),
+            column,
+        })
+        .collect();
+    let cfg = TrackConfig::new(Dtype::U32)
+        .columns(vec!["S1".into(), "S2".into()])
+        .column_dim("sample")
+        .chunk_size(4);
+    Import::from_readers(readers)
+        .unwrap()
+        .into_dataset(&mut ds, vec![("depth".into(), cfg)])
+        .readers_as_columns()
+        .run()
+        .unwrap();
+    let got = ds
+        .read_region::<u32>("depth", &"chr2:2-5".parse().unwrap())
+        .unwrap();
+    assert_eq!(
+        got,
+        ndarray::arr2(&[[102, 1102], [103, 1103], [104, 1104]]).into_dyn()
+    );
+    let whole = ds
+        .read_region::<u32>("depth", &"chr1".parse().unwrap())
+        .unwrap();
+    assert_eq!(whole.shape(), [5, 2]);
+    assert_eq!(whole[[4, 1]], 1004);
+}

@@ -21,11 +21,11 @@ use serde_json::{Value, json};
 use zarrs::array::{Array, ArrayShardedExt, ArraySubset, FillValue, data_type};
 use zarrs::storage::{ReadableWritableListableStorageTraits, StorePrefix};
 
+use crate::array::default_data_codecs;
 use crate::error::PbzError;
 use crate::genome::{ContigId, Region};
 use crate::import::ProgressSink;
 use crate::io::{Dtype, Numeric};
-use crate::store::default_data_codecs;
 use crate::track::Track;
 use crate::{PbzStore, Result};
 

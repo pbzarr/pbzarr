@@ -80,8 +80,8 @@ impl Config {
         fill: Option<serde_json::Value>,
         labels: Option<Vec<String>>,
         default_column_dim: &str,
-    ) -> crate::track::TrackConfig {
-        let mut cfg = crate::track::TrackConfig::new(dtype);
+    ) -> crate::TrackConfig {
+        let mut cfg = crate::TrackConfig::new(dtype);
         if let Some(fill) = fill {
             cfg = cfg.fill_value(fill);
         }

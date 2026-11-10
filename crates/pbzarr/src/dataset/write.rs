@@ -127,9 +127,12 @@ impl Dataset {
 }
 
 use super::{GenomicAxis, Role, Support, VariableInfo};
+use crate::array::{
+    TrackConfig, apply_explicit_spec, default_data_codecs, dtype_to_zarrs, resolve_fill_value,
+    validate_node_name,
+};
 use crate::import::destination::Destination;
-use crate::store::{apply_explicit_spec, default_data_codecs, dtype_to_zarrs, resolve_fill_value};
-use crate::{Genome, Track, TrackConfig, validate_node_name};
+use crate::{Genome, Track};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{RwLock, atomic::AtomicBool};
 use zarrs::array::codec::api::ArrayToBytesCodecTraits;

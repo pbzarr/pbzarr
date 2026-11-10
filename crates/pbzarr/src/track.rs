@@ -10,114 +10,11 @@ use zarrs::array::{Array, ArrayShardedExt, ArraySubset};
 use zarrs::storage::{ReadableWritableListableStorage, ReadableWritableListableStorageTraits};
 
 use crate::Result;
-use crate::codec_spec::ExplicitArraySpec;
+pub use crate::array::TrackConfig;
 use crate::error::PbzError;
 use crate::genome::{Genome, Region};
 use crate::io::{Dtype, Numeric};
 use crate::{PBZ_FORMAT_VERSION, PERBASE_CONVENTION_NAME, PERBASE_CONVENTION_UUID};
-
-/// User-supplied configuration for a new track.
-#[derive(Debug, Clone)]
-pub struct TrackConfig {
-    pub dtype: Dtype,
-    pub chunk_size: usize,
-    pub column_dim: Option<String>,
-    pub columns: Option<Vec<String>>,
-    pub column_chunk_size: Option<usize>,
-    pub shard_size: Option<usize>,
-    pub shard_column_size: Option<usize>,
-    /// Explicit Zarr codec/chunk-grid metadata for the `values` array.
-    /// Replaces the default Blosc pipeline; the chunk/shard size fields are
-    /// then ignored except as the fallback outer grid when the spec carries
-    /// no `chunk_grid`.
-    pub codecs: Option<ExplicitArraySpec>,
-    pub fill_value: Option<Value>,
-    pub description: Option<String>,
-    pub source: Option<String>,
-    pub extra: Map<String, Value>,
-}
-
-impl TrackConfig {
-    /// Create a 1D track configuration with default chunk size (1M positions).
-    /// Call `.columns(...)` to make it 2D.
-    pub fn new(dtype: Dtype) -> Self {
-        Self {
-            dtype,
-            chunk_size: 1_000_000,
-            column_dim: None,
-            columns: None,
-            column_chunk_size: None,
-            shard_size: None,
-            shard_column_size: None,
-            codecs: None,
-            fill_value: None,
-            description: None,
-            source: None,
-            extra: Map::new(),
-        }
-    }
-
-    /// Add a column axis to this track. The track becomes 2D with shape
-    /// `(position, column)`. `column_dim` defaults to `"column"`; override
-    /// with `.column_dim(...)`. `column_chunk_size` defaults to 16.
-    pub fn columns(mut self, columns: Vec<String>) -> Self {
-        self.columns = Some(columns);
-        if self.column_dim.is_none() {
-            self.column_dim = Some("column".into());
-        }
-        if self.column_chunk_size.is_none() {
-            self.column_chunk_size = Some(16);
-        }
-        self
-    }
-
-    /// Override the column-axis dimension name (e.g., `"sample"`).
-    /// No effect for 1D tracks.
-    pub fn column_dim(mut self, name: impl Into<String>) -> Self {
-        self.column_dim = Some(name.into());
-        self
-    }
-
-    pub fn chunk_size(mut self, n: usize) -> Self {
-        self.chunk_size = n;
-        self
-    }
-
-    pub fn column_chunk_size(mut self, n: usize) -> Self {
-        self.column_chunk_size = Some(n);
-        self
-    }
-
-    pub fn shard_size(mut self, n: usize) -> Self {
-        self.shard_size = Some(n);
-        self
-    }
-
-    pub fn shard_column_size(mut self, n: usize) -> Self {
-        self.shard_column_size = Some(n);
-        self
-    }
-
-    pub fn codecs(mut self, spec: ExplicitArraySpec) -> Self {
-        self.codecs = Some(spec);
-        self
-    }
-
-    pub fn fill_value(mut self, v: serde_json::Value) -> Self {
-        self.fill_value = Some(v);
-        self
-    }
-
-    pub fn description(mut self, s: impl Into<String>) -> Self {
-        self.description = Some(s.into());
-        self
-    }
-
-    pub fn source(mut self, s: impl Into<String>) -> Self {
-        self.source = Some(s.into());
-        self
-    }
-}
 
 /// One entry of the `zarr_conventions` array.
 #[derive(Debug, Clone, Serialize, Deserialize)]

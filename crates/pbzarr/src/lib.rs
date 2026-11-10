@@ -1,3 +1,4 @@
+mod array;
 pub mod codec_spec;
 mod consolidated;
 pub mod dataset;
@@ -12,6 +13,7 @@ pub mod stat;
 pub mod store;
 pub mod track;
 
+pub use array::{TrackConfig, validate_column_dimension_name, validate_node_name};
 pub use codec_spec::ExplicitArraySpec;
 pub use error::{PbzError, Result};
 pub use genome::{Contig, ContigId, Genome, Region};
@@ -19,8 +21,8 @@ pub use measurement::Measurement;
 pub use region_query::{RegionQuery, parse_region_query};
 pub use scale::{LevelReport, ScaleConfig, ScaleReport, Stat, scale};
 pub use stat::{HistTable, StatKind, StatOptions, StatOutput, StatResult, StatValue};
-pub use store::{PbzStore, validate_column_dimension_name, validate_node_name};
-pub use track::{ConventionRef, PerbaseTrackAttrs, Track, TrackConfig};
+pub use store::PbzStore;
+pub use track::{ConventionRef, PerbaseTrackAttrs, Track};
 
 /// The pbz format/convention version written to every track group.
 pub const PBZ_FORMAT_VERSION: &str = "0.4";
