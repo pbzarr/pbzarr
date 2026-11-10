@@ -29,6 +29,17 @@ pub(crate) const CONTIG_MD5: &str = "contig_md5";
 /// of `contig_length`.
 pub(crate) const REFERENCE_ARRAYS: [&str; 3] = [CONTIG_ID, CONTIG_LENGTH, CONTIG_MD5];
 
+/// True when `path` is a file that starts with a zip local file header.
+pub fn is_zip_store(path: &Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    path.is_file()
+        && std::fs::File::open(path)
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .is_ok()
+        && magic == *b"PK\x03\x04"
+}
+
 /// A metadata catalog of the direct arrays in a root Xarray Dataset.
 ///
 /// Opening reads metadata only. Catalog entries do not guarantee that a
@@ -58,9 +69,13 @@ impl Dataset {
     pub fn open_with_storage(storage: ReadableWritableListableStorage) -> Result<Self> {
         Self::open_in(storage, None)
     }
-    /// Open a directory store for reads only. The store is listed to find
-    /// its variables, as [`Dataset::open`] does.
+    /// Open a store for reads only. A directory store is listed to find its
+    /// variables, as [`Dataset::open`] does. A zip store (see
+    /// [`is_zip_store`]) opens through [`Dataset::open_zip`].
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        if is_zip_store(path.as_ref()) {
+            return Self::open_zip(path);
+        }
         let storage = Arc::new(
             zarrs::filesystem::FilesystemStore::new(path.as_ref())
                 .map_err(|e| PbzError::Store(e.to_string()))?,
@@ -77,6 +92,27 @@ impl Dataset {
     /// store must have it.
     pub fn open_readable(storage: ReadableStorage) -> Result<Self> {
         Self::open_reader(storage, metadata::Nodes::Consolidated, None)
+    }
+    /// Open a single-file zip store for reads only, through its root
+    /// consolidated metadata.
+    pub fn open_zip(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let store_error = |e: &dyn std::fmt::Display| {
+            PbzError::Store(format!("open zip store {}: {e}", path.display()))
+        };
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| store_error(&"the file name is not valid UTF-8"))?;
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let files = zarrs::filesystem::FilesystemStore::new(parent).map_err(|e| store_error(&e))?;
+        let key = zarrs::storage::StoreKey::new(name).map_err(|e| store_error(&e))?;
+        let zip =
+            zarrs_zip::ZipStorageAdapter::new(Arc::new(files), key).map_err(|e| store_error(&e))?;
+        Self::open_readable(Arc::new(zip))
     }
     fn open_reader(
         reader: ReadableStorage,

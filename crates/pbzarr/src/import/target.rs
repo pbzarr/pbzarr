@@ -34,6 +34,12 @@ pub enum Target<'a> {
     /// format-0.5 store whose reference is the contig list of the sources.
     /// When it exists, the import adds new tracks to that store.
     Path(&'a Path),
+    /// A new single-file zip store at a path that must not exist. The import
+    /// writes a temporary file beside the path and moves it there at the end,
+    /// so a failed import leaves no file. A track with no shard size and no
+    /// codecs gets shards of 64 position chunks and all its columns. A track
+    /// whose codecs have no sharding codec is refused.
+    Zip(&'a Path),
 }
 
 impl<'a> From<&'a Path> for Target<'a> {
@@ -112,6 +118,7 @@ impl Target<'_> {
                 dataset_run(dataset, specs, readers, axes, config, DatasetPlan::Append)
             }
             Self::Path(path) => import_at(path, specs, readers, axes, config),
+            Self::Zip(path) => import_zip(path, specs, readers, axes, config),
         }
     }
 }
@@ -126,6 +133,7 @@ fn import_at<R: ValueReader>(
     axes: Axes,
     config: Config,
 ) -> Result<Report> {
+    refuse_zip(path)?;
     if path.exists() {
         info!("{} exists; adding track(s) to the store", path.display());
         let mut dataset = Dataset::open(path)?;
@@ -148,11 +156,83 @@ fn import_at<R: ValueReader>(
     report
 }
 
+/// Position chunks in one shard of a zip store track that names no shard.
+const ZIP_SHARD_CHUNKS: u64 = 64;
+
+fn import_zip<R: ValueReader>(
+    path: &Path,
+    specs: Vec<(String, TrackConfig)>,
+    readers: Vec<R>,
+    axes: Axes,
+    config: Config,
+) -> Result<Report> {
+    let reference = readers
+        .first()
+        .ok_or_else(|| PbzError::Metadata("import: no sources".into()))?
+        .contigs()
+        .clone();
+    let specs = zip_layout(specs, &reference)?;
+    debug!("creating zip store {}", path.display());
+    let mut dataset = Dataset::create_zip(path, reference)?;
+    let report = Target::Dataset(&mut dataset).import(specs, readers, axes, config)?;
+    dataset.close()?;
+    Ok(report)
+}
+
+/// Give every track of a zip store a sharded layout, so that the archive
+/// holds few entries.
+fn zip_layout(
+    specs: Vec<(String, TrackConfig)>,
+    reference: &Reference,
+) -> Result<Vec<(String, TrackConfig)>> {
+    let total: u64 = reference.contigs().iter().map(|c| c.length).sum();
+    specs
+        .into_iter()
+        .map(|(name, mut track)| {
+            match &track.codecs {
+                Some(spec) => {
+                    if !spec.codecs.iter().any(|c| c.name() == "sharding_indexed") {
+                        return Err(PbzError::UnsupportedEncoding(format!(
+                            "track {name:?}: a zip store needs sharded arrays, \
+                             but the codecs have no sharding_indexed codec"
+                        )));
+                    }
+                }
+                None if track.shard_size.is_none() => {
+                    let chunk = (track.chunk_size as u64).min(total.max(1)).max(1);
+                    track.shard_size = Some((chunk * ZIP_SHARD_CHUNKS) as usize);
+                    if track.shard_column_size.is_none()
+                        && let Some(columns) = &track.columns
+                    {
+                        let width = columns.len().max(1);
+                        let column_chunk = track.column_chunk_size.unwrap_or(width).clamp(1, width);
+                        track.shard_column_size = Some(width.div_ceil(column_chunk) * column_chunk);
+                    }
+                }
+                None => {}
+            }
+            Ok((name, track))
+        })
+        .collect()
+}
+
+/// A zip store is written once, so no import adds tracks to it.
+fn refuse_zip(path: &Path) -> Result<()> {
+    if crate::is_zip_store(path) {
+        return Err(PbzError::Store(format!(
+            "{} is a zip store. Zip stores are written once, so nothing adds tracks to them",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// The contig list for an import into `path` whose sources carry no contig
 /// lengths, such as BED. An existing store gives its own reference, and a
 /// `genome` given with it must match that reference. A new store needs
 /// `genome`.
 pub fn store_reference(path: &Path, genome: Option<Reference>) -> Result<Reference> {
+    refuse_zip(path)?;
     if !path.exists() {
         return genome.ok_or_else(|| {
             PbzError::Metadata(format!(

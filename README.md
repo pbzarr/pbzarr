@@ -155,6 +155,18 @@ pbz import bigwig -o cohort.pbz --track signal --file-list sources.tsv
 
 The source list contains one path per line, optionally followed by a tab and a label. If any source has a label, all sources must have labels.
 
+## Single-file stores
+
+Import into a single zip file:
+
+```sh
+pbz import d4 --zip -o cohort.pbz.zip --track depth s1.d4 s2.d4
+```
+
+An output path that ends in `.zip` also writes a zip store, so `--zip` is optional here. The output path must not exist. The import writes a temporary file beside the output path and renames it at the end, so a failed import leaves no file.
+
+A zip store is written once. `pbz import` cannot add tracks to it, and `pbz append` refuses it. Without a shard flag or `--codecs`, each shard holds 64 position chunks and all columns. An import refuses `--codecs` without a `sharding_indexed` codec. `pbz view` and `pbz stat` read zip stores.
+
 ## Format
 
 A `.pbz` store is one Zarr v3 group. Tracks and coordinates are arrays directly under the root.

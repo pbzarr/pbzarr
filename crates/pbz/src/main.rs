@@ -359,9 +359,31 @@ struct ImportOptions {
     /// Hide the import progress display.
     #[arg(long)]
     no_progress: bool,
+    /// Write a new single-file zip store. An output path that ends in
+    /// `.zip` also does this. The output path must not exist. Without a
+    /// shard flag or --codecs, each shard holds 64 position chunks and all
+    /// columns.
+    #[arg(long)]
+    zip: bool,
 }
 
 impl ImportOptions {
+    /// The import destination for `output`: a new zip store when --zip is
+    /// given or the path ends in `.zip`, otherwise a directory store.
+    fn target<'a>(&self, output: &'a Path) -> Result<Target<'a>> {
+        let zip = self.zip || output.extension().is_some_and(|e| e == "zip");
+        if !zip {
+            return Ok(Target::Path(output));
+        }
+        if output.exists() {
+            bail!(
+                "{} exists. A zip store is written once, so give a new path",
+                output.display()
+            );
+        }
+        Ok(Target::Zip(output))
+    }
+
     /// Base pipeline config, with a progress sink labeled `label` unless
     /// `--no-progress` turned it off. The pipeline sizes the sink itself, so
     /// the label is all it needs here.
@@ -771,6 +793,7 @@ fn import_bed(args: BedArgs) -> Result<()> {
     }
 
     let output = args.bed.output.context("--output is required to import")?;
+    let target = args.import.target(&output)?;
     let genome = args
         .bed
         .genome
@@ -793,8 +816,7 @@ fn import_bed(args: BedArgs) -> Result<()> {
         let schema = load_schema(schema_path, &sources, infer_rows)?;
         let plan = plan_bed_schema(&sources, &schema, &config).context("plan BED schema")?;
         debug!("BED schema planned against {} source(s)", sources.len());
-        execute_bed_schema_plan(output.as_path(), plan, genome, config)
-            .context("import BED schema")?;
+        execute_bed_schema_plan(target, plan, genome, config).context("import BED schema")?;
     } else {
         let options = BedImportOptions {
             fields: (!args.bed.fields.is_empty()).then_some(args.bed.fields),
@@ -809,7 +831,7 @@ fn import_bed(args: BedArgs) -> Result<()> {
             infer_rows,
             ..BedImportOptions::default()
         };
-        from_bed_matrix(output.as_path(), &sources, genome, &options, config)
+        from_bed_matrix(target, &sources, genome, &options, config)
             .context("import BED columns")?;
     }
     info!("wrote {}", output.display());
@@ -851,7 +873,7 @@ fn import_bam(args: BamArgs) -> Result<()> {
 
     let output = args.bam.output;
     let report = from_bam(
-        output.as_path(),
+        args.import.target(&output)?,
         &args.bam.track,
         &sources,
         mode,
@@ -882,8 +904,13 @@ fn import_d4(args: D4Args) -> Result<()> {
 
     let config = args.import.config(&args.d4.track)?;
     let output = args.d4.output;
-    let report =
-        from_d4(output.as_path(), &args.d4.track, &sources, config).context("import d4")?;
+    let report = from_d4(
+        args.import.target(&output)?,
+        &args.d4.track,
+        &sources,
+        config,
+    )
+    .context("import d4")?;
 
     print_report("imported", n_sources, &output, &report);
     Ok(())
@@ -906,8 +933,13 @@ fn import_bigwig(args: BigWigArgs) -> Result<()> {
 
     let config = args.import.config(&args.bigwig.track)?;
     let output = args.bigwig.output;
-    let report = from_bigwig(output.as_path(), &args.bigwig.track, &sources, config)
-        .context("import bigWig")?;
+    let report = from_bigwig(
+        args.import.target(&output)?,
+        &args.bigwig.track,
+        &sources,
+        config,
+    )
+    .context("import bigWig")?;
 
     print_report("imported", n_sources, &output, &report);
     Ok(())
@@ -930,6 +962,12 @@ fn append_sources(input: &ImportInputOptions) -> Result<Vec<pbzarr::import::Sour
 /// The dimension comes from the store so that one source still forms a column
 /// batch; an append never names a new dimension.
 fn open_append(path: &Path, track: &str) -> Result<(Dataset, String)> {
+    if pbzarr::is_zip_store(path) || path.extension().is_some_and(|e| e == "zip") {
+        bail!(
+            "{} is a zip store. Zip stores are written once, so append cannot add columns to them",
+            path.display()
+        );
+    }
     if !path.exists() {
         bail!(
             "append needs an existing store; {} does not exist",
