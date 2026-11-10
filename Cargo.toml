@@ -32,3 +32,6 @@ split-debuginfo = "packed"
 # byte (~30x slower per chunk). Drop when both fixes ship upstream.
 [patch.crates-io]
 zarrs = { git = "https://github.com/cademirch/zarrs", rev = "1ef8c5fa913fb1b3e064a3757ef224ac2f939547" }
+# zarrs_zip implements the zarrs_storage traits, so it must build against the
+# same zarrs_storage as the pinned zarrs.
+zarrs_storage = { git = "https://github.com/cademirch/zarrs", rev = "1ef8c5fa913fb1b3e064a3757ef224ac2f939547" }

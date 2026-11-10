@@ -15,6 +15,7 @@ pub mod io;
 mod measurement;
 mod region_query;
 pub mod stat;
+mod zip_store;
 
 pub use array::{TrackConfig, validate_node_name};
 pub use codec_spec::ExplicitArraySpec;

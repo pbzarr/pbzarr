@@ -39,6 +39,9 @@ pub struct Dataset {
     writer: Option<ReadableWritableListableStorage>,
     /// The store directory when the storage is a filesystem store.
     dir: Option<PathBuf>,
+    /// The archive that [`Dataset::close`] writes, for a store made by
+    /// [`Dataset::create_zip`].
+    zip: Option<Arc<crate::zip_store::ZipStore>>,
     reference_cache: std::sync::OnceLock<Reference>,
     handles: std::sync::Mutex<BTreeMap<String, Arc<read::ArrayHandle>>>,
     root: serde_json::Value,
@@ -100,6 +103,7 @@ impl Dataset {
             reader,
             writer,
             dir,
+            zip: None,
             reference_cache: std::sync::OnceLock::new(),
             handles: std::sync::Mutex::new(BTreeMap::new()),
             root,

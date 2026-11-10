@@ -38,6 +38,28 @@ impl Dataset {
         )
     }
 
+    /// Create a new format-0.5 Dataset that becomes a single-file zip store
+    /// at `path`. Nothing appears at `path` until [`Dataset::close`]; a
+    /// Dataset dropped before then leaves no file.
+    ///
+    /// The zip store is written once: each data key takes one write. Use a
+    /// sharded layout, so that the archive holds few entries.
+    pub fn create_zip(path: impl AsRef<Path>, reference: Reference) -> Result<Self> {
+        let zip = Arc::new(crate::zip_store::ZipStore::create(path.as_ref())?);
+        let mut dataset = Self::create_in(zip.clone(), None, reference)?;
+        dataset.zip = Some(zip);
+        Ok(dataset)
+    }
+
+    /// Write out a store made by [`Dataset::create_zip`] and move it to its
+    /// path. A directory store needs no close, and this does nothing for it.
+    pub fn close(self) -> Result<()> {
+        match &self.zip {
+            Some(zip) => zip.finish(),
+            None => Ok(()),
+        }
+    }
+
     /// Create a Dataset in an empty storage namespace.
     ///
     /// Reference arrays are written before root metadata. Errors may leave
@@ -113,7 +135,9 @@ impl Dataset {
     /// This is the last step of every write: until it lands, the old copy
     /// stays a correct view of the store before the write.
     fn publish(&mut self) -> Result<()> {
+        let zip = self.zip.take();
         *self = Self::open_in(self.writable()?.clone(), self.dir.clone())?;
+        self.zip = zip;
         self.write_snapshot()
     }
 
