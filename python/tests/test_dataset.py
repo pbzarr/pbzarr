@@ -159,13 +159,15 @@ def test_write_refusals_name_the_problem(cohort: Path) -> None:
             pbzarr.write(ds, {"first": ds["depth"].isel(sample=0)})
 
 
-def test_legacy_store_is_refused(tmp_path: Path) -> None:
+def test_legacy_store_is_refused(tmp_path: Path, d4_fixture: Path) -> None:
     group = zarr.open_group(tmp_path / "old.pbz", mode="w", zarr_format=3)
     group.attrs["zarr_conventions"] = [
         {"uuid": "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c", "name": "perbase"}
     ]
     with pytest.raises(PbzError, match="This is a format 0.4 store"):
         pbzarr.open(tmp_path / "old.pbz")
+    with pytest.raises(PbzError, match="This is a format 0.4 store"):
+        pbzarr.import_d4(tmp_path / "old.pbz", "depth", d4_fixture)
 
 
 def test_version_rule(cohort: Path) -> None:

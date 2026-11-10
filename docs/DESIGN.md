@@ -17,8 +17,9 @@ external changes. It does not provide a concurrent-mutation snapshot.
 CLI imports and appends write format `0.5`, and `pbz view` and `pbz stat`
 read both layouts. Python opens a `0.5` store as an `xr.Dataset` with
 `pbzarr.open` and refuses `0.4` stores. `PbzStore` remains the `0.4` Rust API, and
-pyramids exist only there. A format `0.4` root presented to
-`Dataset` reports as an unsupported format.
+pyramids exist only there. `Dataset` refuses a format `0.4` root with
+`PbzError::LegacyFormat`. The Python import functions also refuse a `0.4`
+destination.
 
 The root `zarr.json` of a `0.5` store holds a consolidated metadata copy in
 the zarr-python inline form. Every import, append, and Python write replaces

@@ -43,10 +43,19 @@ fn apply_codecs_kwarg(
     Ok(())
 }
 
+/// Python writes format 0.5 only, so an existing store must open as one.
+fn check_existing(store_path: &str) -> PyResult<()> {
+    if Path::new(store_path).exists() {
+        Dataset::open(store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
+    }
+    Ok(())
+}
+
 /// Bulk-import one or more d4 files into a new `int32` track.
 ///
 /// The store is created from the source headers when the path does not
-/// exist. The track must not already be in the store. d4 stores depths as `int32` natively, so import is zero-conversion.
+/// exist. The track must not already be in the store. d4 stores depths as
+/// `int32` natively, so import is zero-conversion.
 #[pyfunction]
 #[pyo3(signature = (store_path, track, sources, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
@@ -66,6 +75,7 @@ fn import_d4(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
+        check_existing(&store_path)?;
         let d4_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -117,9 +127,9 @@ fn import_d4(
 /// Bulk-import one or more bigWig files into a new `float32` track.
 ///
 /// The store is created from the source headers when the path does not
-/// exist. The track must not already be in the store. bigWig stores values as `float32` natively. A bigWig holds no value at an
-/// uncovered base, so uncovered positions read back as `NaN` and reductions
-/// skip them.
+/// exist. The track must not already be in the store. bigWig stores values
+/// as `float32` natively. A bigWig holds no value at an uncovered base, so
+/// uncovered positions read back as `NaN` and reductions skip them.
 #[pyfunction]
 #[pyo3(signature = (store_path, track, sources, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
@@ -139,6 +149,7 @@ fn import_bigwig(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
+        check_existing(&store_path)?;
         let bw_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -322,6 +333,7 @@ fn import_bed(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
+        check_existing(&store_path)?;
         let bed_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -499,6 +511,7 @@ fn import_bam(
         count_deletions,
     };
     let report = py.allow_threads(|| {
+        check_existing(&store_path)?;
         let bam_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
