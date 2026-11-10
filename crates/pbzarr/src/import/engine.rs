@@ -640,6 +640,16 @@ impl StageTimer {
     fn max_secs(&self) -> f64 {
         self.max_ns.load(Ordering::Relaxed) as f64 / 1e9
     }
+
+    fn summary(&self, noun: &str) -> String {
+        format!(
+            "total {:.1}s  {noun} {}  mean {:.2}s  max {:.2}s",
+            self.total_secs(),
+            self.count(),
+            self.mean_secs(),
+            self.max_secs()
+        )
+    }
 }
 
 #[derive(Default)]
@@ -658,14 +668,41 @@ struct RunTimings {
     shard_wait: StageTimer,
     /// Per store call (encode + write), the shard mutex already held.
     write: StageTimer,
-    worker_busy_ns: AtomicU64,
-    worker_idle_ns: AtomicU64,
-    /// Producer time blocked on the span gate.
-    gate_wait_ns: AtomicU64,
+    /// Per worker thread: its whole time on pieces, pool stalls excluded.
+    worker_busy: StageTimer,
+    /// Per worker thread: its whole time waiting for a piece.
+    worker_idle: StageTimer,
 }
 
-fn ns_secs(counter: &AtomicU64) -> f64 {
-    counter.load(Ordering::Relaxed) as f64 / 1e9
+impl RunTimings {
+    fn log(&self, wall: Duration, workers: usize, gate_wait: Duration) {
+        let wall = wall.as_secs_f64();
+        let busy = self.worker_busy.total_secs();
+        let idle = self.worker_idle.total_secs();
+        let gate_wait = gate_wait.as_secs_f64();
+        let busy_pct = if busy + idle > 0.0 {
+            100.0 * busy / (busy + idle)
+        } else {
+            0.0
+        };
+        info!(
+            "import timing: wall {wall:.1}s workers {workers}\n\
+             decode (incl. merge+write): {}\n\
+             slot wait: {}\n\
+             merge  : {}\n\
+             shard wait: {}\n\
+             write  : {}\n\
+             worker busy {busy:.0}s / idle {idle:.0}s ({busy_pct:.0}% busy)\n\
+             gate wait: {gate_wait:.1}s\n\
+             handle wait: {}",
+            self.decode.summary("pieces"),
+            self.slot_wait.summary("waits"),
+            self.merge.summary("copies"),
+            self.shard_wait.summary("waits"),
+            self.write.summary("stores"),
+            self.handle_wait.summary("waits"),
+        );
+    }
 }
 
 fn panic_message(payload: &(dyn Any + Send)) -> &str {
@@ -1505,7 +1542,7 @@ pub(crate) fn run_import<R: ValueReader>(
         .build()
         .map_err(|e| PbzError::Store(format!("build import thread pool: {e}")))?;
 
-    thread::scope(|scope| {
+    let gate_wait = thread::scope(|scope| {
         let ctx = &ctx;
         let pools = &pools;
         let receivers = &receivers;
@@ -1575,13 +1612,8 @@ pub(crate) fn run_import<R: ValueReader>(
                     )));
                 }
                 drop(piece_rx);
-                let timings = &ctx.timings;
-                timings
-                    .worker_busy_ns
-                    .fetch_add(busy.as_nanos() as u64, Ordering::Relaxed);
-                timings
-                    .worker_idle_ns
-                    .fetch_add(idle.as_nanos() as u64, Ordering::Relaxed);
+                ctx.timings.worker_busy.record(busy);
+                ctx.timings.worker_idle.record(idle);
             });
         });
 
@@ -1608,10 +1640,8 @@ pub(crate) fn run_import<R: ValueReader>(
                 }
             }
         }
-        ctx.timings
-            .gate_wait_ns
-            .store(gate_wait.as_nanos() as u64, Ordering::Relaxed);
         drop(piece_tx);
+        gate_wait
     });
 
     if let Some(progress) = &config.progress {
@@ -1621,10 +1651,10 @@ pub(crate) fn run_import<R: ValueReader>(
     let completed = ctx.chunks_written.load(Ordering::Relaxed);
     let skipped = ctx.chunks_skipped.load(Ordering::Relaxed);
     let bytes = ctx.bytes_written.load(Ordering::Relaxed);
+    let wall = started.elapsed();
     info!(
         "import pipeline finished: {completed} buffer(s) written, {skipped} elided, \
-         {bytes} bytes in {:.1?}",
-        started.elapsed()
+         {bytes} bytes in {wall:.1?}"
     );
     if completed == 0 && skipped > 0 {
         warn!(
@@ -1633,51 +1663,7 @@ pub(crate) fn run_import<R: ValueReader>(
         );
     }
 
-    let wall = started.elapsed().as_secs_f64();
-    let timings = &ctx.timings;
-    let busy = ns_secs(&timings.worker_busy_ns);
-    let idle = ns_secs(&timings.worker_idle_ns);
-    let gate_wait = ns_secs(&timings.gate_wait_ns);
-    let busy_pct = if busy + idle > 0.0 {
-        100.0 * busy / (busy + idle)
-    } else {
-        0.0
-    };
-    info!(
-        "import timing: wall {wall:.1}s workers {workers}\n\
-         decode (incl. merge+write): total {:.1}s  pieces {}  mean {:.2}s  max {:.2}s\n\
-         slot wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s\n\
-         merge  : total {:.1}s  copies {}  mean {:.2}s  max {:.2}s\n\
-         shard wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s\n\
-         write  : total {:.1}s  stores {}  mean {:.2}s  max {:.2}s\n\
-         worker busy {busy:.0}s / idle {idle:.0}s ({busy_pct:.0}% busy)\n\
-         gate wait: {gate_wait:.1}s\n\
-         handle wait: total {:.1}s  waits {}  mean {:.2}s  max {:.2}s",
-        timings.decode.total_secs(),
-        timings.decode.count(),
-        timings.decode.mean_secs(),
-        timings.decode.max_secs(),
-        timings.slot_wait.total_secs(),
-        timings.slot_wait.count(),
-        timings.slot_wait.mean_secs(),
-        timings.slot_wait.max_secs(),
-        timings.merge.total_secs(),
-        timings.merge.count(),
-        timings.merge.mean_secs(),
-        timings.merge.max_secs(),
-        timings.shard_wait.total_secs(),
-        timings.shard_wait.count(),
-        timings.shard_wait.mean_secs(),
-        timings.shard_wait.max_secs(),
-        timings.write.total_secs(),
-        timings.write.count(),
-        timings.write.mean_secs(),
-        timings.write.max_secs(),
-        timings.handle_wait.total_secs(),
-        timings.handle_wait.count(),
-        timings.handle_wait.mean_secs(),
-        timings.handle_wait.max_secs(),
-    );
+    ctx.timings.log(wall, workers, gate_wait);
 
     let first_err = ctx
         .first_err
@@ -1714,7 +1700,7 @@ pub(crate) fn run_import<R: ValueReader>(
         chunks_written: completed,
         chunks_skipped: skipped,
         bytes_written: bytes,
-        wall_seconds: wall,
+        wall_seconds: wall.as_secs_f64(),
     })
 }
 
