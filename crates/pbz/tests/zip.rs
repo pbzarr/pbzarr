@@ -44,7 +44,6 @@ fn import_d4(output: &Path, flags: &[&str], sources: Vec<OsString>) -> Output {
     let mut args: Vec<OsString> = vec![
         "import".into(),
         "d4".into(),
-        "-o".into(),
         output.into(),
         "--track".into(),
         "depth".into(),
@@ -80,7 +79,7 @@ fn view_and_stat_read_a_zip_store_as_they_read_a_directory_store() {
     for args in [&["view"][..], &["stat", "-s", "median"]] {
         let read = |store: &Path| {
             let mut all: Vec<OsString> = args.iter().map(OsString::from).collect();
-            all.extend([store.into(), "depth".into()]);
+            all.extend([store.into(), "--track".into(), "depth".into()]);
             stdout_of(run_pbz(all))
         };
         let expected = read(&directory);
@@ -101,7 +100,6 @@ fn a_zip_store_refuses_a_second_import_and_append() {
     let append = stderr_of_failure(run_pbz([
         "append".into(),
         "d4".into(),
-        "-o".into(),
         zip.clone().into(),
         "--track".into(),
         "depth".into(),

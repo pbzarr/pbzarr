@@ -25,7 +25,6 @@ fn import_args(
     let mut args = vec![
         "import".into(),
         "bed".into(),
-        "--output".into(),
         output.as_os_str().to_owned(),
         "--genome".into(),
         genome.as_os_str().to_owned(),
@@ -216,7 +215,6 @@ fn out_of_range_numeric_schema_selector_reports_the_original_one_based_column() 
     let command = run_pbz([
         "import".into(),
         "bed".into(),
-        "--output".into(),
         output.as_os_str().to_owned(),
         "--genome".into(),
         genome.into_os_string(),
@@ -255,7 +253,6 @@ fn out_of_range_numeric_schema_selector_during_inference_is_one_based() {
     let command = run_pbz([
         "import".into(),
         "bed".into(),
-        "--output".into(),
         output.as_os_str().to_owned(),
         "--genome".into(),
         genome.into_os_string(),
@@ -295,7 +292,6 @@ fn overflowing_numeric_schema_selector_is_not_treated_as_a_header_name() {
     let command = run_pbz([
         "import".into(),
         "bed".into(),
-        "--output".into(),
         output.as_os_str().to_owned(),
         "--genome".into(),
         genome.into_os_string(),
@@ -337,7 +333,6 @@ fn invalid_schema_target_track_names_fail_before_output_creation() {
         let command = run_pbz([
             "import".into(),
             "bed".into(),
-            "--output".into(),
             output.as_os_str().to_owned(),
             "--genome".into(),
             genome.as_os_str().to_owned(),

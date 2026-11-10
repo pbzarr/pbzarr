@@ -17,7 +17,12 @@ fn integer_track_streams_collapsed_rows_in_genome_order() {
     let error = String::from_utf8_lossy(&ambiguous.stderr);
     assert!(error.contains("store has 2 tracks"), "{error}");
 
-    let output = run_pbz(["view".into(), store.into_os_string(), "depth".into()]);
+    let output = run_pbz([
+        "view".into(),
+        store.into_os_string(),
+        "--track".into(),
+        "depth".into(),
+    ]);
     assert_eq!(
         stdout_of(&output),
         "#chrom\tstart\tend\tdepth\n\
@@ -32,7 +37,12 @@ fn integer_track_streams_collapsed_rows_in_genome_order() {
 fn float_track_skips_all_missing_positions() {
     let dir = TempDir::new().unwrap();
     let store = build_store(dir.path());
-    let output = run_pbz(["view".into(), store.into_os_string(), "af".into()]);
+    let output = run_pbz([
+        "view".into(),
+        store.into_os_string(),
+        "--track".into(),
+        "af".into(),
+    ]);
     assert_eq!(
         stdout_of(&output),
         "#chrom\tstart\tend\ts1\ts2\n\
@@ -51,6 +61,7 @@ fn column_subset_and_no_header() {
         "-c".into(),
         "s2".into(),
         store.into_os_string(),
+        "--track".into(),
         "af".into(),
     ]);
     assert_eq!(stdout_of(&output), "chr1\t2\t6\t1\n");
@@ -64,6 +75,7 @@ fn gz_output_writes_bgzf_with_identical_content() {
     let plain = stdout_of(&run_pbz([
         "view".into(),
         store.as_os_str().to_owned(),
+        "--track".into(),
         "depth".into(),
     ]));
     let output = run_pbz([
@@ -71,6 +83,7 @@ fn gz_output_writes_bgzf_with_identical_content() {
         "-o".into(),
         gz.as_os_str().to_owned(),
         store.into_os_string(),
+        "--track".into(),
         "depth".into(),
     ]);
     assert!(output.status.success());
@@ -91,6 +104,7 @@ fn threads_option_does_not_change_output() {
     let default_run = stdout_of(&run_pbz([
         "view".into(),
         store.as_os_str().to_owned(),
+        "--track".into(),
         "depth".into(),
     ]));
     let capped = stdout_of(&run_pbz([
@@ -98,6 +112,7 @@ fn threads_option_does_not_change_output() {
         "-t".into(),
         "1".into(),
         store.into_os_string(),
+        "--track".into(),
         "depth".into(),
     ]));
     assert_eq!(capped, default_run);
@@ -112,6 +127,7 @@ fn rank_three_variable_is_rejected_by_name_and_dimensions() {
     let output = run_pbz([
         "view".into(),
         store.as_os_str().to_owned(),
+        "--track".into(),
         "callable".into(),
     ]);
     assert!(!output.status.success());
@@ -119,7 +135,12 @@ fn rank_three_variable_is_rejected_by_name_and_dimensions() {
     assert!(error.contains("callable"), "{error}");
     assert!(error.contains("position, sample, threshold"), "{error}");
 
-    let output = run_pbz(["stat".into(), store.into_os_string(), "callable".into()]);
+    let output = run_pbz([
+        "stat".into(),
+        store.into_os_string(),
+        "--track".into(),
+        "callable".into(),
+    ]);
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("position, sample, threshold"), "{error}");

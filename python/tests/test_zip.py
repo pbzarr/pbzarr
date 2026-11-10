@@ -12,7 +12,7 @@ from _helpers import pbz_binary
 
 def _cli_import(store, sources, *flags) -> None:
     subprocess.run(
-        [pbz_binary(), "import", "d4", "-o", store, "--track", "depth", "--no-progress",
+        [pbz_binary(), "import", "d4", store, "--track", "depth", "--no-progress",
          *flags, *sources],
         check=True, capture_output=True,
     )

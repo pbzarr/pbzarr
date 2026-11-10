@@ -42,7 +42,6 @@ fn import_args(output: &Path) -> Vec<OsString> {
     vec![
         "import".into(),
         "bigwig".into(),
-        "-o".into(),
         output.as_os_str().to_owned(),
         "--track".into(),
         "signal".into(),
@@ -94,7 +93,12 @@ fn scalar_import_preserves_fractional_values_and_missing_positions() {
         }
     }
 
-    let mean = run_pbz(["stat".into(), output.into_os_string(), "signal".into()]);
+    let mean = run_pbz([
+        "stat".into(),
+        output.into_os_string(),
+        "--track".into(),
+        "signal".into(),
+    ]);
     assert_eq!(
         stdout_of(&mean),
         "#chrom\tstart\tend\tmean\nchr1\t0\t12\t-0.5\n"
@@ -159,7 +163,12 @@ fn labeled_cohorts_accept_positional_sources_and_a_manifest() {
             assert_eq!(values[[position, 1]], expected[1]);
         }
 
-        let mean = run_pbz(["stat".into(), output.into_os_string(), "signal".into()]);
+        let mean = run_pbz([
+            "stat".into(),
+            output.into_os_string(),
+            "--track".into(),
+            "signal".into(),
+        ]);
         assert_eq!(
             stdout_of(&mean),
             "#chrom\tstart\tend\tleft\tright\nchr1\t0\t12\t1\t3\n"

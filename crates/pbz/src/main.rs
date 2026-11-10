@@ -27,6 +27,8 @@ mod view;
 #[derive(Debug, Parser)]
 #[command(name = "pbz", version, about = "Per-base Zarr tools")]
 struct Cli {
+    #[command(flatten)]
+    global: GlobalOptions,
     #[command(subcommand)]
     command: Command,
 }
@@ -45,14 +47,13 @@ enum Command {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  pbz view cohort.pbz depth\n  pbz view -o depth.bedgraph.gz cohort.pbz depth\n  pbz view -c s1,s2 cohort.pbz af"
+    after_help = "Examples:\n  pbz view cohort.pbz --track depth\n  pbz view cohort.pbz --track depth -o depth.bedgraph.gz\n  pbz view cohort.pbz --track af -c s1,s2"
 )]
 struct ViewArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
     /// PBZ store to export.
     store: PathBuf,
     /// Track to export. Optional when the store holds exactly one track.
+    #[arg(long)]
     track: Option<String>,
     /// Column labels of a rank-2 track, comma-separated or repeated.
     /// Default: all columns in stored order.
@@ -76,18 +77,17 @@ struct ViewArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  pbz stat cohort.pbz depth\n  pbz stat -s median -r targets.bed cohort.pbz depth\n  pbz stat -s hist -c s1,s2 cohort.pbz af"
+    after_help = "Examples:\n  pbz stat cohort.pbz --track depth\n  pbz stat cohort.pbz --track depth -s median --region targets.bed\n  pbz stat cohort.pbz --track af -s hist -c s1,s2"
 )]
 struct StatArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
     /// PBZ store to read.
     store: PathBuf,
     /// Track to compute over. Optional when the store holds exactly one track.
+    #[arg(long)]
     track: Option<String>,
     /// BED file with the regions to compute over. Default: one region per
     /// chromosome.
-    #[arg(short('r'), long, value_name = "BED")]
+    #[arg(long, value_name = "BED")]
     region: Option<PathBuf>,
     /// Statistic: mean, min, max, median, or hist.
     #[arg(short('s'), long, value_name = "STAT", default_value = "mean")]
@@ -146,9 +146,8 @@ enum AppendCommand {
 /// The store, the sources and the track every append names.
 #[derive(Debug, Args)]
 struct AppendTarget {
-    /// Format-0.5 PBZ store to grow. It must exist.
-    #[arg(short('o'), long)]
-    output: PathBuf,
+    /// PBZ store to grow. It must exist.
+    store: PathBuf,
     #[command(flatten)]
     input: ImportInputOptions,
     /// Track to grow. It must already have a column dimension.
@@ -172,12 +171,12 @@ struct AppendOptions {
 impl AppendOptions {
     /// Pipeline config for an append. `column_dim` comes from the store, so a
     /// single source still forms a column batch instead of a scalar track.
-    fn config(&self, label: &str, column_dim: String) -> Config {
+    fn config(&self, label: &str, column_dim: String, quiet: bool) -> Config {
         ConfigBuilder {
             workers: Some(self.threads),
             decode_chunks: self.decode_chunks,
             column_dim: Some(column_dim),
-            progress: (!self.no_progress).then(|| label.to_owned()),
+            progress: (!self.no_progress && !quiet).then(|| label.to_owned()),
             ..ConfigBuilder::default()
         }
         .build()
@@ -187,12 +186,10 @@ impl AppendOptions {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz append d4 -o cohort.pbz --track depth s3.d4 s4.d4:custom_label"
+    after_help = "Examples:\n  pbz append d4 cohort.pbz s3.d4 s4.d4:custom_label --track depth"
 )]
 struct AppendD4Args {
     #[command(flatten)]
-    global: GlobalOptions,
-    #[command(flatten)]
     append: AppendOptions,
     #[command(flatten)]
     target: AppendTarget,
@@ -201,12 +198,10 @@ struct AppendD4Args {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz append bigwig -o cohort.pbz --track signal kidney.bw:kidney"
+    after_help = "Examples:\n  pbz append bigwig cohort.pbz kidney.bw:kidney --track signal"
 )]
 struct AppendBigWigArgs {
     #[command(flatten)]
-    global: GlobalOptions,
-    #[command(flatten)]
     append: AppendOptions,
     #[command(flatten)]
     target: AppendTarget,
@@ -215,11 +210,9 @@ struct AppendBigWigArgs {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz append bam -o depth.pbz --track depth s3.bam\n  pbz append bam -o comp.pbz --track depth --mode composition --fasta ref.fa s3.cram"
+    after_help = "Examples:\n  pbz append bam depth.pbz s3.bam --track depth\n  pbz append bam comp.pbz s3.cram --track depth --mode composition --fasta ref.fa"
 )]
 struct AppendBamArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
     #[command(flatten)]
     append: AppendOptions,
     #[command(flatten)]
@@ -232,11 +225,9 @@ struct AppendBamArgs {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz append bed -o cohort.pbz --track depth s3.bed.gz s4.bed.gz"
+    after_help = "Examples:\n  pbz append bed cohort.pbz s3.bed.gz s4.bed.gz --track depth"
 )]
 struct AppendBedArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
     #[command(flatten)]
     append: AppendOptions,
     #[command(flatten)]
@@ -263,11 +254,10 @@ enum ImportCommand {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth --dim sample s1.bed.gz s2.bed.gz\n  pbz import bed -o mask.pbz --genome genome.fai --track callable regions.bed.gz\n  pbz import bed -o stats.pbz --genome genome.fai --dim metric --schema schema.tsv wide.bed.gz\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth --dim sample --codecs '[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},{\"name\":\"zstd\",\"configuration\":{\"level\":3,\"checksum\":false}}]' s1.bed.gz s2.bed.gz"
+    mut_arg("input_files", |arg| arg.required_unless_present_any(["emit_schema"])),
+    after_help = "Examples:\n  pbz import bed cohort.pbz s1.bed.gz s2.bed.gz --genome genome.fai --track depth --dim sample\n  pbz import bed mask.pbz regions.bed.gz --genome genome.fai --track callable\n  pbz import bed --emit-schema wide.bed.gz > schema.tsv\n  pbz import bed stats.pbz wide.bed.gz --genome genome.fai --dim metric --schema schema.tsv\n  pbz import bed cohort.pbz s1.bed.gz s2.bed.gz --genome genome.fai --track depth --dim sample --codecs '[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},{\"name\":\"zstd\",\"configuration\":{\"level\":3,\"checksum\":false}}]'"
 )]
 struct BedArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
     #[command(flatten)]
     import: ImportOptions,
     #[command(flatten)]
@@ -278,8 +268,11 @@ struct BedArgs {
 struct GlobalOptions {
     /// Increase logging verbosity: -v info, -vv debug, -vvv trace. Warnings
     /// and errors always print. `RUST_LOG` overrides this when set.
-    #[arg(short, long, action = ArgAction::Count)]
+    #[arg(short, long, action = ArgAction::Count, global = true)]
     verbose: u8,
+    /// Hide the summary line and the progress display.
+    #[arg(short, long, global = true)]
+    quiet: bool,
 }
 
 impl GlobalOptions {
@@ -343,7 +336,7 @@ struct ImportOptions {
     /// bigWig or BAM sources. BED import has no default: it needs --dim
     /// whenever the output is 2D (several sources, or several BED columns in
     /// one track).
-    #[arg(short = 'c', long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME")]
     dim: Option<String>,
     /// Zarr v3 codec metadata for the created track arrays: a `codecs` JSON
     /// array, or a `{"chunk_grid": ..., "codecs": [...]}` fragment. Pass
@@ -359,8 +352,8 @@ struct ImportOptions {
     /// Hide the import progress display.
     #[arg(long)]
     no_progress: bool,
-    /// Write a new single-file zip store. An output path that ends in
-    /// `.zip` also does this. The output path must not exist. Without a
+    /// Write a new single-file zip store. A STORE path that ends in
+    /// `.zip` also does this. The path must not exist. Without a
     /// shard flag or --codecs, each shard holds 64 position chunks and all
     /// columns.
     #[arg(long)]
@@ -385,9 +378,9 @@ impl ImportOptions {
     }
 
     /// Base pipeline config, with a progress sink labeled `label` unless
-    /// `--no-progress` turned it off. The pipeline sizes the sink itself, so
-    /// the label is all it needs here.
-    fn config(&self, label: &str) -> Result<Config> {
+    /// `--no-progress` or `quiet` turned it off. The pipeline sizes the sink
+    /// itself, so the label is all it needs here.
+    fn config(&self, label: &str, quiet: bool) -> Result<Config> {
         Ok(ConfigBuilder {
             workers: Some(self.threads),
             decode_chunks: self.decode_chunks,
@@ -397,7 +390,7 @@ impl ImportOptions {
             shard_column_size: self.shard_column_size,
             column_dim: self.dim.clone(),
             codecs: self.parse_codecs()?,
-            progress: (!self.no_progress).then(|| label.to_owned()),
+            progress: (!self.no_progress && !quiet).then(|| label.to_owned()),
         }
         .build())
     }
@@ -419,10 +412,10 @@ impl ImportOptions {
 }
 
 #[derive(Debug, Args)]
-#[group(required = true, multiple = false)]
+#[group(multiple = false)]
 struct ImportInputOptions {
     /// Input files, optionally suffixed with `:LABEL`.
-    #[arg(value_name = "PATH[:LABEL]")]
+    #[arg(value_name = "PATH[:LABEL]", required_unless_present = "file_list")]
     input_files: Vec<Source>,
     /// Tab-delimited source manifest containing PATH or PATH<TAB>LABEL records.
     #[arg(short, long, value_name = "PATH")]
@@ -523,10 +516,10 @@ impl ImportInputOptions {
 
 #[derive(Debug, Args)]
 struct BedOptions {
-    /// PBZ output store. Import creates it when the path does not exist, and
-    /// adds the track(s) to it when it exists.
-    #[arg(short('o'), long, required_unless_present = "emit_schema")]
-    output: Option<PathBuf>,
+    /// PBZ store to write. Import creates it when the path does not exist,
+    /// and adds the track(s) to it when it exists.
+    #[arg(required_unless_present = "emit_schema")]
+    store: Option<PathBuf>,
     #[command(flatten)]
     input: ImportInputOptions,
     /// FAI or chromosome-sizes file with the contig lengths. It is needed
@@ -550,11 +543,17 @@ struct BedOptions {
     /// column index.
     #[arg(long, value_name = "PATH")]
     schema: Option<PathBuf>,
-    /// Print a schema TSV for one BED source (BED column, target track,
+    /// Print a schema TSV for this BED file (BED column, target track,
     /// inferred dtype) to stdout and exit without importing. Edit it and feed
     /// it back via --schema.
-    #[arg(long, conflicts_with_all = ["schema", "fields", "track", "dtype"])]
-    emit_schema: bool,
+    #[arg(
+        long,
+        value_name = "BED",
+        conflicts_with_all = [
+            "store", "input_files", "file_list", "genome", "schema", "fields", "track", "dtype"
+        ]
+    )]
+    emit_schema: Option<PathBuf>,
     /// Records sampled for dtype inference, or `all`. A sample infers
     /// conservative classes (bool/int32/float32); `all` (or a file smaller
     /// than the sample) scans exhaustively and min-widths (uint8, int16, ...).
@@ -565,11 +564,9 @@ struct BedOptions {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bam -o depth.pbz --track depth s1.bam s2.bam\n  pbz import bam -o comp.pbz --track depth --mode composition --fasta ref.fa sample.cram"
+    after_help = "Examples:\n  pbz import bam depth.pbz s1.bam s2.bam --track depth\n  pbz import bam comp.pbz sample.cram --track depth --mode composition --fasta ref.fa"
 )]
 struct BamArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
     #[command(flatten)]
     import: ImportOptions,
     #[command(flatten)]
@@ -578,10 +575,9 @@ struct BamArgs {
 
 #[derive(Debug, Args)]
 struct BamOptions {
-    /// PBZ output store. Import creates it from the source headers when the
-    /// path does not exist, and adds the track(s) to it when it exists.
-    #[arg(short('o'), long)]
-    output: PathBuf,
+    /// PBZ store to write. Import creates it from the source headers when
+    /// the path does not exist, and adds the track(s) to it when it exists.
+    store: PathBuf,
     #[command(flatten)]
     input: ImportInputOptions,
     /// Output track name. In composition mode the depth track keeps this
@@ -641,11 +637,9 @@ enum OverlapModeArg {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import d4 -o cohort.pbz --track depth s1.d4 s2.d4:custom_label"
+    after_help = "Examples:\n  pbz import d4 cohort.pbz s1.d4 s2.d4:custom_label --track depth"
 )]
 struct D4Args {
-    #[command(flatten)]
-    global: GlobalOptions,
     #[command(flatten)]
     import: ImportOptions,
     #[command(flatten)]
@@ -654,10 +648,9 @@ struct D4Args {
 
 #[derive(Debug, Args)]
 struct D4Options {
-    /// PBZ output store. Import creates it from the source headers when the
-    /// path does not exist, and adds the track(s) to it when it exists.
-    #[arg(short('o'), long)]
-    output: PathBuf,
+    /// PBZ store to write. Import creates it from the source headers when
+    /// the path does not exist, and adds the track(s) to it when it exists.
+    store: PathBuf,
     #[command(flatten)]
     input: ImportInputOptions,
     /// Output track name.
@@ -668,11 +661,9 @@ struct D4Options {
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bigwig -o signal.pbz --track signal sample.bw\n  pbz import bigwig -o cohort.pbz --track signal --dim sample brain.bw:brain liver.bw:liver"
+    after_help = "Examples:\n  pbz import bigwig signal.pbz sample.bw --track signal\n  pbz import bigwig cohort.pbz brain.bw:brain liver.bw:liver --track signal --dim sample"
 )]
 struct BigWigArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
     #[command(flatten)]
     import: ImportOptions,
     #[command(flatten)]
@@ -681,10 +672,9 @@ struct BigWigArgs {
 
 #[derive(Debug, Args)]
 struct BigWigOptions {
-    /// PBZ output store. Import creates it from the source headers when the
-    /// path does not exist, and adds the track(s) to it when it exists.
-    #[arg(short('o'), long)]
-    output: PathBuf,
+    /// PBZ store to write. Import creates it from the source headers when
+    /// the path does not exist, and adds the track(s) to it when it exists.
+    store: PathBuf,
     #[command(flatten)]
     input: ImportInputOptions,
     /// Output track name.
@@ -720,26 +710,28 @@ fn raise_fd_limit() {}
 
 fn main() -> Result<()> {
     raise_fd_limit();
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    init_logging(&cli.global);
+    let quiet = cli.global.quiet;
+    match cli.command {
         Command::View(args) => view(args),
         Command::Stat(args) => stat(args),
         Command::Import(import) => match import.format {
-            ImportCommand::Bed(args) => import_bed(args),
-            ImportCommand::Bam(args) => import_bam(args),
-            ImportCommand::D4(args) => import_d4(args),
-            ImportCommand::BigWig(args) => import_bigwig(args),
+            ImportCommand::Bed(args) => import_bed(args, quiet),
+            ImportCommand::Bam(args) => import_bam(args, quiet),
+            ImportCommand::D4(args) => import_d4(args, quiet),
+            ImportCommand::BigWig(args) => import_bigwig(args, quiet),
         },
         Command::Append(append) => match append.format {
-            AppendCommand::Bed(args) => append_bed(args),
-            AppendCommand::Bam(args) => append_bam(args),
-            AppendCommand::D4(args) => append_d4(args),
-            AppendCommand::BigWig(args) => append_bigwig(args),
+            AppendCommand::Bed(args) => append_bed(args, quiet),
+            AppendCommand::Bam(args) => append_bam(args, quiet),
+            AppendCommand::D4(args) => append_d4(args, quiet),
+            AppendCommand::BigWig(args) => append_bigwig(args, quiet),
         },
     }
 }
 
 fn view(args: ViewArgs) -> Result<()> {
-    init_logging(&args.global);
     view::run_view(&view::ViewSpec {
         store: args.store,
         track: args.track,
@@ -752,7 +744,6 @@ fn view(args: ViewArgs) -> Result<()> {
 }
 
 fn stat(args: StatArgs) -> Result<()> {
-    init_logging(&args.global);
     stat::run_stat(&stat::StatSpec {
         store: args.store,
         track: args.track,
@@ -766,8 +757,13 @@ fn stat(args: StatArgs) -> Result<()> {
     })
 }
 
-fn import_bed(args: BedArgs) -> Result<()> {
-    init_logging(&args.global);
+fn import_bed(args: BedArgs, quiet: bool) -> Result<()> {
+    let infer_rows = parse_infer_rows(&args.bed.infer_rows)?;
+    if let Some(bed) = &args.bed.emit_schema {
+        info!("emitting a schema scaffold to stdout; no store is written");
+        return emit_schema(bed, infer_rows);
+    }
+
     let sources: Vec<pbzarr::import::Source> = args
         .bed
         .input
@@ -778,21 +774,12 @@ fn import_bed(args: BedArgs) -> Result<()> {
             column_label: source.label,
         })
         .collect();
-    let infer_rows = parse_infer_rows(&args.bed.infer_rows)?;
     debug!(
         "resolved {} BED source(s), infer rows {infer_rows:?}",
         sources.len()
     );
 
-    if args.bed.emit_schema {
-        info!("emitting a schema scaffold to stdout; no store is written");
-        if sources.len() != 1 {
-            bail!("--emit-schema requires exactly one BED source");
-        }
-        return emit_schema(&sources[0].path, infer_rows);
-    }
-
-    let output = args.bed.output.context("--output is required to import")?;
+    let output = args.bed.store.context("STORE is required to import")?;
     let target = args.import.target(&output)?;
     let genome = args
         .bed
@@ -810,13 +797,13 @@ fn import_bed(args: BedArgs) -> Result<()> {
         .clone()
         .or_else(|| args.bed.schema.as_ref().map(|_| "bed-schema".to_owned()))
         .unwrap_or_else(|| "bed".to_owned());
-    let config = args.import.config(&label)?;
-    if let Some(schema_path) = &args.bed.schema {
+    let config = args.import.config(&label, quiet)?;
+    let report = if let Some(schema_path) = &args.bed.schema {
         info!("loading BED schema {}", schema_path.display());
         let schema = load_schema(schema_path, &sources, infer_rows)?;
         let plan = plan_bed_schema(&sources, &schema, &config).context("plan BED schema")?;
         debug!("BED schema planned against {} source(s)", sources.len());
-        execute_bed_schema_plan(target, plan, genome, config).context("import BED schema")?;
+        execute_bed_schema_plan(target, plan, genome, config).context("import BED schema")?
     } else {
         let options = BedImportOptions {
             fields: (!args.bed.fields.is_empty()).then_some(args.bed.fields),
@@ -831,15 +818,15 @@ fn import_bed(args: BedArgs) -> Result<()> {
             infer_rows,
             ..BedImportOptions::default()
         };
-        from_bed_matrix(target, &sources, genome, &options, config)
-            .context("import BED columns")?;
+        from_bed_matrix(target, &sources, genome, &options, config).context("import BED columns")?
+    };
+    if !quiet {
+        print_report("imported", sources.len(), &output, &report);
     }
-    info!("wrote {}", output.display());
     Ok(())
 }
 
-fn import_bam(args: BamArgs) -> Result<()> {
-    init_logging(&args.global);
+fn import_bam(args: BamArgs, quiet: bool) -> Result<()> {
     let sources: Vec<pbzarr::import::Source> = args
         .bam
         .input
@@ -853,7 +840,7 @@ fn import_bam(args: BamArgs) -> Result<()> {
     let n_sources = sources.len();
     debug!("resolved {n_sources} alignment source(s)");
 
-    let config = args.import.config(&args.bam.track)?;
+    let config = args.import.config(&args.bam.track, quiet)?;
     let mode = match args.bam.decode.mode {
         ImportModeArg::Depth => ImportMode::Depth,
         ImportModeArg::Composition => ImportMode::Composition,
@@ -871,7 +858,7 @@ fn import_bam(args: BamArgs) -> Result<()> {
         count_deletions: args.bam.decode.count_deletions,
     };
 
-    let output = args.bam.output;
+    let output = args.bam.store;
     let report = from_bam(
         args.import.target(&output)?,
         &args.bam.track,
@@ -883,12 +870,13 @@ fn import_bam(args: BamArgs) -> Result<()> {
     )
     .context("import BAM/CRAM")?;
 
-    print_report("imported", n_sources, &output, &report);
+    if !quiet {
+        print_report("imported", n_sources, &output, &report);
+    }
     Ok(())
 }
 
-fn import_d4(args: D4Args) -> Result<()> {
-    init_logging(&args.global);
+fn import_d4(args: D4Args, quiet: bool) -> Result<()> {
     let sources: Vec<pbzarr::import::Source> = args
         .d4
         .input
@@ -902,8 +890,8 @@ fn import_d4(args: D4Args) -> Result<()> {
     let n_sources = sources.len();
     debug!("resolved {n_sources} d4 source(s)");
 
-    let config = args.import.config(&args.d4.track)?;
-    let output = args.d4.output;
+    let config = args.import.config(&args.d4.track, quiet)?;
+    let output = args.d4.store;
     let report = from_d4(
         args.import.target(&output)?,
         &args.d4.track,
@@ -912,12 +900,13 @@ fn import_d4(args: D4Args) -> Result<()> {
     )
     .context("import d4")?;
 
-    print_report("imported", n_sources, &output, &report);
+    if !quiet {
+        print_report("imported", n_sources, &output, &report);
+    }
     Ok(())
 }
 
-fn import_bigwig(args: BigWigArgs) -> Result<()> {
-    init_logging(&args.global);
+fn import_bigwig(args: BigWigArgs, quiet: bool) -> Result<()> {
     let sources: Vec<pbzarr::import::Source> = args
         .bigwig
         .input
@@ -931,8 +920,8 @@ fn import_bigwig(args: BigWigArgs) -> Result<()> {
     let n_sources = sources.len();
     debug!("resolved {n_sources} bigWig source(s)");
 
-    let config = args.import.config(&args.bigwig.track)?;
-    let output = args.bigwig.output;
+    let config = args.import.config(&args.bigwig.track, quiet)?;
+    let output = args.bigwig.store;
     let report = from_bigwig(
         args.import.target(&output)?,
         &args.bigwig.track,
@@ -941,7 +930,9 @@ fn import_bigwig(args: BigWigArgs) -> Result<()> {
     )
     .context("import bigWig")?;
 
-    print_report("imported", n_sources, &output, &report);
+    if !quiet {
+        print_report("imported", n_sources, &output, &report);
+    }
     Ok(())
 }
 
@@ -988,16 +979,12 @@ fn open_append(path: &Path, track: &str) -> Result<(Dataset, String)> {
     Ok((dataset, dim))
 }
 
-fn report_append(target: &AppendTarget, sources: usize, report: &pbzarr::import::Report) {
-    print_report("appended", sources, &target.output, report);
-}
-
 fn print_report(verb: &str, sources: usize, path: &Path, report: &pbzarr::import::Report) {
     debug!(
         "wrote {} bytes in {:.1}s",
         report.bytes_written, report.wall_seconds
     );
-    println!(
+    eprintln!(
         "{verb} {sources} sources -> {} ({} positions, {} chunks written, {} skipped)",
         path.display(),
         report.positions,
@@ -1006,11 +993,10 @@ fn print_report(verb: &str, sources: usize, path: &Path, report: &pbzarr::import
     );
 }
 
-fn append_d4(args: AppendD4Args) -> Result<()> {
-    init_logging(&args.global);
+fn append_d4(args: AppendD4Args, quiet: bool) -> Result<()> {
     let sources = append_sources(&args.target.input)?;
-    let (mut dataset, dim) = open_append(&args.target.output, &args.target.track)?;
-    let config = args.append.config(&args.target.track, dim);
+    let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
+    let config = args.append.config(&args.target.track, dim, quiet);
     let report = from_d4(
         Target::Append(&mut dataset),
         &args.target.track,
@@ -1018,15 +1004,16 @@ fn append_d4(args: AppendD4Args) -> Result<()> {
         config,
     )
     .context("append d4")?;
-    report_append(&args.target, sources.len(), &report);
+    if !quiet {
+        print_report("appended", sources.len(), &args.target.store, &report);
+    }
     Ok(())
 }
 
-fn append_bigwig(args: AppendBigWigArgs) -> Result<()> {
-    init_logging(&args.global);
+fn append_bigwig(args: AppendBigWigArgs, quiet: bool) -> Result<()> {
     let sources = append_sources(&args.target.input)?;
-    let (mut dataset, dim) = open_append(&args.target.output, &args.target.track)?;
-    let config = args.append.config(&args.target.track, dim);
+    let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
+    let config = args.append.config(&args.target.track, dim, quiet);
     let report = from_bigwig(
         Target::Append(&mut dataset),
         &args.target.track,
@@ -1034,15 +1021,16 @@ fn append_bigwig(args: AppendBigWigArgs) -> Result<()> {
         config,
     )
     .context("append bigWig")?;
-    report_append(&args.target, sources.len(), &report);
+    if !quiet {
+        print_report("appended", sources.len(), &args.target.store, &report);
+    }
     Ok(())
 }
 
-fn append_bam(args: AppendBamArgs) -> Result<()> {
-    init_logging(&args.global);
+fn append_bam(args: AppendBamArgs, quiet: bool) -> Result<()> {
     let sources = append_sources(&args.target.input)?;
-    let (mut dataset, dim) = open_append(&args.target.output, &args.target.track)?;
-    let config = args.append.config(&args.target.track, dim);
+    let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
+    let config = args.append.config(&args.target.track, dim, quiet);
     let mode = match args.decode.mode {
         ImportModeArg::Depth => ImportMode::Depth,
         ImportModeArg::Composition => ImportMode::Composition,
@@ -1068,14 +1056,15 @@ fn append_bam(args: AppendBamArgs) -> Result<()> {
         config,
     )
     .context("append BAM/CRAM")?;
-    report_append(&args.target, sources.len(), &report);
+    if !quiet {
+        print_report("appended", sources.len(), &args.target.store, &report);
+    }
     Ok(())
 }
 
-fn append_bed(args: AppendBedArgs) -> Result<()> {
-    init_logging(&args.global);
+fn append_bed(args: AppendBedArgs, quiet: bool) -> Result<()> {
     let sources = append_sources(&args.target.input)?;
-    let (mut dataset, dim) = open_append(&args.target.output, &args.target.track)?;
+    let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
     let genome = dataset.reference()?.clone();
     let dtype = Dtype::from_str(
         dataset.variables()[&args.target.track].metadata["data_type"]
@@ -1083,7 +1072,7 @@ fn append_bed(args: AppendBedArgs) -> Result<()> {
             .unwrap_or(""),
     )
     .with_context(|| format!("read the dtype of track {:?}", args.target.track))?;
-    let config = args.append.config(&args.target.track, dim);
+    let config = args.append.config(&args.target.track, dim, quiet);
     let options = BedImportOptions {
         fields: (!args.fields.is_empty()).then_some(args.fields),
         track: Some(args.target.track.clone()),
@@ -1099,7 +1088,9 @@ fn append_bed(args: AppendBedArgs) -> Result<()> {
         config,
     )
     .context("append BED columns")?;
-    report_append(&args.target, sources.len(), &report);
+    if !quiet {
+        print_report("appended", sources.len(), &args.target.store, &report);
+    }
     Ok(())
 }
 
@@ -1286,12 +1277,45 @@ mod tests {
     }
 
     #[test]
+    fn store_is_first_and_track_is_a_flag() {
+        let cli = Cli::try_parse_from([
+            "pbz", "-v", "-q", "import", "d4", "out.pbz", "a.d4", "b.d4", "--track", "depth",
+        ])
+        .unwrap();
+        assert_eq!(cli.global.verbose, 1);
+        assert!(cli.global.quiet);
+        let Command::Import(import) = cli.command else {
+            panic!("expected import");
+        };
+        let ImportCommand::D4(args) = import.format else {
+            panic!("expected import d4");
+        };
+        assert_eq!(args.d4.store, PathBuf::from("out.pbz"));
+        assert_eq!(args.d4.input.input_files.len(), 2);
+        assert_eq!(args.d4.track, "depth");
+
+        let cli = Cli::try_parse_from(["pbz", "view", "s.pbz", "--track", "af", "-c", "s1", "-v"])
+            .unwrap();
+        assert_eq!(cli.global.verbose, 1);
+        let Command::View(view) = cli.command else {
+            panic!("expected view");
+        };
+        assert_eq!(view.store, PathBuf::from("s.pbz"));
+        assert_eq!(view.track.as_deref(), Some("af"));
+
+        let err = Cli::try_parse_from([
+            "pbz", "import", "d4", "-o", "out.pbz", "--track", "depth", "a.d4",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
     fn codecs_conflicts_with_grid_flags() {
         let err = Cli::try_parse_from([
             "pbz",
             "import",
             "bed",
-            "-o",
             "out.pbz",
             "--genome",
             "g.fai",
@@ -1310,7 +1334,7 @@ mod tests {
     #[test]
     fn removed_knobs_are_rejected() {
         let import = |flag: &[&str]| {
-            let mut args = vec!["pbz", "import", "d4", "-o", "out.pbz", "--track", "depth"];
+            let mut args = vec!["pbz", "import", "d4", "out.pbz", "--track", "depth"];
             args.extend_from_slice(flag);
             args.push("in.d4");
             Cli::try_parse_from(args)
@@ -1332,7 +1356,7 @@ mod tests {
     #[test]
     fn dim_and_fasta_replace_the_old_flags() {
         let bam = |flags: &[&str]| {
-            let mut args = vec!["pbz", "import", "bam", "-o", "out.pbz", "--track", "depth"];
+            let mut args = vec!["pbz", "import", "bam", "out.pbz", "--track", "depth"];
             args.extend_from_slice(flags);
             args.push("in.cram");
             Cli::try_parse_from(args)

@@ -47,6 +47,7 @@ fn whole_genome_covers_mean_hist_and_column_order() {
         let mut args = vec!["stat".into()];
         args.extend(flags.iter().map(|f| (*f).into()));
         args.push(store.as_os_str().to_owned());
+        args.push("--track".into());
         args.push(track.into());
         let output = run_pbz(args);
         assert_eq!(
@@ -64,9 +65,10 @@ fn bed_regions_keep_order_including_duplicates_and_overlaps() {
     let bed = write_bed(dir.path(), "chr1\t0\t5\nchr1\t0\t5\nchr1\t3\t8\n");
     let output = run_pbz([
         "stat".into(),
-        "-r".into(),
+        "--region".into(),
         bed.into_os_string(),
         store.into_os_string(),
+        "--track".into(),
         "depth".into(),
     ]);
     assert_eq!(
@@ -93,9 +95,10 @@ fn median_min_max_report_integers() {
             "--no-header".into(),
             "-s".into(),
             stat.into(),
-            "-r".into(),
+            "--region".into(),
             bed.as_os_str().to_owned(),
             store.as_os_str().to_owned(),
+            "--track".into(),
             "depth".into(),
         ]);
         assert_eq!(stdout_of(&output), expected, "stat {stat}");
@@ -106,6 +109,7 @@ fn median_min_max_report_integers() {
         "-s".into(),
         "median".into(),
         store.into_os_string(),
+        "--track".into(),
         "af".into(),
     ]);
     assert!(!float_track.status.success());

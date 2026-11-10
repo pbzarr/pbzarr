@@ -256,15 +256,15 @@ def test_cli_reads_64_bit_integer_tracks_from_write(tmp_path):
             [pbz_binary(), *args], check=True, capture_output=True, text=True
         ).stdout
 
-    assert pbz("view", destination, "signed") == (
+    assert pbz("view", destination, "--track", "signed") == (
         f"#chrom\tstart\tend\tsigned\nchr1\t0\t4\t{-big}\nchr1\t4\t10\t7\n"
     )
-    assert pbz("view", destination, "unsigned") == (
+    assert pbz("view", destination, "--track", "unsigned") == (
         f"#chrom\tstart\tend\tunsigned\nchr1\t0\t4\t{big}\nchr1\t4\t10\t0\n"
     )
-    assert pbz("stat", "-s", "hist", destination, "signed") == (
+    assert pbz("stat", destination, "--track", "signed", "-s", "hist") == (
         f"#value\tcount\n{-big}\t4\n7\t6\n"
     )
-    assert pbz("stat", "-s", "max", destination, "unsigned") == (
+    assert pbz("stat", destination, "--track", "unsigned", "-s", "max") == (
         f"#chrom\tstart\tend\tmax\nchr1\t0\t10\t{big}\n"
     )

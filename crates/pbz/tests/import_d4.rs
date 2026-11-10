@@ -43,7 +43,6 @@ fn import_d4_then_stat_mean() {
     let import = run_pbz([
         "import".into(),
         "d4".into(),
-        "-o".into(),
         store.as_os_str().to_owned(),
         "--track".into(),
         "depth".into(),
@@ -56,7 +55,12 @@ fn import_d4_then_stat_mean() {
         String::from_utf8_lossy(&import.stderr)
     );
 
-    let mean = run_pbz(["stat".into(), store.into_os_string(), "depth".into()]);
+    let mean = run_pbz([
+        "stat".into(),
+        store.into_os_string(),
+        "--track".into(),
+        "depth".into(),
+    ]);
     assert_eq!(
         stdout_of(&mean),
         "#chrom\tstart\tend\tmean\nchr1\t0\t1000\t25.5\n"
@@ -67,7 +71,6 @@ fn import_d4_then_stat_mean() {
     let cohort_import = run_pbz([
         "import".into(),
         "d4".into(),
-        "-o".into(),
         cohort.as_os_str().to_owned(),
         "--track".into(),
         "depth".into(),
@@ -88,6 +91,7 @@ fn import_d4_then_stat_mean() {
         "-s".into(),
         "median".into(),
         cohort.into_os_string(),
+        "--track".into(),
         "depth".into(),
     ]);
     assert_eq!(
@@ -105,7 +109,6 @@ fn append_d4_widens_a_cohort_track() {
     let import = run_pbz([
         "import".into(),
         "d4".into(),
-        "-o".into(),
         store.as_os_str().to_owned(),
         "--track".into(),
         "depth".into(),
@@ -122,7 +125,6 @@ fn append_d4_widens_a_cohort_track() {
     let append = run_pbz([
         "append".into(),
         "d4".into(),
-        "-o".into(),
         store.as_os_str().to_owned(),
         "--track".into(),
         "depth".into(),
@@ -141,6 +143,7 @@ fn append_d4_widens_a_cohort_track() {
         "-s".into(),
         "median".into(),
         store.into_os_string(),
+        "--track".into(),
         "depth".into(),
     ]);
     assert_eq!(
@@ -158,7 +161,6 @@ fn import_creates_the_store_then_adds_tracks_and_refuses_a_used_name() {
         run_pbz([
             "import".into(),
             "d4".into(),
-            "-o".into(),
             store.as_os_str().to_owned(),
             "--track".into(),
             track.into(),
@@ -169,7 +171,12 @@ fn import_creates_the_store_then_adds_tracks_and_refuses_a_used_name() {
 
     stdout_of(&import("depth"));
     stdout_of(&import("depth2"));
-    let mean = run_pbz(["stat".into(), store.as_os_str().to_owned(), "depth2".into()]);
+    let mean = run_pbz([
+        "stat".into(),
+        store.as_os_str().to_owned(),
+        "--track".into(),
+        "depth2".into(),
+    ]);
     assert_eq!(
         stdout_of(&mean),
         "#chrom\tstart\tend\tmean\nchr1\t0\t1000\t25.5\n"
@@ -198,7 +205,6 @@ fn import_view_and_stat_on_a_format_0_4_store_fail_with_the_legacy_message() {
     let import = run_pbz([
         "import".into(),
         "d4".into(),
-        "-o".into(),
         store.as_os_str().to_owned(),
         "--track".into(),
         "depth".into(),

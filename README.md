@@ -121,10 +121,12 @@ BED does not record chromosome lengths. To create a store, a BED import needs a 
 
 ## CLI examples
 
+Every `pbz` command takes the store path as its first argument. Use `--track` to name the track.
+
 Import a bigWig file into a `signal` track:
 
 ```sh
-pbz import bigwig -o signal.pbz --track signal sample.bw
+pbz import bigwig signal.pbz sample.bw --track signal
 ```
 
 The import reads chromosome lengths from the bigWig header and stores values as `float32`. Uncovered bases contain `NaN`.
@@ -132,7 +134,7 @@ The import reads chromosome lengths from the bigWig header and stores values as 
 Import several files as labeled columns:
 
 ```sh
-pbz import bigwig -o cohort.pbz --track signal --dim sample brain.bw:brain liver.bw:liver
+pbz import bigwig cohort.pbz brain.bw:brain liver.bw:liver --track signal --dim sample
 ```
 
 All sources must describe the same genome. Without explicit labels, the import uses each file's stem as its column label.
@@ -142,7 +144,7 @@ The command accepts the same import options as `pbz import d4`. These include `-
 Add samples to an existing cohort track:
 
 ```sh
-pbz append bigwig -o cohort.pbz --track signal heart.bw:heart
+pbz append bigwig cohort.pbz heart.bw:heart --track signal
 ```
 
 Every variable over the appended dimension grows. Tracks that receive no data read their fill value in the new columns.
@@ -150,20 +152,30 @@ Every variable over the appended dimension grows. Tracks that receive no data re
 Read the sources from a list file:
 
 ```sh
-pbz import bigwig -o cohort.pbz --track signal --file-list sources.tsv
+pbz import bigwig cohort.pbz --file-list sources.tsv --track signal
 ```
 
 The source list contains one path per line, optionally followed by a tab and a label. If any source has a label, all sources must have labels.
+
+An import or append writes one summary line to stderr. `-q` hides the summary line and the progress display. `-v` gives more log output. You can put `-q` and `-v` before or after the subcommand.
+
+Export a track as bedGraph-like text:
+
+```sh
+pbz view cohort.pbz --track signal -o signal.bedgraph.gz
+```
+
+`pbz view` and `pbz stat` write to stdout when you do not give `-o`. When the store has one track, `--track` is optional.
 
 ## Single-file stores
 
 Import into a single zip file:
 
 ```sh
-pbz import d4 --zip -o cohort.pbz.zip --track depth s1.d4 s2.d4
+pbz import d4 cohort.pbz.zip s1.d4 s2.d4 --track depth --zip
 ```
 
-An output path that ends in `.zip` also writes a zip store, so `--zip` is optional here. The output path must not exist. The import writes a temporary file beside the output path and renames it at the end, so a failed import leaves no file.
+A store path that ends in `.zip` also writes a zip store, so `--zip` is optional here. The store path must not exist. The import writes a temporary file beside the store path and renames it at the end, so a failed import leaves no file.
 
 A zip store is written once. `pbz import` cannot add tracks to it, and `pbz append` refuses it. Without a shard flag or `--codecs`, each shard holds 64 position chunks and all columns. An import refuses `--codecs` without a `sharding_indexed` codec. `pbz view` and `pbz stat` read zip stores.
 

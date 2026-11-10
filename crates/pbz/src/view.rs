@@ -124,7 +124,7 @@ pub(crate) fn resolve_measurement<'s>(
             [] => bail!("store has no tracks"),
             [only] => Ok(Measurement::root(store, only)?),
             _ => bail!(
-                "store has {} tracks; name one (available: {})",
+                "store has {} tracks; name one with --track (available: {})",
                 available.len(),
                 available.join(", ")
             ),
