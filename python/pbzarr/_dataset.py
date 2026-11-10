@@ -448,6 +448,12 @@ def _catalog(source, storage_options) -> dict[str, _Stored]:
     return catalog
 
 
+_LEGACY_MESSAGE = (
+    "This is a format 0.4 store. pbzarr 0.8 reads format 0.5 only. "
+    "Use pbzarr 0.7, or import the data again."
+)
+
+
 def _check_identity(attrs: Mapping) -> None:
     conventions = attrs.get("zarr_conventions")
     uuids = [
@@ -455,18 +461,17 @@ def _check_identity(attrs: Mapping) -> None:
         for entry in conventions if isinstance(entry, Mapping)
     ] if isinstance(conventions, list) else []
     matches = uuids.count(_PBZ_UUID)
-    if matches == 0:
-        if _LEGACY_UUID in uuids:
-            raise PbzError(
-                "this is a format 0.4 PBZ store (per-track groups); this version "
-                "of pbzarr reads format 0.5 only"
-            )
-        raise PbzError("not a PBZ store: no pbz entry in zarr_conventions")
-    if matches > 1:
-        raise PbzError("invalid PBZ store: zarr_conventions lists pbz more than once")
+    if matches == 0 and _LEGACY_UUID in uuids:
+        raise PbzError(_LEGACY_MESSAGE)
+    if matches != 1:
+        raise PbzError("not a valid PBZ store: missing PBZ convention identity")
     version = attrs.get("pbz:version")
+    if not isinstance(version, str):
+        raise PbzError("not a valid PBZ store: pbz:version is missing or is not a string")
+    if version == "0.4":
+        raise PbzError(_LEGACY_MESSAGE)
     if version != FORMAT_VERSION:
-        raise PbzError(f"unsupported pbz:version {version!r}; expected {FORMAT_VERSION!r}")
+        raise PbzError(f"Unsupported format version {version}. This pbzarr reads 0.5.")
 
 
 def _reference(data: xr.Dataset) -> Reference:

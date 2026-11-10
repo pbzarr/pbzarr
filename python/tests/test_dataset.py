@@ -164,8 +164,24 @@ def test_legacy_store_is_refused(tmp_path: Path) -> None:
     group.attrs["zarr_conventions"] = [
         {"uuid": "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c", "name": "perbase"}
     ]
-    with pytest.raises(PbzError, match="format 0.4"):
+    with pytest.raises(PbzError, match="This is a format 0.4 store"):
         pbzarr.open(tmp_path / "old.pbz")
+
+
+def test_version_rule(cohort: Path) -> None:
+    group = zarr.open_group(cohort, mode="r+")
+    group.attrs["pbz:future"] = "ignored"
+    with pbzarr.open(cohort) as ds:
+        first = ds["depth"].isel(sample=0)
+    group.attrs["pbz:version"] = "9.9"
+    message = "Unsupported format version 9.9. This pbzarr reads 0.5."
+    with pytest.raises(PbzError, match=message):
+        pbzarr.open(cohort)
+    with pytest.raises(PbzError, match=message):
+        pbzarr.write(cohort, {"first": first})
+    del group.attrs["pbz:version"]
+    with pytest.raises(PbzError, match="not a valid PBZ store"):
+        pbzarr.open(cohort)
 
 
 def test_xarray_reads_a_python_written_store(cohort: Path) -> None:

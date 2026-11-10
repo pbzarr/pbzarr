@@ -132,33 +132,47 @@ fn catalogs_unsupported_neighbors_scalars_and_skips_groups() {
     assert!(!trace.contains("hidden/zarr.json"), "{trace}");
 }
 #[test]
-fn unsupported_version_is_distinct_from_bad_identity() {
+fn version_rule_names_each_failure() {
     let (storage, _) = catalog_fixture();
+    let open = |value: Value| {
+        put(&storage, "zarr.json", value);
+        Dataset::open_with_storage(storage.clone())
+            .map(|_| ())
+            .unwrap_err()
+    };
     let mut value = root();
     value["attributes"]["pbz:version"] = json!("future");
-    put(&storage, "zarr.json", value);
-    assert!(matches!(
-        Dataset::open_with_storage(storage.clone()),
-        Err(PbzError::UnsupportedFormat(_))
-    ));
+    assert_eq!(
+        open(value).to_string(),
+        "Unsupported format version future. This pbzarr reads 0.5."
+    );
+    let legacy = "This is a format 0.4 store. pbzarr 0.8 reads format 0.5 only. \
+                  Use pbzarr 0.7, or import the data again.";
     let mut value = root();
-    value["attributes"]["zarr_conventions"] = json!([]);
-    put(&storage, "zarr.json", value);
-    assert!(matches!(
-        Dataset::open_with_storage(storage.clone()),
-        Err(PbzError::Metadata(_))
-    ));
+    value["attributes"]["pbz:version"] = json!("0.4");
+    assert_eq!(open(value).to_string(), legacy);
     let mut value = root();
     value["attributes"]["zarr_conventions"] = json!([{
         "uuid": pbzarr::PERBASE_CONVENTION_UUID,
         "name": pbzarr::PERBASE_CONVENTION_NAME,
     }]);
-    put(&storage, "zarr.json", value);
-    match Dataset::open_with_storage(storage) {
-        Err(PbzError::UnsupportedFormat(v)) => assert!(v.contains("0.4"), "got {v:?}"),
-        Err(other) => panic!("a 0.4 root must report an unsupported format, got {other:?}"),
-        Ok(_) => panic!("a 0.4 root must not open as a format-0.5 Dataset"),
+    assert_eq!(open(value).to_string(), legacy);
+    for version in [Value::Null, json!(5)] {
+        let mut value = root();
+        value["attributes"]["pbz:version"] = version;
+        assert!(matches!(open(value), PbzError::InvalidStore(_)));
     }
+    let mut value = root();
+    value["attributes"]["zarr_conventions"] = json!([]);
+    assert!(matches!(open(value), PbzError::InvalidStore(_)));
+}
+#[test]
+fn readers_ignore_unknown_pbz_attributes() {
+    let (storage, _) = catalog_fixture();
+    let mut value = root();
+    value["attributes"]["pbz:future"] = json!({"any": "value"});
+    put(&storage, "zarr.json", value);
+    assert!(Dataset::open_with_storage(storage).is_ok());
 }
 
 use pbzarr::dataset::{GenomicAxis, ValidationStatus};

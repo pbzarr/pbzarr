@@ -22,8 +22,16 @@ fn raw<T: ElementOwned + serde::Serialize>(
 fn check(path: &std::path::Path) -> anyhow::Result<Value> {
     let ds = match Dataset::open(path) {
         Ok(ds) => ds,
-        Err(PbzError::UnsupportedFormat(version)) => {
+        Err(PbzError::UnsupportedVersion(version)) => {
             return Ok(json!({"status":"unsupported_version","version":version}));
+        }
+        Err(PbzError::LegacyFormat) => {
+            return Ok(json!({"status":"unsupported_version","version":"0.4"}));
+        }
+        Err(PbzError::InvalidStore(message)) => {
+            return Ok(
+                json!({"status":"invalid","issues":[{"array":null,"rule":"R1","message":message}]}),
+            );
         }
         Err(PbzError::Metadata(message)) => {
             let rule = message

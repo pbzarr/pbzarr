@@ -811,7 +811,7 @@ fn open_or_create(path: &Path, reference: impl FnOnce() -> Result<Vec<Contig>>) 
         );
         return match Dataset::open(path) {
             Ok(dataset) => Ok(Output::Dataset(dataset)),
-            Err(PbzError::UnsupportedFormat(_)) => PbzStore::open(path)
+            Err(PbzError::LegacyFormat) => PbzStore::open(path)
                 .map(Output::Store)
                 .with_context(|| format!("open output store {}", path.display())),
             Err(error) => {
@@ -969,16 +969,7 @@ fn open_append(path: &Path, track: &str) -> Result<(Dataset, String)> {
             path.display()
         );
     }
-    let dataset = match Dataset::open(path) {
-        Ok(dataset) => dataset,
-        Err(PbzError::UnsupportedFormat(found)) => bail!(
-            "{} is not a format 0.5 store (found {found}); pbz append only grows format 0.5",
-            path.display()
-        ),
-        Err(error) => {
-            return Err(error).with_context(|| format!("open store {}", path.display()));
-        }
-    };
+    let dataset = Dataset::open(path).with_context(|| format!("open store {}", path.display()))?;
     let info = dataset
         .variables()
         .get(track)

@@ -51,11 +51,11 @@ enum Output {
 
 impl Output {
     /// Open an existing destination, detecting its format from the root
-    /// attributes. A format-0.4 root reports as an unsupported format.
+    /// attributes. A format 0.4 root opens as the 0.4 store.
     fn open(path: &str) -> PyResult<Self> {
         match Dataset::open(path) {
             Ok(dataset) => Ok(Self::Dataset(dataset)),
-            Err(pbzarr::PbzError::UnsupportedFormat(_)) => PbzStore::open(path)
+            Err(pbzarr::PbzError::LegacyFormat) => PbzStore::open(path)
                 .map(Self::Store)
                 .map_err(|e| PbzError::new_err(format!("{e}"))),
             Err(error) => Err(PbzError::new_err(format!("{error}"))),

@@ -4,8 +4,14 @@ pub type Result<T> = std::result::Result<T, PbzError>;
 /// Errors that can occur when working with PBZ stores.
 #[derive(Debug, thiserror::Error)]
 pub enum PbzError {
-    #[error("unsupported PBZ format: {0}")]
-    UnsupportedFormat(String),
+    #[error(
+        "This is a format 0.4 store. pbzarr 0.8 reads format 0.5 only. Use pbzarr 0.7, or import the data again."
+    )]
+    LegacyFormat,
+    #[error("Unsupported format version {0}. This pbzarr reads 0.5.")]
+    UnsupportedVersion(String),
+    #[error("not a valid PBZ store: {0}")]
+    InvalidStore(String),
     #[error("unsupported encoding: {0}")]
     UnsupportedEncoding(String),
 

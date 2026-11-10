@@ -129,28 +129,26 @@ fn support(info: &VariableInfo) -> Support {
 pub(super) fn catalog(
     storage: &ReadableWritableListableStorage,
 ) -> Result<(Value, BTreeMap<String, VariableInfo>)> {
-    let root = get_json(storage, "zarr.json")?
-        .ok_or_else(|| PbzError::Metadata("R1: missing root metadata".into()))?;
+    let invalid = |m: &str| PbzError::InvalidStore(m.into());
+    let root = get_json(storage, "zarr.json")?.ok_or_else(|| invalid("missing root metadata"))?;
     if root["zarr_format"] != 3 || root["node_type"] != "group" || !root["attributes"].is_object() {
-        return Err(PbzError::Metadata("R1: expected Zarr v3 root group".into()));
+        return Err(invalid("expected a Zarr v3 root group"));
     }
     let attrs = &root["attributes"];
     let conventions = attrs["zarr_conventions"].as_array();
     if conventions.is_none_or(|a| a.iter().filter(|c| c["uuid"] == CONVENTION).count() != 1) {
         if conventions.is_some_and(|a| a.iter().any(|c| c["uuid"] == LEGACY_CONVENTION)) {
-            return Err(PbzError::UnsupportedFormat(
-                "0.4 per-track group layout".into(),
-            ));
+            return Err(PbzError::LegacyFormat);
         }
-        return Err(PbzError::Metadata(
-            "R1: missing PBZ convention identity".into(),
-        ));
+        return Err(invalid("missing PBZ convention identity"));
     }
     let version = attrs["pbz:version"]
         .as_str()
-        .ok_or_else(|| PbzError::Metadata("R1: missing version".into()))?;
-    if version != FORMAT_VERSION {
-        return Err(PbzError::UnsupportedFormat(version.into()));
+        .ok_or_else(|| invalid("pbz:version is missing or is not a string"))?;
+    match version {
+        FORMAT_VERSION => {}
+        "0.4" => return Err(PbzError::LegacyFormat),
+        other => return Err(PbzError::UnsupportedVersion(other.into())),
     }
     let mut variables = BTreeMap::new();
     let children = storage

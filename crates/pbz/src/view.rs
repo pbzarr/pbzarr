@@ -99,9 +99,9 @@ pub(crate) enum Store {
 pub(crate) fn open_store(path: &Path) -> Result<Store> {
     match Dataset::open(path) {
         Ok(dataset) => Ok(Store::Root(dataset)),
-        Err(PbzError::UnsupportedFormat(format)) => PbzStore::open(path)
+        Err(PbzError::LegacyFormat) => PbzStore::open(path)
             .map(Store::Legacy)
-            .with_context(|| format!("open store {} (format {format})", path.display())),
+            .with_context(|| format!("open store {} (format 0.4)", path.display())),
         Err(error) => Err(error).with_context(|| format!("open store {}", path.display())),
     }
 }

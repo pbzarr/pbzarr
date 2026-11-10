@@ -123,10 +123,7 @@ impl Target<'_> {
         options: PipelineOptions,
     ) -> Result<Report> {
         match self {
-            Self::Store(_) => Err(PbzError::UnsupportedFormat(
-                "append grows a format 0.5 root Dataset; this destination is a format 0.4 store"
-                    .into(),
-            )),
+            Self::Store(_) => Err(PbzError::LegacyFormat),
             Self::Dataset(dataset) | Self::Append(dataset) => {
                 dataset_run(dataset, specs, readers, axes, options, DatasetPlan::Append)
             }
