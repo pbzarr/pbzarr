@@ -50,6 +50,8 @@ pbzarr.import_d4(
 
 This creates the store `depth.pbz` and a `depth` track with one row per genomic position and one column per sample. The import takes the store's reference from the source headers. All sources must have the same contig names, lengths, and order.
 
+Each source is a path or a `(path, label)` tuple. Give a list for several sources. If one source has a label, all sources must have labels. A missing source file raises `FileNotFoundError`, and a bad argument raises `ValueError`. Other failures raise `pbzarr.PbzError`.
+
 When the store exists, the import adds the track to it. The sources must then match the store's reference. The import refuses a track name that the store already uses. The CLI imports follow the same rule.
 
 ### Read a region

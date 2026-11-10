@@ -42,12 +42,21 @@ pub fn column_index_by_name<P: AsRef<Path>>(
     })
 }
 
+/// How many BED records dtype inference reads: a sample of the first
+/// records (1000 by default), or all of them.
 #[derive(Debug, Clone, Copy)]
 pub enum InferRows {
     Sample(usize),
     All,
 }
 
+impl Default for InferRows {
+    fn default() -> Self {
+        Self::Sample(1_000)
+    }
+}
+
+#[derive(Default)]
 pub struct BedImportOptions {
     /// Header field names to import; `None` selects every value field.
     pub fields: Option<Vec<String>>,
@@ -60,19 +69,6 @@ pub struct BedImportOptions {
     pub dtype: Option<Dtype>,
     /// Grow the existing `track`: one BED column fills it, as `dtype` when given.
     pub append: bool,
-}
-
-impl Default for BedImportOptions {
-    fn default() -> Self {
-        Self {
-            fields: None,
-            dtype_overrides: BTreeMap::new(),
-            infer_rows: InferRows::Sample(1_000),
-            track: None,
-            dtype: None,
-            append: false,
-        }
-    }
 }
 
 pub(super) struct ResolvedField {
@@ -117,7 +113,7 @@ pub struct BedLayout {
 
 /// Sniff a BED's layout from its first line.
 pub fn read_bed_layout(path: &Path) -> Result<BedLayout> {
-    let mut reader = open_bgzf(path).map_err(|error| PbzError::Store(error.to_string()))?;
+    let mut reader = open_bgzf(path)?;
     let mut line = Vec::new();
     reader
         .read_until(b'\n', &mut line)
@@ -507,7 +503,7 @@ fn sample_columns(
     limit: InferRows,
     inference: &mut [InferenceState],
 ) -> Result<bool> {
-    let mut reader = open_bgzf(path).map_err(|error| PbzError::Store(error.to_string()))?;
+    let mut reader = open_bgzf(path)?;
     let mut line = Vec::new();
     let mut count = 0usize;
     while reader

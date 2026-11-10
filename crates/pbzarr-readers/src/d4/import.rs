@@ -37,7 +37,7 @@ pub fn from_d4<'t>(
         .iter()
         .map(|s| {
             debug!("opening d4 source {}", s.path.display());
-            D4Reader::open(&s.path).map_err(|e| PbzError::Store(e.to_string()))
+            D4Reader::open(&s.path).map_err(|e| crate::open_failed(&s.path, e))
         })
         .collect::<Result<_>>()?;
 

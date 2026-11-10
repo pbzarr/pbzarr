@@ -87,6 +87,18 @@ def test_import_d4_cohort_opens_as_one_xarray_dataset(tmp_path, cohort_fixtures)
         np.testing.assert_array_equal(dataset["depth"].values[:, 1], expected + 100)
 
 
+def test_import_errors_name_a_missing_file_or_a_bad_argument(tmp_path, d4_fixture):
+    destination = tmp_path / "d4.pbz"
+
+    with pytest.raises(FileNotFoundError, match="missing.d4"):
+        pbzarr.import_d4(destination, "depth", tmp_path / "missing.d4")
+    with pytest.raises(FileNotFoundError):
+        pbzarr.open(destination)
+    with pytest.raises(ValueError, match="all provide labels or none"):
+        pbzarr.import_d4(destination, "depth", [(d4_fixture, "a"), d4_fixture])
+    assert not destination.exists()
+
+
 def test_import_bigwig_path_list_defaults_to_sample_axis(tmp_path, write_bigwig):
     first = write_bigwig("chr1", 20, "first", base=0.0)
     second = write_bigwig("chr1", 20, "second", base=10.0)
@@ -155,6 +167,26 @@ def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
         assert dataset["is_max"].dtype == np.dtype("bool")
         assert dataset["score"].values[[0, -1]].tolist() == [1.5, -2.5]
         assert dataset["is_max"].values[[0, -1]].tolist() == [True, False]
+
+
+def test_import_bed_refuses_coordinate_and_unnamed_numbered_columns(tmp_path):
+    bed = write_bed_bgzip_tabix(
+        tmp_path,
+        "numbered",
+        ["chrom", "start", "end", "coverage"],
+        [("chr1", 0, 20, ["7"])],
+    )
+    genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
+    destination = tmp_path / "numbered.pbz"
+
+    with pytest.raises(ValueError, match="coordinate column"):
+        pbzarr.import_bed(destination, bed, genome=genome, column=2, track="start")
+    with pytest.raises(ValueError, match="needs a track name"):
+        pbzarr.import_bed(destination, bed, genome=genome, column=4)
+
+    pbzarr.import_bed(destination, bed, genome=genome, column=4, track="depth")
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert dataset["depth"].values.tolist() == [7] * 20
 
 
 def test_import_bed_wide_form_gathers_fields_into_one_track(tmp_path):
@@ -229,7 +261,7 @@ def test_import_d4_codecs_override_controls_zarr_metadata(tmp_path, d4_fixture):
     meta = json.loads((destination / "depth" / "zarr.json").read_text())
     assert [c["name"] for c in meta["codecs"]] == ["bytes", "zstd"]
 
-    with pytest.raises(pbzarr.PbzError):
+    with pytest.raises(ValueError, match="codecs conflicts with"):
         pbzarr.import_d4(
             destination,
             "depth2",

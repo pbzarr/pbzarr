@@ -27,6 +27,10 @@ pub enum PbzError {
     #[error("invalid dtype: {dtype}")]
     InvalidDtype { dtype: String },
 
+    /// A caller argument that no store or file can satisfy.
+    #[error("{0}")]
+    InvalidArgument(String),
+
     #[error("store error: {0}")]
     Store(String),
 

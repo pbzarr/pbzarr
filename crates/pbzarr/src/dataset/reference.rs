@@ -125,8 +125,10 @@ impl Reference {
     /// Read a FASTA index (`.fai`): column 0 is the contig name and column 1
     /// its length. Other columns are ignored.
     pub fn from_fai(path: impl AsRef<Path>) -> Result<Self> {
-        let text = std::fs::read_to_string(path.as_ref())
-            .map_err(|e| PbzError::Store(format!("read fai: {e}")))?;
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            std::io::Error::new(e.kind(), format!("read fai {}: {e}", path.display()))
+        })?;
         let mut contigs = Vec::new();
         for (index, line) in text.lines().enumerate() {
             if line.is_empty() {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 import json
 import os
 from typing import TypeAlias
@@ -42,26 +42,18 @@ def _source(value: object) -> tuple[str, str | None]:
         and isinstance(value[1], str)
     ):
         return (_path(value[0], "source path"), value[1])
-    raise TypeError("each source must be a path or an exact (path, column_label) tuple")
-
-
-_SOURCE_SUFFIXES = (".d4", ".bw", ".bigwig", ".bed", ".bed.gz", ".bam", ".cram")
+    raise TypeError("each source must be a path or an exact (path, label) tuple")
 
 
 def _sources(values: Source | Iterable[Source]) -> list[tuple[str, str | None]]:
-    if _is_pathlike(values):
-        normalized = [_source(values)]
-    elif (
+    """One source, or an iterable of them. A ``(path, str)`` tuple is always
+    one labeled source; give a list for several sources."""
+    if _is_pathlike(values) or (
         type(values) is tuple
         and len(values) == 2
         and _is_pathlike(values[0])
         and isinstance(values[1], str)
     ):
-        if values[1].lower().endswith(_SOURCE_SUFFIXES):
-            raise ValueError(
-                f"source label {values[1]!r} looks like a source file; pass a"
-                " list to import multiple sources, or rename the label"
-            )
         normalized = [_source(values)]
     else:
         try:
@@ -114,6 +106,10 @@ def import_d4(
     When the destination does not exist, the import creates it from the
     source headers. When it exists, the import adds the track to it. A
     track name that the store already uses is refused.
+    `sources` is a path, a `(path, label)` tuple, or a list of them. Give
+    labels for all sources or for none; without labels, each column takes
+    the file name without its format extension. A missing source file
+    raises `FileNotFoundError`, and a bad argument raises `ValueError`.
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
     """
@@ -121,16 +117,16 @@ def import_d4(
 
     normalized_sources = _sources(sources)
     return _native.import_d4(
-        destination_path,
-        track,
-        normalized_sources,
-        dim,
-        threads,
-        chunk_size,
-        column_chunk_size,
-        shard_size,
-        shard_column_size,
-        progress,
+        destination=destination_path,
+        track=track,
+        sources=normalized_sources,
+        dim=dim,
+        threads=threads,
+        chunk_size=chunk_size,
+        column_chunk_size=column_chunk_size,
+        shard_size=shard_size,
+        shard_column_size=shard_column_size,
+        progress=progress,
         codecs=_codecs_json(codecs),
         decode_chunks=decode_chunks,
     )
@@ -156,6 +152,10 @@ def import_bigwig(
     When the destination does not exist, the import creates it from the
     source headers. When it exists, the import adds the track to it. A
     track name that the store already uses is refused.
+    `sources` is a path, a `(path, label)` tuple, or a list of them. Give
+    labels for all sources or for none; without labels, each column takes
+    the file name without its format extension. A missing source file
+    raises `FileNotFoundError`, and a bad argument raises `ValueError`.
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
     """
@@ -163,16 +163,16 @@ def import_bigwig(
 
     normalized_sources = _sources(sources)
     return _native.import_bigwig(
-        destination_path,
-        track,
-        normalized_sources,
-        dim,
-        threads,
-        chunk_size,
-        column_chunk_size,
-        shard_size,
-        shard_column_size,
-        progress,
+        destination=destination_path,
+        track=track,
+        sources=normalized_sources,
+        dim=dim,
+        threads=threads,
+        chunk_size=chunk_size,
+        column_chunk_size=column_chunk_size,
+        shard_size=shard_size,
+        shard_column_size=shard_column_size,
+        progress=progress,
         codecs=_codecs_json(codecs),
         decode_chunks=decode_chunks,
     )
@@ -217,10 +217,11 @@ def import_bed(
     The call has three forms, matching `pbz import bed`:
 
     - `column=` selects one BED column (a header name, or a 1-based column
-      number) and imports it as one track. `track=` names the track;
-      it defaults to the column name. `dtype=` skips inference.
-    - `schema=` maps BED column selectors to dtype strings and imports one
-      track per entry, named by its selector. A `None` dtype is inferred
+      number of 4 or more) and imports it as one track. `track=` names the
+      track; it defaults to the header name, so a numbered column needs
+      `track=`. `dtype=` skips inference.
+    - `schema=` maps BED header names to dtype strings and imports one
+      track per entry, named by its header name. A `None` dtype is inferred
       across every source. `schema=` conflicts with `track=`, `column=`,
       and `dtype=`.
     - With none of those, BED3 input imports a bool presence track and
@@ -236,6 +237,10 @@ def import_bed(
     chrom.sizes file. When it exists, the store gives the lengths, and
     `genome=` is optional; if given, it must match the store. A track name
     that the store already uses is refused.
+    `sources` is a path, a `(path, label)` tuple, or a list of them. Give
+    labels for all sources or for none; without labels, each column takes
+    the file name without its format extension. A missing source file
+    raises `FileNotFoundError`, and a bad argument raises `ValueError`.
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
     """
@@ -258,20 +263,20 @@ def import_bed(
             schema_entries.append((_bed_selector(key), value))
     normalized_column = _bed_selector(column) if column is not None else None
     return _native.import_bed(
-        destination_path,
-        normalized_sources,
-        genome_path,
-        schema_entries,
-        track,
-        normalized_column,
-        dtype,
-        dim,
-        threads,
-        chunk_size,
-        column_chunk_size,
-        shard_size,
-        shard_column_size,
-        progress,
+        destination=destination_path,
+        sources=normalized_sources,
+        genome=genome_path,
+        schema=schema_entries,
+        track=track,
+        column=normalized_column,
+        dtype=dtype,
+        dim=dim,
+        threads=threads,
+        chunk_size=chunk_size,
+        column_chunk_size=column_chunk_size,
+        shard_size=shard_size,
+        shard_column_size=shard_column_size,
+        progress=progress,
         codecs=_codecs_json(codecs),
         decode_chunks=decode_chunks,
     )
@@ -289,7 +294,6 @@ def import_bam(
     min_bq: int = 0,
     overlap: str = "proper",
     count_deletions: bool = False,
-    column_labels: Sequence[str] | None = None,
     dim: str | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
@@ -317,43 +321,36 @@ def import_bam(
     import adds the track(s) to it. A track name that the store already
     uses is refused. `decode_chunks=` sets the position chunks each reader
     decodes per pass (default auto). Returns the import report dict.
+
+    `sources` is a path, a `(path, label)` tuple, or a list of them. Give
+    labels for all sources or for none; without labels, each column takes
+    the file name without its format extension. A missing source file
+    raises `FileNotFoundError`, and a bad argument raises `ValueError`.
     """
     destination_path = _destination(destination)
 
     if overlap not in ("proper", "all", "none"):
         raise ValueError('overlap must be "proper", "all", or "none"')
     normalized_sources = _sources(sources)
-    if column_labels is not None:
-        labels = list(column_labels)
-        if len(labels) != len(normalized_sources):
-            raise ValueError("column_labels must match the number of sources")
-        merged: list[tuple[str, str | None]] = []
-        for (path, existing), label in zip(normalized_sources, labels):
-            if existing is not None:
-                raise ValueError(
-                    "column_labels conflicts with a (path, label) source tuple"
-                )
-            merged.append((path, label))
-        normalized_sources = merged
     fasta_path = _path(fasta, "fasta") if fasta is not None else None
     return _native.import_bam(
-        destination_path,
-        track,
-        normalized_sources,
-        mode,
-        fasta_path,
-        min_mapq,
-        exclude_flags,
-        min_bq,
-        overlap,
-        count_deletions,
-        dim,
-        threads,
-        chunk_size,
-        column_chunk_size,
-        shard_size,
-        shard_column_size,
-        progress,
+        destination=destination_path,
+        track=track,
+        sources=normalized_sources,
+        mode=mode,
+        fasta=fasta_path,
+        min_mapq=min_mapq,
+        exclude_flags=exclude_flags,
+        min_bq=min_bq,
+        overlap=overlap,
+        count_deletions=count_deletions,
+        dim=dim,
+        threads=threads,
+        chunk_size=chunk_size,
+        column_chunk_size=column_chunk_size,
+        shard_size=shard_size,
+        shard_column_size=shard_column_size,
+        progress=progress,
         codecs=_codecs_json(codecs),
         decode_chunks=decode_chunks,
     )

@@ -14,7 +14,6 @@ import xarray as xr
 from . import _coord
 from ._coord import _check_full
 from ._locus import locus_coords
-from ._native import PbzError
 from ._reference import Reference, bin_width
 from ._region_query import RegionQuery
 from ._regions import interval_columns, reduce_regions_dataset, reducer_options
@@ -178,7 +177,7 @@ def _reduce_dataset(
         raise ValueError("reduce_regions needs at least one variable with a 'position' dimension")
     for name in tracks:
         if ds[name].ndim > 2:
-            raise PbzError(
+            raise ValueError(
                 f"track {name!r} has {ds[name].ndim} dimensions; region operations "
                 "handle position plus at most one more"
             )

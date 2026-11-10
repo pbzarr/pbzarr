@@ -210,7 +210,8 @@ def open(
     default each track is a Dask array chunked by its stored shard (or chunk)
     shape; ``chunks=None`` gives lazy NumPy-backed arrays, and any other value
     goes to ``xr.open_zarr``. The Dataset is a snapshot: a change in memory
-    does not reach the store.
+    does not reach the store. A missing local store raises
+    ``FileNotFoundError``, and an unknown track name raises ``ValueError``.
     """
     data = _read(source, storage_options, chunks).data
     if tracks is not None:
@@ -257,7 +258,7 @@ def create(
         if isinstance(length, bool) or not isinstance(length, (int, np.integer)) or length < 0:
             raise ValueError(f"length of contig {name!r} must be a nonnegative integer")
         contigs.append((name, int(length)))
-    _native.create_store(path, contigs)
+    _native.create_dataset(destination=path, reference=contigs)
     return open(path, storage_options=storage_options)
 
 
@@ -347,6 +348,8 @@ def _read(source, storage_options, chunks, *, listed: bool = False) -> _Store:
     one. ``listed=True`` lists the store instead, for writes."""
     if isinstance(source, (str, os.PathLike)):
         source = os.fspath(source)
+        if "://" not in source and not os.path.exists(source):
+            raise FileNotFoundError(f"{source} does not exist")
     zipped = _zip.zip_path(source)
     if zipped is None:
         return _read_store(source, source, storage_options, chunks, listed=listed)
@@ -518,7 +521,10 @@ def _reference(data: xr.Dataset) -> Reference:
             raise PbzError(f"invalid PBZ store: reference array {name!r} is missing")
         if data[name].dims != ("contig",):
             raise PbzError(f"invalid PBZ store: {name!r} must have the one dimension 'contig'")
-    return Reference(data["contig_id"].values.tolist(), data["contig_length"].values)
+    try:
+        return Reference(data["contig_id"].values.tolist(), data["contig_length"].values)
+    except ValueError as error:
+        raise PbzError(f"invalid PBZ store: {error}") from error
 
 
 def _check_genomic_dims(data: xr.Dataset, reference: Reference) -> None:
@@ -573,5 +579,5 @@ def _attach_source(
 def _select(data: xr.Dataset, names: list[str]) -> xr.Dataset:
     unknown = [name for name in names if name not in data.data_vars]
     if unknown:
-        raise PbzError(f"unknown track {unknown[0]!r}")
+        raise ValueError(f"unknown track {unknown[0]!r}")
     return data.drop_vars([name for name in data.data_vars if name not in names])

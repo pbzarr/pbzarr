@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bigtools::BigWigRead;
 use bigtools::utils::file::reopen::ReopenableFile;
+use bigtools::{BigWigRead, BigWigReadOpenError};
 
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader};
 use pbzarr::{Contig, Reference};
@@ -32,8 +32,13 @@ impl BigWigReader {
     /// Open a bigWig file. The header gives the contig list.
     pub fn open<P: AsRef<Path>>(src: P) -> Result<Self> {
         let path = src.as_ref().to_path_buf();
-        let inner = BigWigRead::open_file(&path)
-            .map_err(|e| ReaderError::Other(anyhow::anyhow!("open {}: {e}", path.display())))?;
+        let inner = BigWigRead::open_file(&path).map_err(|e| match e {
+            BigWigReadOpenError::IoError(source) => ReaderError::Io {
+                path: path.clone(),
+                source,
+            },
+            e => ReaderError::Other(anyhow::anyhow!("open {}: {e}", path.display())),
+        })?;
 
         let contigs: Vec<Contig> = inner
             .chroms()

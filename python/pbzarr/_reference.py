@@ -8,7 +8,6 @@ import re
 
 import numpy as np
 
-from ._native import PbzError
 from ._region_query import RegionQuery, as_query
 
 _I64_MAX = np.iinfo(np.int64).max
@@ -26,7 +25,7 @@ def bin_width(dim: str) -> int | None:
         return None
     match = _BIN_DIM.match(dim)
     if match is None or int(match.group(1)) > _I64_MAX:
-        raise PbzError(f"{dim!r} is not a canonical bin_N dimension name")
+        raise ValueError(f"{dim!r} is not a canonical bin_N dimension name")
     return int(match.group(1))
 
 
@@ -41,19 +40,19 @@ class Reference(Mapping[str, int]):
         names = tuple(names)
         lengths = np.asarray(lengths)
         if lengths.ndim != 1 or lengths.size != len(names):
-            raise PbzError("reference names and lengths must have equal length")
+            raise ValueError("reference names and lengths must have equal length")
         if lengths.size and (
             lengths.dtype.kind not in "iu"
             or np.any(lengths < 0)
             or int(lengths.max()) > _I64_MAX
         ):
-            raise PbzError("reference lengths must be nonnegative integers")
+            raise ValueError("reference lengths must be nonnegative integers")
         if any(not isinstance(name, str) or not name for name in names):
-            raise PbzError("reference names must be nonempty strings")
+            raise ValueError("reference names must be nonempty strings")
         if len(set(names)) != len(names):
-            raise PbzError("reference names must be unique")
+            raise ValueError("reference names must be unique")
         if sum(int(n) for n in lengths.tolist()) > _I64_MAX:
-            raise PbzError("reference extent exceeds signed 64-bit indexing")
+            raise ValueError("reference extent exceeds signed 64-bit indexing")
         lengths = lengths.astype(np.int64)
         lengths.setflags(write=False)
         self._names = names
@@ -90,7 +89,7 @@ class Reference(Mapping[str, int]):
     def _axis_offsets(self, dim: str) -> tuple[int, np.ndarray]:
         width = bin_width(dim)
         if width is None:
-            raise PbzError(f"{dim!r} is not a genomic dimension")
+            raise ValueError(f"{dim!r} is not a genomic dimension")
         return width, self.offsets if width == 1 else self._offsets(width)
 
     def size(self, dim: str = "position") -> int:

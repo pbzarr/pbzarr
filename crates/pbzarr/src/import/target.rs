@@ -235,7 +235,7 @@ pub fn store_reference(path: &Path, genome: Option<Reference>) -> Result<Referen
     refuse_zip(path)?;
     if !path.exists() {
         return genome.ok_or_else(|| {
-            PbzError::Metadata(format!(
+            PbzError::InvalidArgument(format!(
                 "a genome file is needed to create the store {}",
                 path.display()
             ))

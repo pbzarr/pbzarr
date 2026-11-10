@@ -15,10 +15,9 @@ use pbzarr::io::Dtype;
 use pbzarr::stat::StatKind;
 use pbzarr::{ExplicitArraySpec, Reference};
 use pbzarr_readers::{
-    BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
-    OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam, from_bed_matrix,
-    from_bigwig, from_d4, infer_bed_dtypes, infer_bed_dtypes_for_sources, plan_bed_schema,
-    read_bed_layout,
+    BedColumnRequest, BedImportOptions, BedSchema, DepthFilter, ImportMode, InferRows, OverlapMode,
+    build_bed_schema, execute_bed_schema_plan, from_bam, from_bed_matrix, from_bigwig, from_d4,
+    infer_bed_dtypes, plan_bed_schema, read_bed_layout,
 };
 
 mod fmt;
@@ -577,10 +576,7 @@ impl ImportInputOptions {
         if sources.is_empty() {
             bail!("at least one input source is required");
         }
-        let labeled = sources.iter().filter(|s| s.column_label.is_some()).count();
-        if labeled != 0 && labeled != sources.len() {
-            bail!("sources must either all provide labels or none do");
-        }
+        Source::check_labels(&sources)?;
         Ok(sources)
     }
 }
@@ -625,11 +621,12 @@ struct BedOptions {
         ]
     )]
     emit_schema: Option<PathBuf>,
-    /// Records sampled for dtype inference, or `all`. A sample infers
-    /// conservative classes (bool/int32/float32); `all` (or a file smaller
-    /// than the sample) scans exhaustively and min-widths (uint8, int16, ...).
-    #[arg(long, default_value = "1000", value_name = "N|all")]
-    infer_rows: String,
+    /// Records sampled for dtype inference (default 1000), or `all`. A sample
+    /// infers conservative classes (bool/int32/float32); `all` (or a file
+    /// smaller than the sample) scans exhaustively and min-widths (uint8,
+    /// int16, ...).
+    #[arg(long, value_name = "N|all")]
+    infer_rows: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -959,7 +956,13 @@ fn stat(args: StatArgs) -> Result<()> {
 }
 
 fn import_bed(args: BedArgs, quiet: bool) -> Result<()> {
-    let infer_rows = parse_infer_rows(&args.bed.infer_rows)?;
+    let infer_rows = args
+        .bed
+        .infer_rows
+        .as_deref()
+        .map(parse_infer_rows)
+        .transpose()?
+        .unwrap_or_default();
     if let Some(bed) = &args.bed.emit_schema {
         info!("emitting a schema scaffold to stdout; no store is written");
         return emit_schema(bed, infer_rows);
@@ -1209,13 +1212,7 @@ fn append_bed(args: AppendBedArgs, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-struct SchemaRow {
-    bed_column: String,
-    track: Option<String>,
-    dtype: Option<Dtype>,
-}
-
-fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<SchemaRow>> {
+fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<BedColumnRequest>> {
     let mut rows = Vec::new();
     for (index, line) in text.lines().enumerate() {
         let record = line.trim_end();
@@ -1236,8 +1233,8 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<SchemaRow>> {
             .map(|dtype| Dtype::from_str(dtype))
             .transpose()
             .with_context(|| format!("schema {} line {}", path.display(), index + 1))?;
-        rows.push(SchemaRow {
-            bed_column: cells[0].to_owned(),
+        rows.push(BedColumnRequest {
+            column: cells[0].to_owned(),
             track: cells
                 .get(1)
                 .filter(|t| !t.is_empty())
@@ -1283,70 +1280,12 @@ fn emit_schema(bed: &Path, infer_rows: InferRows) -> Result<()> {
     Ok(())
 }
 
-/// Build a `BedSchema` from a TSV schema file, resolving name selectors against
-/// the first BED header and inferring omitted dtypes across every source.
+/// Build a `BedSchema` from a TSV schema file.
 fn load_schema(schema_path: &Path, sources: &[Source], infer_rows: InferRows) -> Result<BedSchema> {
     let text = std::fs::read_to_string(schema_path)
         .with_context(|| format!("read schema {}", schema_path.display()))?;
     let rows = read_schema_rows(&text, schema_path)?;
-    let first = sources
-        .first()
-        .context("schema import requires a BED source")?;
-
-    let mut specs = Vec::with_capacity(rows.len());
-    let mut file_cols = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let (selector, file_col) = if row.bed_column.bytes().all(|byte| byte.is_ascii_digit()) {
-            let index = row.bed_column.parse::<usize>().map_err(|_| {
-                anyhow!(
-                    "invalid numeric BED-column selector {:?}: value overflows usize",
-                    row.bed_column
-                )
-            })?;
-            if index < 4 {
-                bail!(
-                    "schema BED column {index} is a coordinate column (indices are 1-based; value BED columns start at 4)"
-                );
-            }
-            if row.track.is_none() {
-                bail!(
-                    "schema BED column {index} needs a target track name (no header name is available as a default)"
-                );
-            }
-            (ColumnSelector::Index(index - 1), index - 1)
-        } else {
-            let file_col = column_index_by_name(&first.path, &row.bed_column)
-                .with_context(|| format!("resolve schema BED column {:?}", row.bed_column))?;
-            (ColumnSelector::Name(row.bed_column.clone()), file_col)
-        };
-        file_cols.push(file_col);
-        specs.push(BedColumnSpec {
-            selector,
-            dtype: row.dtype.unwrap_or(Dtype::Bool),
-            track_name: row.track.clone(),
-            description: None,
-        });
-    }
-
-    let missing: Vec<usize> = rows
-        .iter()
-        .zip(&file_cols)
-        .filter(|(row, _)| row.dtype.is_none())
-        .map(|(_, col)| *col)
-        .collect();
-    if !missing.is_empty() {
-        let inferred = infer_bed_dtypes_for_sources(sources, &missing, infer_rows)
-            .context("infer schema BED column dtypes across input sources")?;
-        let mut inferred = inferred.into_iter();
-        for (spec, row) in specs.iter_mut().zip(&rows) {
-            if row.dtype.is_none() {
-                spec.dtype = inferred
-                    .next()
-                    .context("inference returned fewer dtypes than requested")?;
-            }
-        }
-    }
-    Ok(BedSchema(specs))
+    Ok(build_bed_schema(sources, &rows, infer_rows)?)
 }
 
 fn parse_infer_rows(value: &str) -> Result<InferRows> {
@@ -1371,10 +1310,10 @@ mod tests {
         let text = "# BED column\ttarget track\tdtype\n4\tdepth\tint32\nmapq\n\ncallable\tcallable_mask\tbool\n";
         let rows = read_schema_rows(text, Path::new("schema.tsv")).unwrap();
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].bed_column, "4");
+        assert_eq!(rows[0].column, "4");
         assert_eq!(rows[0].track.as_deref(), Some("depth"));
         assert_eq!(rows[0].dtype, Some(Dtype::I32));
-        assert_eq!(rows[1].bed_column, "mapq");
+        assert_eq!(rows[1].column, "mapq");
         assert!(rows[1].track.is_none());
         assert!(rows[1].dtype.is_none());
         assert_eq!(rows[2].track.as_deref(), Some("callable_mask"));

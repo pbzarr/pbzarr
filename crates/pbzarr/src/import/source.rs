@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::{PbzError, Result};
+
 /// One input file feeding one column of an imported track.
 #[derive(Debug, Clone)]
 pub struct Source {
@@ -53,6 +55,17 @@ impl Source {
             }
             name
         })
+    }
+
+    /// Refuse a source list in which only some sources have a label.
+    pub fn check_labels(sources: &[Source]) -> Result<()> {
+        let labeled = sources.iter().filter(|s| s.column_label.is_some()).count();
+        if labeled != 0 && labeled != sources.len() {
+            return Err(PbzError::InvalidArgument(
+                "sources must either all provide labels or none do".into(),
+            ));
+        }
+        Ok(())
     }
 }
 

@@ -91,7 +91,7 @@ pub fn from_bam<'t>(
                         }
                         Err(e) => {
                             failed.store(true, std::sync::atomic::Ordering::Relaxed);
-                            let err = PbzError::Store(format!("open {}: {e}", s.path.display()));
+                            let err = crate::open_failed(&s.path, e);
                             errors.lock().expect("open errors poisoned").push((i, err));
                             return;
                         }

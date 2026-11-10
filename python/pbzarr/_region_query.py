@@ -25,7 +25,7 @@ def parse_region(query: str) -> RegionQuery:
     """
     if not isinstance(query, str):
         raise TypeError("region query must be a string")
-    return RegionQuery(*_native.parse_region(query))
+    return RegionQuery(*_native.parse_region(text=query))
 
 
 def as_query(query, contigs: Container[str] | None = None) -> RegionQuery:
@@ -37,7 +37,7 @@ def as_query(query, contigs: Container[str] | None = None) -> RegionQuery:
     if isinstance(query, RegionQuery):
         region = query
     elif isinstance(query, str):
-        region = RegionQuery(*_native.parse_region(query, contigs))
+        region = RegionQuery(*_native.parse_region(text=query, contigs=contigs))
     elif isinstance(query, tuple) and len(query) == 3:
         region = RegionQuery(*query)
     else:

@@ -4,7 +4,8 @@ from typing import Container, Sequence
 class PbzError(RuntimeError): ...
 
 def import_d4(
-    store_path: str,
+    *,
+    destination: str,
     track: str,
     sources: Sequence[tuple[str, str | None]],
     dim: str | None = ...,
@@ -18,7 +19,8 @@ def import_d4(
     decode_chunks: int | None = ...,
 ) -> dict[str, int | float]: ...
 def import_bigwig(
-    store_path: str,
+    *,
+    destination: str,
     track: str,
     sources: Sequence[tuple[str, str | None]],
     dim: str | None = ...,
@@ -32,7 +34,8 @@ def import_bigwig(
     decode_chunks: int | None = ...,
 ) -> dict[str, int | float]: ...
 def import_bed(
-    store_path: str,
+    *,
+    destination: str,
     sources: Sequence[tuple[str, str | None]],
     genome: str | None = ...,
     schema: Sequence[tuple[str, str | None]] | None = ...,
@@ -50,7 +53,8 @@ def import_bed(
     decode_chunks: int | None = ...,
 ) -> dict[str, int | float]: ...
 def import_bam(
-    store_path: str,
+    *,
+    destination: str,
     track: str,
     sources: Sequence[tuple[str, str | None]],
     mode: str = ...,
@@ -70,7 +74,7 @@ def import_bam(
     codecs: str | None = ...,
     decode_chunks: int | None = ...,
 ) -> dict[str, int | float]: ...
-def create_store(store_path: str, reference: Sequence[tuple[str, int]]) -> None: ...
+def create_dataset(*, destination: str, reference: Sequence[tuple[str, int]]) -> None: ...
 def parse_region(
-    text: str, contigs: Container[str] | None = ...
+    *, text: str, contigs: Container[str] | None = ...
 ) -> tuple[str, int | None, int | None]: ...
