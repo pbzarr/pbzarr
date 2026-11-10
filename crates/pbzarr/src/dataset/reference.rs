@@ -55,6 +55,15 @@ impl Reference {
         &self.contigs
     }
 
+    /// Flat start of each contig on the position axis, then the total length.
+    pub(crate) fn offsets(&self) -> &[u64] {
+        &self.offsets
+    }
+
+    pub(crate) fn total_len(&self) -> u64 {
+        *self.offsets.last().unwrap()
+    }
+
     fn offsets_for(&self, axis: &GenomicAxis) -> Vec<u64> {
         match axis {
             GenomicAxis::Position => self.offsets.clone(),

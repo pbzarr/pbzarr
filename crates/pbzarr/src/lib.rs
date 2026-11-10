@@ -9,7 +9,6 @@ pub mod io;
 pub mod measurement;
 pub mod region_query;
 pub mod stat;
-mod track;
 
 pub use array::{TrackConfig, validate_column_dimension_name, validate_node_name};
 pub use codec_spec::ExplicitArraySpec;

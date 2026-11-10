@@ -111,7 +111,7 @@ impl ImportRouting {
             }
         }
         for track in tracks {
-            if track.genome().contigs() != reference.contigs() {
+            if track.reference().contigs() != reference.contigs() {
                 return Err(PbzError::Metadata(format!(
                     "import routing: track {:?} genome differs from the readers \
                      (ordered contig sequences must be identical)",

@@ -127,13 +127,11 @@ impl Dataset {
 }
 
 use super::{GenomicAxis, Role, Support, VariableInfo};
-use crate::Genome;
 use crate::array::{
     TrackConfig, apply_explicit_spec, default_data_codecs, dtype_to_zarrs, resolve_fill_value,
     validate_node_name,
 };
 use crate::import::destination::Destination;
-use crate::track::Track;
 use std::collections::{BTreeMap, BTreeSet};
 use zarrs::array::codec::api::ArrayToBytesCodecTraits;
 use zarrs::storage::StoreKey;
@@ -151,7 +149,7 @@ impl Dataset {
         }
         let reference = self.reference()?;
         let total = reference.extent(&GenomicAxis::Position)?;
-        let genome = Arc::new(Genome::new(reference.contigs().to_vec())?);
+        let shared_reference = Arc::new(reference.clone());
         let entries = self
             .storage
             .list_dir(&StorePrefix::root())
@@ -375,15 +373,11 @@ impl Dataset {
                     array.fill_value(),
                 )
                 .map_err(storage_error)?;
-            let track = Track {
-                name: name.clone(),
-                genome: genome.clone(),
-                dtype: config.dtype,
-                rank: array.shape().len(),
-                values: array,
-            };
             targets.push(Destination {
-                track,
+                name: name.clone(),
+                reference: Arc::clone(&shared_reference),
+                dtype: config.dtype,
+                values: array,
                 labels: config.columns.clone(),
                 column_offset: 0,
             });
@@ -542,7 +536,7 @@ impl Dataset {
         }
         let reference = self.reference()?;
         let total = reference.extent(&GenomicAxis::Position)?;
-        let genome = Arc::new(Genome::new(reference.contigs().to_vec())?);
+        let shared_reference = Arc::new(reference.clone());
 
         let mut dim = String::new();
         let mut labels: Vec<String> = Vec::new();
@@ -664,15 +658,11 @@ impl Dataset {
                 .map_err(|e| super::metadata::array_error(name, e))?;
             grown.push(grown_metadata(info, 1, width + batch));
             let array = Arc::new(array);
-            let track = Track {
-                name: name.clone(),
-                genome: genome.clone(),
-                dtype: config.dtype,
-                rank: 2,
-                values: array,
-            };
             targets.push(Destination {
-                track,
+                name: name.clone(),
+                reference: Arc::clone(&shared_reference),
+                dtype: config.dtype,
+                values: array,
                 labels: Some(grown_labels.clone()),
                 column_offset: width,
             });

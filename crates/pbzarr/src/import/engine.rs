@@ -39,8 +39,8 @@ use zarrs::storage::ReadableWritableListableStorageTraits;
 
 use super::destination::Destination;
 use crate::Result;
+use crate::dataset::Reference;
 use crate::error::PbzError;
-use crate::genome::Genome;
 use crate::import::config::{ProgressSink, Report};
 use crate::import::progress::human_bytes;
 use crate::import::routing::{ImportRouting, SourceAxis, TrackTarget};
@@ -399,15 +399,15 @@ struct ContigWindow<'g> {
     local_hi: u64,
 }
 
-fn contig_windows(genome: &Genome, start: u64, end: u64) -> Vec<ContigWindow<'_>> {
-    let offsets = genome.offsets();
+fn contig_windows(reference: &Reference, start: u64, end: u64) -> Vec<ContigWindow<'_>> {
+    let offsets = reference.offsets();
     let mut windows = Vec::new();
-    for (i, contig) in genome.contigs().iter().enumerate() {
-        let c_start = offsets[i] as u64;
+    for (i, contig) in reference.contigs().iter().enumerate() {
+        let c_start = offsets[i];
         if c_start >= end {
             break;
         }
-        let c_end = offsets[i + 1] as u64;
+        let c_end = offsets[i + 1];
         if c_end <= start {
             continue;
         }
@@ -688,7 +688,7 @@ struct RunCtx<'a> {
     geoms: &'a [TargetGeom<'a>],
     targets: &'a [TrackTarget],
     columns_from: Option<SourceAxis>,
-    genome: &'a Genome,
+    reference: &'a Reference,
     /// Per reader index: the buffers a piece for that reader touches.
     touch_plan: &'a [Vec<TouchEntry>],
     progress: Option<&'a dyn ProgressSink>,
@@ -1192,7 +1192,7 @@ impl WindowSink for PieceSink<'_, '_> {
 }
 
 fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece) -> Result<()> {
-    let windows = contig_windows(ctx.genome, piece.start, piece.end);
+    let windows = contig_windows(ctx.reference, piece.start, piece.end);
     let entries = &ctx.touch_plan[piece.reader];
     let chunk_len = ctx.geoms[0].array_chunk_len.max(1);
     let first_chunk = piece.start / chunk_len;
@@ -1397,7 +1397,7 @@ pub(crate) fn run_import<R: ValueReader>(
 
     let geoms = target_geometries(tracks, routing)?;
 
-    let genome = Arc::clone(tracks[0].genome());
+    let reference = Arc::clone(tracks[0].reference());
     let total = tracks[0].total_len();
     let workers = options.workers.max(1);
     let chunk_len = geoms[0].array_chunk_len.max(1);
@@ -1508,7 +1508,7 @@ pub(crate) fn run_import<R: ValueReader>(
         geoms: &geoms,
         targets: &routing.targets,
         columns_from: routing.columns_from,
-        genome: &genome,
+        reference: &reference,
         touch_plan: &touch_plan,
         progress: options.progress.as_deref(),
         partial_opts,
@@ -1746,7 +1746,7 @@ mod tests {
     use super::*;
     use crate::TrackConfig;
     use crate::dataset::{Dataset, Reference};
-    use crate::genome::Contig;
+    use crate::genome::{Contig, Genome};
     use crate::import::{Import, ImportBuilder};
     use crate::io::{OutputSchema, ValueReader};
 
