@@ -45,7 +45,7 @@ use crate::dataset::Reference;
 use crate::error::PbzError;
 use crate::import::config::{ProgressSink, Report};
 use crate::import::progress::human_bytes;
-use crate::import::routing::{ImportRouting, SourceAxis, TrackTarget};
+use crate::import::routing::ImportRouting;
 use crate::io::{Dtype, OutputSinkMut, ReaderError, ValueReader, WindowSink};
 
 pub struct PipelineOptions {
@@ -490,6 +490,20 @@ struct TouchEntry {
     fields: Vec<(usize, usize)>,
 }
 
+/// The buffers each reader's pieces touch, and every count derived from them.
+struct TouchPlan {
+    /// Per reader index: the buffers a piece for that reader touches.
+    entries: Vec<Vec<TouchEntry>>,
+    /// `[target][column chunk]`: the pieces that feed one buffer.
+    slot_pieces: Vec<Vec<usize>>,
+    /// Distinct column chunks per target: a sharded chunk group closes after
+    /// this many buffers.
+    group_sizes: Vec<usize>,
+    /// Per target: touched column chunks per column shard, for shard-aligned
+    /// targets. Sizes the shard groups.
+    col_shard_ccs: Vec<HashMap<u64, usize>>,
+}
+
 type SlotKey = (usize, usize, u64); // (target, chunk, column chunk)
 
 /// `(target, position shard, column shard)` -> its append-serializing mutex.
@@ -710,11 +724,8 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
 struct RunCtx<'a> {
     state: &'a EngineState,
     geoms: &'a [TargetGeom<'a>],
-    targets: &'a [TrackTarget],
-    columns_from: Option<SourceAxis>,
     reference: &'a Reference,
-    /// Per reader index: the buffers a piece for that reader touches.
-    touch_plan: &'a [Vec<TouchEntry>],
+    plan: &'a TouchPlan,
     progress: Option<&'a dyn ProgressSink>,
     partial_opts: CodecOptions,
     shard_locks: Mutex<ShardLockMap>,
@@ -725,39 +736,18 @@ struct RunCtx<'a> {
     /// Each group carries its own lock so closers merge concurrently across
     /// shards.
     shard_groups: Mutex<ShardGroupMap>,
-    /// Distinct column chunks per target: a sharded chunk group closes after
-    /// this many buffers.
-    group_sizes: Vec<usize>,
-    /// Per target: touched column chunks per column shard, for shard-aligned
-    /// targets. Sizes the shard groups.
-    col_shard_ccs: Vec<HashMap<u64, usize>>,
     /// Flat position count, so a piece can clamp its last chunk.
     total: u64,
 }
 
 impl RunCtx<'_> {
-    fn slot_piece_count(&self, t_idx: usize, cc: u64) -> usize {
-        match self.columns_from {
-            Some(SourceAxis::Readers) => {
-                let geom = &self.geoms[t_idx];
-                let target = &self.targets[t_idx];
-                let lo = (cc * geom.col_chunk).max(target.columns.start);
-                let hi = ((cc + 1) * geom.col_chunk)
-                    .min(geom.width)
-                    .min(target.columns.end);
-                (hi - lo) as usize
-            }
-            _ => 1,
-        }
-    }
-
     fn slot(&self, key: SlotKey) -> Arc<SlotHandle> {
         let mut map = self.state.slots.lock().expect("slot map poisoned");
         Arc::clone(map.entry(key).or_insert_with(|| {
             Arc::new(SlotHandle {
                 inner: Mutex::new(SlotInner {
                     data: None,
-                    remaining: self.slot_piece_count(key.0, key.2),
+                    remaining: self.plan.slot_pieces[key.0][key.2 as usize],
                     any_data: false,
                 }),
             })
@@ -837,8 +827,8 @@ impl RunCtx<'_> {
             let group = groups
                 .entry((t_idx, chunk_idx))
                 .or_insert_with(|| ChunkGroup {
-                    parts: Vec::with_capacity(self.group_sizes[t_idx]),
-                    remaining: self.group_sizes[t_idx],
+                    parts: Vec::with_capacity(self.plan.group_sizes[t_idx]),
+                    remaining: self.plan.group_sizes[t_idx],
                 });
             group.parts.push((cc, data));
             group.remaining -= 1;
@@ -960,7 +950,7 @@ impl RunCtx<'_> {
                 Entry::Vacant(e) => {
                     let n_chunks = self.total.div_ceil(chunk_len);
                     let row_chunks = (n_chunks.min((row + 1) * cps) - row * cps) as usize;
-                    let ccs = *self.col_shard_ccs[t_idx].get(&cs).ok_or_else(|| {
+                    let ccs = *self.plan.col_shard_ccs[t_idx].get(&cs).ok_or_else(|| {
                         PbzError::Metadata(
                             "engine invariant: closed buffer outside the touch plan".into(),
                         )
@@ -1217,7 +1207,7 @@ impl WindowSink for PieceSink<'_, '_> {
 
 fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece) -> Result<()> {
     let windows = contig_windows(ctx.reference, piece.start, piece.end);
-    let entries = &ctx.touch_plan[piece.reader];
+    let entries = &ctx.plan.entries[piece.reader];
     let chunk_len = ctx.geoms[0].array_chunk_len.max(1);
     let first_chunk = piece.start / chunk_len;
     let mut sink = PieceSink {
@@ -1275,52 +1265,59 @@ fn build_touch_plan(
     routing: &ImportRouting,
     geoms: &[TargetGeom<'_>],
     n_readers: usize,
-    n_fields: usize,
-) -> Vec<Vec<TouchEntry>> {
-    let mut plan = Vec::with_capacity(n_readers);
+) -> TouchPlan {
+    let mut slot_pieces: Vec<Vec<usize>> = geoms
+        .iter()
+        .map(|g| vec![0; g.width.div_ceil(g.col_chunk).max(1) as usize])
+        .collect();
+    let mut entries = Vec::with_capacity(n_readers);
     for reader in 0..n_readers {
-        let mut entries: Vec<TouchEntry> = Vec::new();
-        for (t_idx, target) in routing.targets.iter().enumerate() {
-            let geom = &geoms[t_idx];
-            match routing.columns_from {
-                Some(SourceAxis::Readers) => {
-                    let col = target.columns.start + reader as u64;
-                    let cc = col / geom.col_chunk;
-                    entries.push(TouchEntry {
-                        t_idx,
-                        cc,
-                        fields: vec![(target.field, (col - cc * geom.col_chunk) as usize)],
-                    });
-                }
-                Some(SourceAxis::Fields) => {
-                    // Single reader. Columns ascend with the field index, so
-                    // runs of one column chunk are always adjacent.
-                    let mut by_chunk: Vec<(u64, Vec<(usize, usize)>)> = Vec::new();
-                    for field in 0..n_fields {
-                        let col = target.columns.start + field as u64;
-                        let cc = col / geom.col_chunk;
-                        let local = (col - cc * geom.col_chunk) as usize;
-                        match by_chunk.last_mut() {
-                            Some((last_cc, fields)) if *last_cc == cc => {
-                                fields.push((field, local));
-                            }
-                            _ => by_chunk.push((cc, vec![(field, local)])),
-                        }
+        let mut touched: Vec<TouchEntry> = Vec::new();
+        for (t_idx, geom) in geoms.iter().enumerate() {
+            // Columns ascend, so the fields of one column chunk are adjacent.
+            for (field, col) in routing.reader_columns(reader, t_idx) {
+                let cc = col / geom.col_chunk;
+                let local = (col % geom.col_chunk) as usize;
+                match touched.last_mut() {
+                    Some(last) if last.t_idx == t_idx && last.cc == cc => {
+                        last.fields.push((field, local));
                     }
-                    for (cc, fields) in by_chunk {
-                        entries.push(TouchEntry { t_idx, cc, fields });
+                    _ => {
+                        slot_pieces[t_idx][cc as usize] += 1;
+                        touched.push(TouchEntry {
+                            t_idx,
+                            cc,
+                            fields: vec![(field, local)],
+                        });
                     }
                 }
-                None => entries.push(TouchEntry {
-                    t_idx,
-                    cc: 0,
-                    fields: vec![(target.field, 0)],
-                }),
             }
         }
-        plan.push(entries);
+        entries.push(touched);
     }
-    plan
+    let group_sizes = slot_pieces
+        .iter()
+        .map(|pieces| pieces.iter().filter(|&&n| n > 0).count())
+        .collect();
+    let col_shard_ccs = slot_pieces
+        .iter()
+        .zip(geoms)
+        .map(|(pieces, geom)| {
+            let mut counts: HashMap<u64, usize> = HashMap::new();
+            if geom.shard_aligned {
+                for (cc, _) in pieces.iter().enumerate().filter(|(_, n)| **n > 0) {
+                    *counts.entry(geom.col_shard(cc as u64)).or_insert(0) += 1;
+                }
+            }
+            counts
+        })
+        .collect();
+    TouchPlan {
+        entries,
+        slot_pieces,
+        group_sizes,
+        col_shard_ccs,
+    }
 }
 
 pub(crate) fn validate_layout(tracks: &[Destination], routing: &ImportRouting) -> Result<()> {
@@ -1417,7 +1414,6 @@ pub(crate) fn run_import<R: ValueReader>(
     handle_budget: usize,
 ) -> Result<Report> {
     let n_readers = readers.len();
-    let n_fields = readers[0].output_schema().len();
 
     let geoms = target_geometries(tracks, routing)?;
 
@@ -1448,30 +1444,7 @@ pub(crate) fn run_import<R: ValueReader>(
         progress.set_total(total_bytes);
     }
 
-    let touch_plan = build_touch_plan(routing, &geoms, n_readers, n_fields);
-
-    let (group_sizes, col_shard_ccs): (Vec<usize>, Vec<HashMap<u64, usize>>) = {
-        let mut ccs: Vec<std::collections::BTreeSet<u64>> = vec![Default::default(); geoms.len()];
-        for entries in &touch_plan {
-            for entry in entries {
-                ccs[entry.t_idx].insert(entry.cc);
-            }
-        }
-        let per_shard = ccs
-            .iter()
-            .zip(&geoms)
-            .map(|(set, geom)| {
-                let mut counts: HashMap<u64, usize> = HashMap::new();
-                if geom.shard_aligned {
-                    for &cc in set {
-                        *counts.entry(geom.col_shard(cc)).or_insert(0) += 1;
-                    }
-                }
-                counts
-            })
-            .collect();
-        (ccs.into_iter().map(|set| set.len()).collect(), per_shard)
-    };
+    let plan = build_touch_plan(routing, &geoms, n_readers);
 
     let in_flight = auto_in_flight_spans(workers, n_readers).min(n_spans.max(1));
     let handle_budget = match handle_budget {
@@ -1487,7 +1460,8 @@ pub(crate) fn run_import<R: ValueReader>(
         .iter()
         .map(|g| chunk_len * (g.columns.end - g.columns.start) * g.dtype.size() as u64)
         .sum();
-    let scratch_chunk_bytes: u64 = touch_plan
+    let scratch_chunk_bytes: u64 = plan
+        .entries
         .iter()
         .map(|entries| {
             entries
@@ -1530,17 +1504,13 @@ pub(crate) fn run_import<R: ValueReader>(
     let ctx = RunCtx {
         state: &state,
         geoms: &geoms,
-        targets: &routing.targets,
-        columns_from: routing.columns_from,
         reference: &reference,
-        touch_plan: &touch_plan,
+        plan: &plan,
         progress: options.progress.as_deref(),
         partial_opts,
         shard_locks: Mutex::new(HashMap::new()),
         chunk_groups: Mutex::new(HashMap::new()),
         shard_groups: Mutex::new(HashMap::new()),
-        group_sizes,
-        col_shard_ccs,
         total,
     };
 

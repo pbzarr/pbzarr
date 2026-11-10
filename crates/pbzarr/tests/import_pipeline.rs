@@ -140,6 +140,36 @@ fn cohort_pipeline_tiles_columns_with_multiple_workers() {
     }
 }
 
+#[test]
+fn several_readers_without_a_column_axis_are_refused() {
+    let dir = TempDir::new().unwrap();
+    let genome = Reference::new(vec![Contig {
+        name: "chr1".into(),
+        length: 8,
+    }])
+    .unwrap();
+    let mut ds = dataset(&dir.path().join("scalar.pbz"), &genome);
+    let readers = vec![
+        ConstReader::new(genome.clone(), 1),
+        ConstReader::new(genome.clone(), 2),
+    ];
+    let Err(err) = Import::from_readers(readers)
+        .unwrap()
+        .into_dataset(
+            &mut ds,
+            vec![("depth".into(), TrackConfig::new(Dtype::U32))],
+        )
+        .run()
+    else {
+        panic!("two readers without a column axis must be refused");
+    };
+    assert!(
+        err.to_string().contains("no column axis"),
+        "unexpected error: {err}"
+    );
+    assert!(!ds.variables().contains_key("depth"));
+}
+
 /// Fills each position with `contig_index * 1_000_000 + local_position`, so a
 /// read-back reveals whether a span handed the reader the right contig name and
 /// local range.
