@@ -34,4 +34,6 @@ def refuse(source) -> None:
 
 
 def open_store(path: str) -> ZipStore:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"{path} does not exist")
     return ZipStore(path, mode="r")

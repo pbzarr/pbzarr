@@ -52,3 +52,8 @@ def test_write_and_import_refuse_a_zip_store(stores, d4_fixture):
             pbzarr.write(dataset, {"over_10": dataset["depth"] > 10})
     with pytest.raises(ValueError, match="write-once"):
         pbzarr.import_d4(archive.with_name("new.zip"), "depth", d4_fixture)
+
+
+def test_open_refuses_a_missing_zip_store(tmp_path):
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        pbzarr.open(tmp_path / "missing.zip")
