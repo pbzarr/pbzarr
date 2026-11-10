@@ -13,7 +13,7 @@ use pbzarr::import::{Config, ConfigBuilder};
 use pbzarr::import::{Target, store_reference};
 use pbzarr::io::Dtype;
 use pbzarr::stat::StatKind;
-use pbzarr::{ExplicitArraySpec, Reference, RegionQuery};
+use pbzarr::{ExplicitArraySpec, Reference};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
     OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam, from_bed_matrix,
@@ -164,10 +164,11 @@ struct StatArgs {
 struct RegionArgs {
     /// Region CHROM:START-END, 0-based and half-open as in BED
     /// (chr1:0-100 is the first 100 bases). CHROM alone selects the whole
-    /// contig. An end past the contig is an error. Repeat for more regions.
+    /// contig, also when the name contains ':'. An end past the contig is an
+    /// error. Repeat for more regions.
     /// Without -r or -R, the command reads the whole genome.
     #[arg(short('r'), long = "region", value_name = "REGION")]
-    region: Vec<RegionQuery>,
+    region: Vec<String>,
     /// BED file (plain, gzip, or bgzip) with regions to read after the -r
     /// regions. The first three tab-separated columns give CHROM, START,
     /// END, 0-based and half-open. Lines that start with #, track, or

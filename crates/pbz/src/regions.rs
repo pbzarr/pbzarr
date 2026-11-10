@@ -17,7 +17,7 @@ pub(crate) struct NamedRegion {
 /// With neither, one region per contig.
 pub(crate) fn select_regions(
     genome: &Reference,
-    queries: &[RegionQuery],
+    queries: &[String],
     bed: Option<&PathBuf>,
 ) -> Result<Vec<NamedRegion>> {
     if queries.is_empty() && bed.is_none() {
@@ -34,9 +34,12 @@ pub(crate) fn select_regions(
             .collect());
     }
     let mut out = Vec::new();
-    for query in queries {
+    for text in queries {
+        let query = genome
+            .parse_query(text)
+            .with_context(|| format!("region {text:?}"))?;
         let region = genome
-            .region(query)
+            .region(&query)
             .with_context(|| format!("region {query}"))?;
         out.push(NamedRegion {
             chrom: query.contig.clone(),
@@ -142,10 +145,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("r.bed");
         std::fs::write(&path, "chr1\t0\t2\n").unwrap();
-        let queries: Vec<RegionQuery> = ["chr2:1-4", "chr1"]
-            .iter()
-            .map(|q| q.parse().unwrap())
-            .collect();
+        let queries = ["chr2:1-4".to_string(), "chr1".to_string()];
         let regions = select_regions(&genome(), &queries, Some(&path)).unwrap();
         assert_eq!(
             flat(&regions),
@@ -155,9 +155,27 @@ mod tests {
                 ("chr1".into(), 0, 2),
             ]
         );
-        let past_end = ["chr2:0-7".parse().unwrap()];
+        let past_end = ["chr2:0-7".to_string()];
         let err = select_regions(&genome(), &past_end, None).unwrap_err();
         assert!(format!("{err:#}").contains("outside length 6"), "{err:#}");
+    }
+
+    #[test]
+    fn region_flag_matches_whole_contig_names_with_colons() {
+        let genome = Reference::new(vec![
+            Contig {
+                name: "HLA-A*01:01:01".into(),
+                length: 10,
+            },
+            Contig {
+                name: "HLA-A*01:01:01:01".into(),
+                length: 6,
+            },
+        ])
+        .unwrap();
+        let queries = ["HLA-A*01:01:01:01".to_string()];
+        let regions = select_regions(&genome, &queries, None).unwrap();
+        assert_eq!(flat(&regions), vec![("HLA-A*01:01:01:01".into(), 0, 6)]);
     }
 
     #[test]

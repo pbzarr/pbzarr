@@ -9,7 +9,7 @@ import re
 import numpy as np
 
 from ._native import PbzError
-from ._region import RegionQuery, parse_region
+from ._region_query import RegionQuery, as_query
 
 _I64_MAX = np.iinfo(np.int64).max
 _BIN_DIM = re.compile(r"bin_([1-9][0-9]*)\Z")
@@ -103,7 +103,7 @@ class Reference(Mapping[str, int]):
         ``query`` takes the forms of ``rows``. An open start is 0 and an open
         end is the contig end. Empty and out-of-range regions are refused.
         """
-        region = _query(query)
+        region = as_query(query, self._index)
         if region.contig not in self._index:
             raise KeyError(f"unknown contig {region.contig!r}")
         length = int(self._lengths[self._index[region.contig]])
@@ -154,26 +154,3 @@ class Reference(Mapping[str, int]):
         shown = ", ".join(f"{n}: {self[n]}" for n in self._names[:4])
         more = ", ..." if len(self._names) > 4 else ""
         return f"Reference({{{shown}{more}}})"
-
-
-def _query(query) -> RegionQuery:
-    if isinstance(query, RegionQuery):
-        region = query
-    elif isinstance(query, str):
-        region = parse_region(query)
-    elif isinstance(query, tuple) and len(query) == 3:
-        region = RegionQuery(*query)
-    else:
-        raise TypeError(
-            "region must be a string, RegionQuery, or (contig, start, end) tuple"
-        )
-    bounds = []
-    for name in ("start", "end"):
-        value = getattr(region, name)
-        if value is not None and (
-            isinstance(value, (bool, np.bool_))
-            or not isinstance(value, (int, np.integer))
-        ):
-            raise TypeError(f"region {name} must be an integer or None")
-        bounds.append(None if value is None else int(value))
-    return RegionQuery(region.contig, *bounds)

@@ -16,7 +16,7 @@ from ._coord import _check_full
 from ._locus import locus_coords
 from ._native import PbzError
 from ._reference import Reference, bin_width
-from ._region import RegionQuery
+from ._region_query import RegionQuery
 from ._regions import interval_columns, reduce_regions_dataset, reducer_options
 
 T = TypeVar("T", xr.DataArray, xr.Dataset)

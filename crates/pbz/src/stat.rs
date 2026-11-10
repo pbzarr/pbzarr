@@ -5,8 +5,8 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use pbzarr::Region;
 use pbzarr::stat::{StatKind, StatOptions, StatOutput, StatResult, StatValue};
-use pbzarr::{Region, RegionQuery};
 
 use crate::fmt::write_g;
 use crate::output::Output;
@@ -15,7 +15,7 @@ use crate::regions::{NamedRegion, select_regions};
 pub(crate) struct StatSpec {
     pub store: PathBuf,
     pub track: Option<String>,
-    pub regions: Vec<RegionQuery>,
+    pub regions: Vec<String>,
     pub regions_file: Option<PathBuf>,
     pub stat: StatKind,
     pub columns: Vec<String>,

@@ -12,13 +12,12 @@ import xarray as xr
 import zarr
 
 from . import _zip
-from ._region import RegionQuery, parse_region
+from ._region_query import RegionQuery
 
 # Set by `open` on a track's Dask array: where the raw Zarr array lives, so
 # region tasks can read it directly instead of through the source graph.
 _PBZ_SOURCE_ATTR = "_pbz_source"
 
-_I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 # One task holds at most about this many bytes of rows, unless one region is larger.
 _BATCH_BYTES = 128 * 1024**2
@@ -450,49 +449,6 @@ def reduce_regions_dataset(
     return result
 
 
-def _normalize_one(query) -> RegionQuery:
-    if isinstance(query, RegionQuery):
-        normalized = query
-    elif isinstance(query, str):
-        normalized = parse_region(query)
-    elif isinstance(query, tuple) and len(query) == 3:
-        normalized = RegionQuery(query[0], query[1], query[2])
-    else:
-        raise TypeError(
-            "region query must be a RegionQuery, string, or "
-            "(contig, start, end) tuple"
-        )
-
-    if not isinstance(normalized.contig, str) or not normalized.contig:
-        raise ValueError("region contig must be a nonempty string")
-    return RegionQuery(
-        normalized.contig,
-        _normalize_coordinate(normalized.start, "start"),
-        _normalize_coordinate(normalized.end, "end"),
-    )
-
-
-def _normalize_coordinate(value, name: str) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, (bool, np.bool_)) or not isinstance(
-        value, (int, np.integer)
-    ):
-        raise TypeError(f"region {name} must be an integer or None")
-    coordinate = int(value)
-    if coordinate < _I64_MIN or coordinate > _I64_MAX:
-        raise ValueError(f"region {name} is outside signed 64-bit range")
-    return coordinate
-
-
-def _resolve_one(
-    reference, normalized: RegionQuery
-) -> tuple[RegionQuery, slice]:
-    """One region's contig-local bounds and flat rows."""
-    resolved = reference.resolve(normalized)
-    return resolved, reference.rows(resolved)
-
-
 def interval_columns(reference, intervals) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Contig indexes and contig-local starts and ends of ``intervals``, in input order."""
     if isinstance(intervals, (RegionQuery, str)) or (
@@ -505,7 +461,7 @@ def interval_columns(reference, intervals) -> tuple[np.ndarray, np.ndarray, np.n
             for bound in intervals[1:]
         )
     ):
-        resolved, _ = _resolve_one(reference, _normalize_one(intervals))
+        resolved = reference.resolve(intervals)
         return (
             np.asarray([reference.names.index(resolved.contig)], dtype=np.int64),
             np.asarray([resolved.start], dtype=np.int64),
@@ -540,7 +496,7 @@ def _query_columns(intervals, reference):
         isinstance(item, (str, RegionQuery)) for item in intervals
     ):
         return None
-    resolved = [_resolve_one(reference, _normalize_one(item))[0] for item in intervals]
+    resolved = [reference.resolve(item) for item in intervals]
     return (
         np.asarray([r.contig for r in resolved], dtype=object),
         np.asarray([r.start for r in resolved], dtype=np.int64),

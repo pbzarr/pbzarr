@@ -1,10 +1,9 @@
-//! PyO3 bindings for pbzarr: `import_d4`, `import_bigwig`, `import_bed`, and
-//! `import_bam`.
+//! PyO3 bindings for pbzarr: the imports, `create_store`, and `parse_region`.
 
 use std::path::{Path, PathBuf};
 
 use pyo3::create_exception;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -12,7 +11,7 @@ use pbzarr::Contig;
 use pbzarr::ExplicitArraySpec;
 use pbzarr::import::{Config, ConfigBuilder, Report, Source, store_reference};
 use pbzarr::io::Dtype;
-use pbzarr::{Dataset, Reference};
+use pbzarr::{Dataset, Reference, RegionQuery};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
     OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam as rs_from_bam,
@@ -471,6 +470,30 @@ fn create_store(store_path: String, reference: Vec<(String, u64)>) -> PyResult<(
         .map_err(|e| PbzError::new_err(format!("{e}")))
 }
 
+/// Parse a region string into `(contig, start, end)`, 0-based and half-open,
+/// with `None` for an open start or end. When `contigs` contains the whole
+/// string, the string is that contig and is not split on `':'`.
+#[pyfunction]
+#[pyo3(signature = (text, contigs=None))]
+fn parse_region(
+    text: &str,
+    contigs: Option<&Bound<'_, PyAny>>,
+) -> PyResult<(String, Option<u64>, Option<u64>)> {
+    let mut lookup_error = None;
+    let parsed = RegionQuery::parse_with(text, |name| match contigs {
+        Some(contigs) => contigs.contains(name).unwrap_or_else(|e| {
+            lookup_error = Some(e);
+            false
+        }),
+        None => false,
+    });
+    if let Some(e) = lookup_error {
+        return Err(e);
+    }
+    let query = parsed.map_err(|e| PyValueError::new_err(format!("{e}")))?;
+    Ok((query.contig, query.start, query.end))
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PbzError", m.py().get_type::<PbzError>())?;
@@ -479,5 +502,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(import_bed, m)?)?;
     m.add_function(wrap_pyfunction!(import_bam, m)?)?;
     m.add_function(wrap_pyfunction!(create_store, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_region, m)?)?;
     Ok(())
 }

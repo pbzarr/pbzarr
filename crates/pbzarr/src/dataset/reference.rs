@@ -187,6 +187,12 @@ impl Reference {
         *self.offsets.last().unwrap()
     }
 
+    /// Parse a region string. A string that is a whole contig name is that
+    /// contig, before any split on `':'`.
+    pub fn parse_query(&self, text: &str) -> Result<RegionQuery> {
+        RegionQuery::parse_with(text, |name| self.id(name).is_some())
+    }
+
     /// Resolve `query` to a nonempty range inside one contig. A missing start
     /// is 0 and a missing end is the contig length. An end past the contig
     /// length is an error.

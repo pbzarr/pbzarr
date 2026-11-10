@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use pbzarr::io::{Dtype, Numeric};
-use pbzarr::{Dataset, Measurement, RegionQuery};
+use pbzarr::{Dataset, Measurement};
 use rayon::prelude::*;
 
 use crate::output::Output;
@@ -19,7 +19,7 @@ const BATCH_MAX_ROWS: u64 = 4 << 20;
 pub(crate) struct ViewSpec {
     pub store: PathBuf,
     pub track: Option<String>,
-    pub regions: Vec<RegionQuery>,
+    pub regions: Vec<String>,
     pub regions_file: Option<PathBuf>,
     pub columns: Vec<String>,
     pub output: Option<PathBuf>,
