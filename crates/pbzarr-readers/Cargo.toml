@@ -61,3 +61,7 @@ tempfile = "3"
 # the library by living here. A current-thread runtime suffices for tiny files.
 bigtools = { version = "0.5.8", default-features = false, features = ["read", "write"] }
 tokio = { version = "1", default-features = false, features = ["rt"] }
+
+# Lowers RLIMIT_NOFILE in the fd limit test; same pin as the pbzarr crate.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "=0.2.182"

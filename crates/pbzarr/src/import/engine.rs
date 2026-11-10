@@ -126,9 +126,9 @@ fn gcd(a: u64, b: u64) -> u64 {
     if a == 0 { b } else { gcd(b % a, a) }
 }
 
-/// Reader handles (forks) allowed across all readers at once. Two fds per
-/// handle (data + index); a quarter of the limit plus 128 fds stay free for
-/// the store, shard files, and the base readers. Each reader's pool gets
+/// Reader handles allowed across all readers at once, base readers included.
+/// Two fds per handle (data + index); a quarter of the limit plus 128 fds
+/// stay free for the store and shard files. Each reader's pool gets
 /// `budget / readers`, at least 1, at most `workers`.
 fn auto_handle_budget(soft_fd_limit: u64, n_readers: usize) -> usize {
     let usable = (soft_fd_limit * 3 / 4).saturating_sub(128) / 2;
@@ -529,8 +529,10 @@ struct ShardGroup {
     remaining: usize,
 }
 
-/// Idle forks of one reader, capped at `capacity` live forks. Forks are
-/// created on demand, so a reader no worker ever decodes opens nothing.
+/// Idle handles of one reader, capped at `capacity` live handles. The pool
+/// starts with the base reader, so the base counts against the cap. A worker
+/// that takes the last idle handle forks one more from it while the cap
+/// allows, so a reader no worker ever decodes opens nothing new.
 struct HandlePool<R> {
     /// `(idle handles, handles created, aborted)`.
     state: Mutex<(Vec<R>, usize, bool)>,
@@ -539,9 +541,9 @@ struct HandlePool<R> {
 }
 
 impl<R: ValueReader> HandlePool<R> {
-    fn new(capacity: usize) -> Self {
+    fn new(base: R, capacity: usize) -> Self {
         Self {
-            state: Mutex::new((Vec::new(), 0, false)),
+            state: Mutex::new((vec![base], 1, false)),
             cv: Condvar::new(),
             capacity: capacity.max(1),
         }
@@ -553,22 +555,28 @@ impl<R: ValueReader> HandlePool<R> {
 
     /// Blocks while every handle is checked out; returns `Ok(None)` once the
     /// pool is aborted so a waiting worker can drain.
-    fn checkout(
-        &self,
-        fork: impl FnOnce() -> std::result::Result<R, crate::io::ReaderError>,
-    ) -> Result<Option<R>> {
+    fn checkout(&self) -> Result<Option<R>> {
         let mut guard = self.lock();
         loop {
             if let Some(handle) = guard.0.pop() {
-                return Ok(Some(handle));
-            }
-            if guard.1 < self.capacity {
+                if !guard.0.is_empty() || guard.1 >= self.capacity {
+                    return Ok(Some(handle));
+                }
                 guard.1 += 1;
                 drop(guard);
-                return match fork() {
-                    Ok(handle) => Ok(Some(handle)),
+                let forked = handle.fork();
+                let mut guard = self.lock();
+                return match forked {
+                    Ok(fork) => {
+                        guard.0.push(fork);
+                        drop(guard);
+                        self.cv.notify_one();
+                        Ok(Some(handle))
+                    }
                     Err(e) => {
-                        self.lock().1 -= 1;
+                        guard.1 -= 1;
+                        guard.0.push(handle);
+                        drop(guard);
                         self.cv.notify_one();
                         Err(PbzError::Reader(e))
                     }
@@ -1536,11 +1544,10 @@ pub(crate) fn run_import<R: ValueReader>(
         total,
     };
 
-    // `fork` takes `&self`, but `ValueReader` is not `Sync`, so each base
-    // reader sits behind its own lock, held only across the fork call.
-    // Distinct readers fork concurrently.
-    let originals: Vec<Mutex<R>> = readers.into_iter().map(Mutex::new).collect();
-    let pools: Vec<HandlePool<R>> = (0..n_readers).map(|_| HandlePool::new(pool_size)).collect();
+    let pools: Vec<HandlePool<R>> = readers
+        .into_iter()
+        .map(|base| HandlePool::new(base, pool_size))
+        .collect();
 
     let (piece_tx, piece_rx) = bounded::<Piece>((workers * 2).max(1));
     // One receiver per worker and none kept here, so a send fails once every
@@ -1560,7 +1567,6 @@ pub(crate) fn run_import<R: ValueReader>(
 
     thread::scope(|scope| {
         let ctx = &ctx;
-        let originals = &originals;
         let pools = &pools;
         let receivers = &receivers;
         let pool = &pool;
@@ -1595,12 +1601,7 @@ pub(crate) fn run_import<R: ValueReader>(
                                 break 'piece;
                             }
                             let checkout_start = Instant::now();
-                            let checked_out = pools[piece.reader].checkout(|| {
-                                originals[piece.reader]
-                                    .lock()
-                                    .expect("base reader poisoned")
-                                    .fork()
-                            });
+                            let checked_out = pools[piece.reader].checkout();
                             stalled = checkout_start.elapsed();
                             ctx.state.timings.handle_wait.record(stalled);
                             let mut reader = match checked_out {
@@ -2421,7 +2422,8 @@ mod tests {
         assert_eq!(chunk_file_count(&dir.path().join("sharded.pbz/depth")), 4);
     }
 
-    /// Counts live forks of one reader so a test can assert the pool cap.
+    /// Counts live handles of one reader, base included, so a test can assert
+    /// the pool cap.
     struct ForkCounter {
         genome: Reference,
         schema: OutputSchema,
@@ -2475,16 +2477,16 @@ mod tests {
         assert_eq!(auto_handle_budget(256, 100), 100);
     }
 
-    /// One reader, many workers, a budget of two handles: forks never exceed
-    /// the pool size, and every piece completes.
+    /// One reader, many workers, a budget of two handles: live handles, base
+    /// included, never exceed the budget, and every piece completes.
     #[test]
     fn handle_pool_caps_forks_and_completes() {
         let dir = TempDir::new().unwrap();
         let genome = one_contig(64);
         let mut ds = dataset(&dir.path().join("pool.pbz"), &genome);
 
-        let live = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(AtomicUsize::new(1));
+        let peak = Arc::new(AtomicUsize::new(1));
         let reader = ForkCounter {
             genome: genome.clone(),
             schema: OutputSchema::single("value", Dtype::I32),
@@ -2501,7 +2503,7 @@ mod tests {
             .run()
             .unwrap();
         let peak = peak.load(Ordering::SeqCst);
-        assert!(peak <= 2, "peak forks {peak}");
+        assert!(peak <= 2, "peak handles {peak}");
         assert_eq!(report.chunks_written, 16);
 
         let values = read_contig::<i32>(&ds, "v", "chr1");

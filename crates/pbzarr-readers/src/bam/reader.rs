@@ -35,11 +35,19 @@ struct Shared {
 }
 
 /// Per-fork decode scratch: the open file handle plus the walk's working
-/// buffers, reused window to window.
+/// buffers. The buffers are freed after each read, so an idle fork holds only
+/// its file handle.
 struct Scratch {
     backend: Backend,
     acc: Accumulators,
     mates: MateBuffer,
+}
+
+impl Scratch {
+    fn release(&mut self) {
+        self.acc.release();
+        self.mates = MateBuffer::default();
+    }
 }
 
 /// Reader over one BAM/CRAM alignment file, driving the depth or composition
@@ -226,8 +234,10 @@ impl ValueReader for BamReader {
             return Ok(());
         }
         let Self { shared, scratch } = self;
-        accumulate(shared, scratch, contig, start, end, |_, _| {})?;
-        copy_fields(&scratch.acc, 0, (end - start) as usize, outputs)
+        let result = accumulate(shared, scratch, contig, start, end, |_, _| {})
+            .and_then(|()| copy_fields(&scratch.acc, 0, (end - start) as usize, outputs));
+        scratch.release();
+        result
     }
 
     /// One `fetch` over the whole span, then one sink per window out of the
@@ -252,7 +262,7 @@ impl ValueReader for BamReader {
         let mut covered = vec![false; bounds.len() - 1];
 
         let Self { shared, scratch } = self;
-        accumulate(shared, scratch, contig, start, end, |lo, hi| {
+        let result = accumulate(shared, scratch, contig, start, end, |lo, hi| {
             let lo = lo.max(start);
             let hi = hi.min(end);
             if hi <= lo {
@@ -264,28 +274,54 @@ impl ValueReader for BamReader {
             for flag in &mut covered[first..=last] {
                 *flag = true;
             }
-        })?;
-
-        for (window, pair) in bounds.windows(2).enumerate() {
-            let (lo, hi) = (pair[0], pair[1]);
-            if hi <= lo {
-                continue;
+        })
+        .and_then(|()| {
+            for (window, pair) in bounds.windows(2).enumerate() {
+                let (lo, hi) = (pair[0], pair[1]);
+                if hi <= lo {
+                    continue;
+                }
+                if covered[window] {
+                    let mut outputs = sink.sinks(lo, hi)?;
+                    copy_fields(
+                        &scratch.acc,
+                        (lo - start) as usize,
+                        (hi - start) as usize,
+                        &mut outputs,
+                    )?;
+                }
+                sink.done(lo, hi, covered[window])?;
             }
-            if covered[window] {
-                let mut outputs = sink.sinks(lo, hi)?;
-                copy_fields(
-                    &scratch.acc,
-                    (lo - start) as usize,
-                    (hi - start) as usize,
-                    &mut outputs,
-                )?;
-            }
-            sink.done(lo, hi, covered[window])?;
-        }
-        Ok(())
+            Ok(())
+        });
+        scratch.release();
+        result
     }
 
     fn fork(&self) -> Result<Self> {
         self.fork_handle()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::ArrayViewMut1;
+
+    #[test]
+    fn fork_frees_decode_scratch_after_a_read() {
+        let bam = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/bam/reads.bam");
+        let base = BamReader::open(&bam, None, ImportMode::Depth, DepthFilter::default()).unwrap();
+        let mut fork = base.fork().unwrap();
+
+        let mut depth = vec![0i32; 100];
+        let mut outputs = [OutputSinkMut::I32(ArrayViewMut1::from(
+            depth.as_mut_slice(),
+        ))];
+        fork.read_into("ref1", 0, 100, &mut outputs).unwrap();
+
+        assert!(depth.iter().any(|&d| d > 0));
+        assert_eq!(fork.scratch.acc.fields.len(), 1);
+        assert!(fork.scratch.acc.fields.iter().all(|f| f.capacity() == 0));
     }
 }

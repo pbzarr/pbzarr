@@ -668,7 +668,34 @@ struct BigWigOptions {
     track: String,
 }
 
+/// Raises the soft open-file limit to the hard limit. An import holds one
+/// file handle per source at minimum, and macOS starts at a soft limit of 256.
+#[cfg(unix)]
+fn raise_fd_limit() {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit and setrlimit only read and write the given struct.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 || lim.rlim_cur >= lim.rlim_max {
+            return;
+        }
+        let soft = lim.rlim_cur;
+        lim.rlim_cur = lim.rlim_max;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 {
+            // macOS refuses a soft limit above OPEN_MAX (10240).
+            lim.rlim_cur = lim.rlim_max.min(10240).max(soft);
+            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_fd_limit() {}
+
 fn main() -> Result<()> {
+    raise_fd_limit();
     match Cli::parse().command {
         Command::View(args) => view(args),
         Command::Stat(args) => stat(args),

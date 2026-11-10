@@ -20,6 +20,9 @@ pbzarr = { path = "../pbzarr" }
 pbzarr-readers = { path = "../pbzarr-readers" }
 rayon = "1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.182"
+
 [dev-dependencies]
 # Synthesize tiny BigWig fixtures in-process, matching the reader tests.
 bigtools = { version = "0.5.8", default-features = false, features = ["read", "write"] }
