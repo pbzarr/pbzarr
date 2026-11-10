@@ -2,23 +2,21 @@
 //!
 //! ```ignore
 //! Import::from_readers(readers)?
-//!     .into_track(&track)          // or .into_tracks(&[&a, &b])
+//!     .into_dataset(&mut dataset, specs)
 //!     .readers_as_columns()        // or .fields_as_tracks() / .fields_as_columns()
 //!     .options(PipelineOptions::default())
 //!     .run()?;
 //! ```
 //!
 //! An axis with no fan-out needs no statement: one reader, one schema field,
-//! one scalar track is just `from_readers(..).into_track(..).run()`.
+//! one scalar track is just `from_readers(..).into_dataset(..).run()`.
 
-use super::destination::Destination;
-use crate::dataset::{DatasetPlan, Prepared};
+use crate::dataset::DatasetPlan;
 use crate::error::{PbzError, Result};
 use crate::import::config::Report;
 use crate::import::engine::{self, PipelineOptions};
 use crate::import::routing::{ImportRouting, SourceAxis};
 use crate::io::ValueReader;
-use crate::track::Track;
 use crate::{TrackConfig, dataset::Dataset};
 
 /// A Dataset destination: the store, its track specifications, and whether
@@ -35,7 +33,6 @@ impl Import {
         }
         Ok(ImportBuilder {
             readers,
-            tracks: Vec::new(),
             dataset: None,
             tracks_from: None,
             columns_from: None,
@@ -48,7 +45,6 @@ impl Import {
 
 pub struct ImportBuilder<'t, R: ValueReader> {
     readers: Vec<R>,
-    tracks: Vec<&'t Track>,
     dataset: Option<DatasetTarget<'t>>,
     tracks_from: Option<SourceAxis>,
     columns_from: Option<SourceAxis>,
@@ -59,18 +55,6 @@ pub struct ImportBuilder<'t, R: ValueReader> {
 }
 
 impl<'t, R: ValueReader> ImportBuilder<'t, R> {
-    pub fn into_track(mut self, track: &'t Track) -> Self {
-        self.dataset = None;
-        self.tracks = vec![track];
-        self
-    }
-
-    pub fn into_tracks(mut self, tracks: &[&'t Track]) -> Self {
-        self.dataset = None;
-        self.tracks = tracks.to_vec();
-        self
-    }
-
     /// Import into new root arrays in a format-0.5 Dataset.
     ///
     /// Configuration is read-only; run validates the whole request
@@ -90,7 +74,6 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
         tracks: Vec<(String, TrackConfig)>,
         plan: DatasetPlan,
     ) -> Self {
-        self.tracks.clear();
         self.dataset = Some((dataset, tracks, plan));
         self
     }
@@ -134,17 +117,14 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             .as_ref()
             .map(|(ds, specs, plan)| ds.prepare(specs, *plan))
             .transpose()?;
-        let legacy: Vec<_> = self
-            .tracks
-            .iter()
-            .map(|track| Destination::Legacy(track))
-            .collect();
-        let tracks: &[Destination<'_>] =
-            prepared.as_ref().map(Prepared::targets).unwrap_or(&legacy);
-        if tracks.is_empty() {
+        let Some(prepared) = prepared else {
             return Err(PbzError::Metadata(
-                "import: no destination tracks; call into_track(s) first".into(),
+                "import: no destination; call into_dataset first".into(),
             ));
+        };
+        let tracks = prepared.targets();
+        if tracks.is_empty() {
+            return Err(PbzError::Metadata("import: no destination tracks".into()));
         }
         let schemas: Vec<_> = self
             .readers
@@ -152,7 +132,7 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             .map(ValueReader::output_schema)
             .collect();
         let genomes: Vec<_> = self.readers.iter().map(ValueReader::contigs).collect();
-        let routing = ImportRouting::resolve_destinations(
+        let routing = ImportRouting::resolve(
             &schemas,
             &genomes,
             tracks,
@@ -161,8 +141,8 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             self.expected_labels.as_deref(),
         )?;
         engine::validate_layout(tracks, &routing)?;
-        if let (Some((ds, ..)), Some(prepared)) = (self.dataset.as_mut(), prepared.as_ref()) {
-            ds.begin(prepared)?;
+        if let Some((ds, ..)) = self.dataset.as_mut() {
+            ds.begin(&prepared)?;
         }
         let report = engine::run_import(
             self.readers,
@@ -171,8 +151,8 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             &self.options,
             self.handle_budget,
         )?;
-        if let (Some((ds, ..)), Some(prepared)) = (self.dataset.as_mut(), prepared.as_ref()) {
-            ds.finish(prepared)?;
+        if let Some((ds, ..)) = self.dataset.as_mut() {
+            ds.finish(&prepared)?;
         }
         Ok(report)
     }

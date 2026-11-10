@@ -8,12 +8,12 @@ use serde_json::{Map, Value};
 use zarrs::array::{Array, ArrayShardedExt, ArraySubset};
 use zarrs::storage::{ReadableWritableListableStorage, ReadableWritableListableStorageTraits};
 
+use crate::PERBASE_CONVENTION_NAME;
 use crate::Result;
 pub use crate::array::TrackConfig;
 use crate::error::PbzError;
 use crate::genome::{Genome, Region};
 use crate::io::{Dtype, Numeric};
-use crate::{PBZ_FORMAT_VERSION, PERBASE_CONVENTION_NAME, PERBASE_CONVENTION_UUID};
 
 /// One entry of the `zarr_conventions` array.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,25 +63,6 @@ pub struct PerbaseTrackAttrs {
 }
 
 impl PerbaseTrackAttrs {
-    pub fn new(genome: &Genome, config: &TrackConfig) -> Self {
-        Self {
-            zarr_conventions: vec![ConventionRef {
-                uuid: PERBASE_CONVENTION_UUID.to_owned(),
-                name: PERBASE_CONVENTION_NAME.to_owned(),
-                spec_url: None,
-                schema_url: None,
-            }],
-            version: PBZ_FORMAT_VERSION.to_owned(),
-            genome_checksum: genome.checksum(),
-            genome_name: genome.name().map(|s| s.to_owned()),
-            ragged_index: "offsets".to_owned(),
-            ragged_contigs: "contigs".to_owned(),
-            coordinates: "0-based-half-open".to_owned(),
-            description: config.description.clone(),
-            source: config.source.clone(),
-        }
-    }
-
     /// Whether a group's attributes declare the `perbase` convention. Used by
     /// store discovery to recognize track groups and to gate on completion
     /// (the block is written last, so its presence means "fully written").
@@ -108,50 +89,6 @@ pub struct Track {
     /// Cached `values` array; `Array::open` re-reads `zarr.json`, so opening
     /// once keeps per-region reads/writes cheap.
     pub(crate) values: RwLock<Option<Arc<Array<dyn ReadableWritableListableStorageTraits>>>>,
-}
-
-pub(crate) struct PendingTrack {
-    pub(crate) track: Track,
-    completion_attrs: Map<String, Value>,
-}
-
-impl PendingTrack {
-    pub(crate) fn new(track: Track, config: &TrackConfig) -> Result<Self> {
-        let mut completion_attrs = config.extra.clone();
-        let attrs = PerbaseTrackAttrs::new(&track.genome, config);
-        let attr_val = serde_json::to_value(attrs)
-            .map_err(|e| PbzError::Metadata(format!("track {:?}: {e}", track.name)))?;
-        let attr_obj = attr_val.as_object().ok_or_else(|| {
-            PbzError::Metadata(format!(
-                "track {:?}: invalid completion metadata",
-                track.name
-            ))
-        })?;
-        for (key, value) in attr_obj {
-            completion_attrs.insert(key.clone(), value.clone());
-        }
-        Ok(Self {
-            track,
-            completion_attrs,
-        })
-    }
-
-    pub(crate) fn finalize(self) -> Result<Track> {
-        let Self {
-            track,
-            completion_attrs,
-        } = self;
-        let mut group =
-            zarrs::group::Group::open(Arc::clone(&track.storage), &format!("/{}", track.name))
-                .map_err(|e| PbzError::Store(e.to_string()))?;
-        for (key, value) in completion_attrs {
-            group.attributes_mut().insert(key, value);
-        }
-        group
-            .store_metadata()
-            .map_err(|e| PbzError::Store(e.to_string()))?;
-        Ok(track)
-    }
 }
 
 impl Track {
@@ -451,20 +388,6 @@ impl Track {
         array
             .retrieve_array_subset::<ArrayD<T>>(&subset)
             .map_err(|e| PbzError::Store(format!("read {}: {e}", self.name)))
-    }
-
-    /// Write data into an arbitrary region.
-    ///
-    /// Takes ownership of `data` because zarrs' `store_array_subset` consumes
-    /// the buffer; passing by value lets the pipeline writer avoid a per-chunk
-    /// clone. Partial-chunk writes trigger a read-modify-write internally
-    /// inside zarrs.
-    ///
-    /// Returns `Err` if `T::DTYPE` doesn't match the track dtype, or if the
-    /// data rank doesn't match the track rank.
-    pub fn write_region<T: Numeric>(&self, region: &Region, data: ArrayD<T>) -> Result<()> {
-        let base = self.base_of(region)?;
-        self.write_flat(base + region.start, base + region.end, data)
     }
 
     /// Write `data` into the half-open flat position range `[start, end)`,

@@ -183,3 +183,29 @@ fn import_creates_the_store_then_adds_tracks_and_refuses_a_used_name() {
         "{stderr}"
     );
 }
+
+#[test]
+fn import_into_a_format_0_4_store_fails_with_the_legacy_message() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("old.pbz");
+    std::fs::create_dir(&store).unwrap();
+    std::fs::write(
+        store.join("zarr.json"),
+        r#"{"zarr_format":3,"node_type":"group","attributes":{"zarr_conventions":[{"uuid":"b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c","name":"perbase"}]}}"#,
+    )
+    .unwrap();
+    let legacy = "This is a format 0.4 store. pbzarr 0.8 reads format 0.5 only.";
+    let import = run_pbz([
+        "import".into(),
+        "d4".into(),
+        "-o".into(),
+        store.as_os_str().to_owned(),
+        "--track".into(),
+        "depth".into(),
+        "--no-progress".into(),
+        fixture("banded_1k.d4").into_os_string(),
+    ]);
+    assert!(!import.status.success());
+    let stderr = String::from_utf8_lossy(&import.stderr);
+    assert!(stderr.contains(legacy), "{stderr}");
+}

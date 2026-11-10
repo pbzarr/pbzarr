@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-pub(crate) use write::{DatasetPlan, Prepared};
+pub(crate) use write::DatasetPlan;
 use zarrs::storage::ReadableWritableListableStorage;
 
 /// The `pbz:version` value written to, and required of, a root-Dataset store.

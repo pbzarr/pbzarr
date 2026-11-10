@@ -2,7 +2,7 @@
 
 PBZ is a small Zarr v3 convention for dense, per-base genomic data. The format supplies genomic interpretation and a flat track layout; Zarr supplies storage and codecs; xarray and Dask supply the Python read and analysis model.
 
-Format 0.5 (one root Dataset) is what imports write and what Python reads; see the [format 0.5 specification](../spec/README.md). The 0.4 per-track layout described in parts of this document is legacy: the Rust `PbzStore` API, `pbz view`, and `pbz stat` still use it. Earlier contig-major and wrapper-oriented designs are historical only.
+Format 0.5 (one root Dataset) is what imports write and what Python reads; see the [format 0.5 specification](../spec/README.md). The 0.4 per-track layout described in parts of this document is legacy: nothing writes it, and the Rust `PbzStore` reader, `pbz view`, and `pbz stat` still read it. Earlier contig-major and wrapper-oriented designs are historical only.
 
 ## Development reader
 
@@ -16,10 +16,9 @@ external changes. It does not provide a concurrent-mutation snapshot.
 
 CLI imports and appends write format `0.5`, and `pbz view` and `pbz stat`
 read both layouts. Python opens a `0.5` store as an `xr.Dataset` with
-`pbzarr.open` and refuses `0.4` stores. `PbzStore` remains the `0.4` Rust API.
-`Dataset` refuses a format `0.4` root with
-`PbzError::LegacyFormat`. The Python import functions also refuse a `0.4`
-destination.
+`pbzarr.open` and refuses `0.4` stores. `PbzStore` remains the `0.4` Rust
+reader. `Dataset` refuses a format `0.4` root with `PbzError::LegacyFormat`.
+The CLI and Python imports also refuse a `0.4` destination.
 
 The root `zarr.json` of a `0.5` store holds a consolidated metadata copy in
 the zarr-python inline form. Every import, append, and Python write replaces
@@ -89,9 +88,9 @@ Track metadata contains the convention marker plus these interpretation fields:
 
 Optional `perbase:description` and `perbase:source` annotate a track. Dtype, fill value, chunk grid, shard grid, dimension names, and coordinate labels remain in ordinary Zarr array metadata rather than being duplicated here.
 
-A writer creates arrays first and writes the track’s `perbase:` interpretation block last. The marker is therefore a completion record: discovery skips a child without it because it may be a partial import or unrelated Zarr group.
+Discovery skips a child group without the `perbase:` interpretation block.
 
-The root `zarr.json` also carries a consolidated metadata map in the zarr-python v3 flavor: every node’s metadata document, inlined verbatim. Writers refresh the map on each track publication. The copy is advisory: the per-node `zarr.json` documents stay authoritative.
+The root `zarr.json` also carries a consolidated metadata map in the zarr-python v3 flavor: every node’s metadata document, inlined verbatim. The copy is advisory: the per-node `zarr.json` documents stay authoritative.
 
 ## Chunks and shards
 
@@ -127,15 +126,13 @@ Every `xr.DataArray` and `xr.Dataset` from `open` carries a 0-d coordinate named
 
 ## Rust API
 
-`PbzStore::create(path)` and `PbzStore::open(path)` operate on filesystem stores, with `create_with_storage` and `open_with_storage` accepting an arbitrary synchronous readable, writable, listable Zarr storage handle.
+`Dataset::create(path, reference)` and `Dataset::open(path)` operate on filesystem stores. `create_with_storage` and `open_with_storage` take any synchronous readable, writable, listable Zarr storage handle. `TrackConfig::new(dtype)` configures scalar or 2D tracks with generic columns, chunking, optional sharding, fill value, and optional description or source metadata. `Dataset::read_region<T>` reads one region of a track at full column width.
 
-`PbzStore::create_track(name, genome, config)` is the manual-authoring path. `TrackConfig::new(dtype)` configures scalar or 2D tracks with generic columns, chunking, optional sharding, fill value, and optional description or source metadata.
-
-`Genome` owns named contigs and derives offsets and the checksum. `Track::read_region<T>` and `Track::write_region<T>` use 0-based, half-open regions and preserve the track rank at runtime-checked dtype `T`.
+`PbzStore::open(path)` reads a format 0.4 store. `Genome` owns named contigs and derives offsets and the checksum. `Track::read_region<T>` uses 0-based, half-open regions and preserves the track rank at runtime-checked dtype `T`.
 
 The format-agnostic import engine drives any `ValueReader`. A reader exposes an ordered schema of named dtype fields. `read_into` fills one sink per field for one contig window in a single decode pass. `read_windows` decodes a run of adjacent windows and reports which windows have no data, so the engine can skip them. `fork` gives each worker its own handle.
 
-`Import::from_readers(..)` starts a run: the builder chains `into_track(s)(..)`, an optional axis statement (`fields_as_tracks()`, `fields_as_columns()`, or `readers_as_columns()`), and `options(..)`, and `run()` returns a `Report`. The public configuration surface is `pbzarr::import::{Config, Report, Source}`. Reader crates provide d4 (`int32`), bigWig (`float32`), BED (schema-typed columns), and BAM/CRAM (`int32` depth and composition counts) sources. Python exposes them through the destination-oriented writers.
+`Import::from_readers(..)` starts a run: the builder chains `into_dataset(..)`, an optional axis statement (`fields_as_tracks()`, `fields_as_columns()`, or `readers_as_columns()`), and `options(..)`, and `run()` returns a `Report`. The public configuration surface is `pbzarr::import::{Config, Report, Source}`. Reader crates provide d4 (`int32`), bigWig (`float32`), BED (schema-typed columns), and BAM/CRAM (`int32` depth and composition counts) sources. Python exposes them through the destination-oriented writers.
 
 ## Interoperability
 
@@ -147,7 +144,7 @@ Cross-language validation (`pixi run validate-roundtrip`) imports d4 fixtures wi
 
 ## CLI
 
-The `pbz` CLI ships `import d4`, `import bigwig`, `import bed`, and `import bam`. The import subcommands take positional `PATH[:LABEL]` sources or `--file-list`, plus `--dim`, `--codecs`, `--decode-chunks`, and `-t`/`--threads`. `import bed` also takes a `--schema` TSV. `import bam` takes the CRAM FASTA as `--fasta`. When the output path does not exist, an import creates a format 0.5 store. The import first checks that all sources have the same contigs, then takes the store reference from them. If the import fails, it removes the new store. When the output path exists, the import adds tracks to the store in whichever format that store already uses, and the sources must match the store reference. The import refuses a track name that the store already uses. BED files have no contig lengths, so `import bed` needs `--genome` only to create a store; an existing store gives its own lengths. In Rust, `Target::Path` holds this rule, and `reference_genome` gives the contig list for BED.
+The `pbz` CLI ships `import d4`, `import bigwig`, `import bed`, and `import bam`. The import subcommands take positional `PATH[:LABEL]` sources or `--file-list`, plus `--dim`, `--codecs`, `--decode-chunks`, and `-t`/`--threads`. `import bed` also takes a `--schema` TSV. `import bam` takes the CRAM FASTA as `--fasta`. When the output path does not exist, an import creates a format 0.5 store. The import first checks that all sources have the same contigs, then takes the store reference from them. If the import fails, it removes the new store. When the output path exists, the import adds tracks to that store, and the sources must match the store reference. The import refuses a format 0.4 store. The import refuses a track name that the store already uses. BED files have no contig lengths, so `import bed` needs `--genome` only to create a store; an existing store gives its own lengths. In Rust, `Target::Path` holds this rule, and `reference_genome` gives the contig list for BED.
 
 `view` exports one track as bedGraph-like TSV: `chrom`, `start`, `end`, then one value column per track column, with equal-value runs collapsed and rows in genome order. Positions whose values are all missing (NaN fill) are skipped. It subsets rank-2 columns with `--columns` and writes BGZF when the output path ends in `.gz`.
 

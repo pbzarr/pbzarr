@@ -12,7 +12,6 @@ use crate::error::{PbzError, Result};
 use crate::genome::Genome;
 use crate::io::error::ReaderError;
 use crate::io::{Dtype, OutputSchema};
-use crate::track::Track;
 
 /// A source axis that can fan out over tracks or columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,29 +51,10 @@ pub struct ImportRouting {
 impl ImportRouting {
     /// Derive and validate a routing from the reader schemas and genomes, the
     /// destination tracks, and the builder's axis statements.
-    pub fn resolve(
+    pub(crate) fn resolve(
         schemas: &[&OutputSchema],
         genomes: &[&Genome],
-        tracks: &[&Track],
-        tracks_from: Option<SourceAxis>,
-        columns_from: Option<SourceAxis>,
-        expected_labels: Option<&[String]>,
-    ) -> Result<Self> {
-        let destinations: Vec<_> = tracks.iter().map(|t| Destination::Legacy(t)).collect();
-        Self::resolve_destinations(
-            schemas,
-            genomes,
-            &destinations,
-            tracks_from,
-            columns_from,
-            expected_labels,
-        )
-    }
-
-    pub(crate) fn resolve_destinations(
-        schemas: &[&OutputSchema],
-        genomes: &[&Genome],
-        tracks: &[Destination<'_>],
+        tracks: &[Destination],
         tracks_from: Option<SourceAxis>,
         columns_from: Option<SourceAxis>,
         expected_labels: Option<&[String]>,

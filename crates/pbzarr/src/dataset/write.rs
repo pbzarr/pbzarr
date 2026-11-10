@@ -139,7 +139,7 @@ use zarrs::array::codec::api::ArrayToBytesCodecTraits;
 use zarrs::storage::StoreKey;
 
 pub(crate) struct PreparedImport {
-    pub(crate) targets: Vec<Destination<'static>>,
+    pub(crate) targets: Vec<Destination>,
     coordinates: Vec<(Arc<super::read::ArrayHandle>, Vec<String>)>,
 }
 
@@ -384,8 +384,8 @@ impl Dataset {
                 storage: self.storage.clone(),
                 values: RwLock::new(Some(array)),
             };
-            targets.push(Destination::Root {
-                track: Box::new(track),
+            targets.push(Destination {
+                track,
                 labels: config.columns.clone(),
                 column_offset: 0,
             });
@@ -449,7 +449,7 @@ pub(crate) enum Prepared {
 }
 
 impl Prepared {
-    pub(crate) fn targets(&self) -> &[Destination<'static>] {
+    pub(crate) fn targets(&self) -> &[Destination] {
         match self {
             Self::Import(prepared) => &prepared.targets,
             Self::Append(prepared) => &prepared.targets,
@@ -458,7 +458,7 @@ impl Prepared {
 }
 
 pub(crate) struct PreparedAppend {
-    pub(crate) targets: Vec<Destination<'static>>,
+    pub(crate) targets: Vec<Destination>,
     /// Every widened variable and its stored metadata carrying the new shape,
     /// published only after the engine's chunk writes land. Writing the stored
     /// JSON back with one field replaced keeps the rest byte for byte; a round
@@ -675,8 +675,8 @@ impl Dataset {
                 storage: self.storage.clone(),
                 values: RwLock::new(Some(array)),
             };
-            targets.push(Destination::Root {
-                track: Box::new(track),
+            targets.push(Destination {
+                track,
                 labels: Some(grown_labels.clone()),
                 column_offset: width,
             });

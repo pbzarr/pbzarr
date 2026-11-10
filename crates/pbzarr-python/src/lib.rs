@@ -43,14 +43,6 @@ fn apply_codecs_kwarg(
     Ok(())
 }
 
-/// Python writes format 0.5 only, so an existing store must open as one.
-fn check_existing(store_path: &str) -> PyResult<()> {
-    if Path::new(store_path).exists() {
-        Dataset::open(store_path).map_err(|e| PbzError::new_err(format!("{e}")))?;
-    }
-    Ok(())
-}
-
 /// Bulk-import one or more d4 files into a new `int32` track.
 ///
 /// The store is created from the source headers when the path does not
@@ -75,7 +67,6 @@ fn import_d4(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
-        check_existing(&store_path)?;
         let d4_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -149,7 +140,6 @@ fn import_bigwig(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
-        check_existing(&store_path)?;
         let bw_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -333,7 +323,6 @@ fn import_bed(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let report = py.allow_threads(|| {
-        check_existing(&store_path)?;
         let bed_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {
@@ -511,7 +500,6 @@ fn import_bam(
         count_deletions,
     };
     let report = py.allow_threads(|| {
-        check_existing(&store_path)?;
         let bam_sources: Vec<Source> = sources
             .iter()
             .map(|(path, column_label)| Source {

@@ -271,7 +271,7 @@ macro_rules! tile_buffer {
             }
 
             /// The buffer must be one chunk-aligned write unit.
-            fn write_unsharded(self, track: &Destination<'_>, pos: Range<u64>, cols: Range<u64>) -> Result<()> {
+            fn write_unsharded(self, track: &Destination, pos: Range<u64>, cols: Range<u64>) -> Result<()> {
                 match self {
                     $( TileBuffer::$variant(a) => {
                         if track.rank() == 1 {
@@ -349,7 +349,7 @@ tile_buffer! {
 
 /// Resolved write geometry for one target track.
 struct TargetGeom<'t> {
-    track: &'t Destination<'t>,
+    track: &'t Destination,
     array: Arc<Array<dyn ReadableWritableListableStorageTraits>>,
     rank: usize,
     dtype: Dtype,
@@ -1299,12 +1299,12 @@ fn build_touch_plan(
     plan
 }
 
-pub(crate) fn validate_layout(tracks: &[Destination<'_>], routing: &ImportRouting) -> Result<()> {
+pub(crate) fn validate_layout(tracks: &[Destination], routing: &ImportRouting) -> Result<()> {
     target_geometries(tracks, routing).map(|_| ())
 }
 
 fn target_geometries<'t>(
-    tracks: &'t [Destination<'t>],
+    tracks: &'t [Destination],
     routing: &ImportRouting,
 ) -> Result<Vec<TargetGeom<'t>>> {
     let mut geoms: Vec<TargetGeom<'_>> = Vec::with_capacity(tracks.len());
@@ -1387,7 +1387,7 @@ fn target_geometries<'t>(
 
 pub(crate) fn run_import<R: ValueReader>(
     readers: Vec<R>,
-    tracks: &[Destination<'_>],
+    tracks: &[Destination],
     routing: &ImportRouting,
     options: &PipelineOptions,
     handle_budget: usize,

@@ -22,9 +22,6 @@ pub use stat::{HistTable, StatKind, StatOptions, StatOutput, StatResult, StatVal
 pub use store::PbzStore;
 pub use track::{ConventionRef, PerbaseTrackAttrs, Track};
 
-/// The pbz format/convention version written to every track group.
-pub const PBZ_FORMAT_VERSION: &str = "0.4";
-
 /// The `perbase` Zarr convention name (the `zarr_conventions[].name`).
 pub const PERBASE_CONVENTION_NAME: &str = "perbase";
 

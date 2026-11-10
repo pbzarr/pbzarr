@@ -1,5 +1,5 @@
-//! Where a format entry point writes: a format-0.4 store, a format-0.5
-//! root Dataset, or a path that holds one or will hold a new one.
+//! Where a format entry point writes: a format-0.5 root Dataset, or a path
+//! that holds one or will hold a new one.
 
 use std::path::Path;
 
@@ -11,17 +11,16 @@ use super::engine::PipelineOptions;
 use super::routing::SourceAxis;
 use crate::dataset::{Dataset, DatasetPlan, Reference};
 use crate::io::ValueReader;
-use crate::{Contig, Genome, PbzError, PbzStore, Result, TrackConfig};
+use crate::{Contig, Genome, PbzError, Result, TrackConfig};
 
 /// A destination for one import run.
 ///
 /// Every variant takes the same track specifications and the same [`Axes`]:
-/// `Store` writes one Zarr group per track, `Dataset` writes new root
-/// variables over shared root coordinates, and `Append` widens root variables
-/// that already exist. The format entry points accept anything that converts
-/// into this, so `&mut store` and `&mut dataset` both pass directly.
+/// `Dataset` writes new root variables over shared root coordinates, and
+/// `Append` widens root variables that already exist. The format entry points
+/// accept anything that converts into this, so `&mut dataset` and a path both
+/// pass directly.
 pub enum Target<'a> {
-    Store(&'a mut PbzStore),
     Dataset(&'a mut Dataset),
     /// A format-0.5 Dataset whose existing root variables grow along their
     /// column dimension. [`Target::import`] routes this variant to the append
@@ -36,12 +35,6 @@ pub enum Target<'a> {
 impl<'a> From<&'a Path> for Target<'a> {
     fn from(path: &'a Path) -> Self {
         Self::Path(path)
-    }
-}
-
-impl<'a> From<&'a mut PbzStore> for Target<'a> {
-    fn from(store: &'a mut PbzStore) -> Self {
-        Self::Store(store)
     }
 }
 
@@ -108,11 +101,6 @@ impl Target<'_> {
         options: PipelineOptions,
     ) -> Result<Report> {
         match self {
-            Self::Store(store) => store.create_tracks_with(specs, move |tracks| {
-                axes.apply(Import::from_readers(readers)?.into_tracks(tracks))
-                    .options(options)
-                    .run()
-            }),
             Self::Dataset(dataset) => {
                 dataset_run(dataset, specs, readers, axes, options, DatasetPlan::Create)
             }
@@ -138,7 +126,6 @@ impl Target<'_> {
         options: PipelineOptions,
     ) -> Result<Report> {
         match self {
-            Self::Store(_) => Err(PbzError::LegacyFormat),
             Self::Path(path) => {
                 let mut dataset = Dataset::open(path)?;
                 dataset_run(
@@ -170,14 +157,8 @@ fn import_at<R: ValueReader>(
 ) -> Result<Report> {
     if path.exists() {
         info!("{} exists; adding track(s) to the store", path.display());
-        return match Dataset::open(path) {
-            Ok(mut dataset) => Target::Dataset(&mut dataset).import(specs, readers, axes, options),
-            Err(PbzError::LegacyFormat) => {
-                let mut store = PbzStore::open(path)?;
-                Target::Store(&mut store).import(specs, readers, axes, options)
-            }
-            Err(error) => Err(error),
-        };
+        let mut dataset = Dataset::open(path)?;
+        return Target::Dataset(&mut dataset).import(specs, readers, axes, options);
     }
     let (_, genome, _) = specs
         .first()
@@ -208,11 +189,7 @@ pub fn reference_genome(path: &Path, genome: Option<Genome>) -> Result<Genome> {
             ))
         });
     }
-    let dataset = match Dataset::open(path) {
-        Ok(dataset) => dataset,
-        Err(PbzError::LegacyFormat) => return genome.ok_or(PbzError::LegacyFormat),
-        Err(error) => return Err(error),
-    };
+    let dataset = Dataset::open(path)?;
     let store = dataset.reference()?.contigs().to_vec();
     if let Some(genome) = &genome {
         same_reference(genome.contigs(), &store)?;

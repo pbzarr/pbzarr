@@ -1,29 +1,23 @@
 //! Private destinations for the existing import engine.
 use crate::io::{Dtype, Numeric};
-use crate::{Genome, Result, Track};
+use crate::{Genome, PbzError, Result, Track};
 use ndarray::ArrayD;
 use std::{ops::Range, sync::Arc};
 use zarrs::array::Array;
 use zarrs::storage::ReadableWritableListableStorageTraits;
 
-pub(crate) enum Destination<'a> {
-    Legacy(&'a Track),
-    /// A cached root-array handle. Only layout-independent Track methods are
-    /// used; labels are held here because root coordinates are not track-local.
-    Root {
-        track: Box<Track>,
-        labels: Option<Vec<String>>,
-        /// First destination column on the track's column axis. Nonzero when
-        /// the run appends to an existing column axis.
-        column_offset: u64,
-    },
+/// A cached root-array handle. Labels are held here because root
+/// coordinates are not track-local.
+pub(crate) struct Destination {
+    pub(crate) track: Track,
+    pub(crate) labels: Option<Vec<String>>,
+    /// First destination column on the track's column axis. Nonzero when
+    /// the run appends to an existing column axis.
+    pub(crate) column_offset: u64,
 }
-impl Destination<'_> {
+impl Destination {
     fn track(&self) -> &Track {
-        match self {
-            Self::Legacy(track) => track,
-            Self::Root { track, .. } => track,
-        }
+        &self.track
     }
     pub(crate) fn name(&self) -> &str {
         self.track().name()
@@ -35,10 +29,7 @@ impl Destination<'_> {
         self.track().dtype()
     }
     pub(crate) fn column_offset(&self) -> u64 {
-        match self {
-            Self::Legacy(_) => 0,
-            Self::Root { column_offset, .. } => *column_offset,
-        }
+        self.column_offset
     }
     pub(crate) fn rank(&self) -> usize {
         self.track().rank()
@@ -50,12 +41,9 @@ impl Destination<'_> {
         self.track().columns_count()
     }
     pub(crate) fn column_labels(&self) -> Result<Vec<String>> {
-        match self {
-            Self::Legacy(track) => track.column_labels(),
-            Self::Root { labels, .. } => labels.clone().ok_or_else(|| {
-                crate::PbzError::Metadata("rank-one destination has no column labels".into())
-            }),
-        }
+        self.labels
+            .clone()
+            .ok_or_else(|| PbzError::Metadata("rank-one destination has no column labels".into()))
     }
     pub(crate) fn values_array(
         &self,

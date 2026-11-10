@@ -90,6 +90,7 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
 }
 
 /// An opened store in whichever layout its root declares.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Store {
     Legacy(PbzStore),
     Root(Dataset),
