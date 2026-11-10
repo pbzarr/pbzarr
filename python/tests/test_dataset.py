@@ -110,6 +110,31 @@ def test_derived_write_round_trips(cohort: Path) -> None:
         assert ds.attrs["pbz:version"] == "0.5"
 
 
+def test_write_reads_each_source_block_once_for_many_variables(cohort: Path) -> None:
+    reads = []
+
+    def count(block):
+        reads.append(block.shape)
+        return block
+
+    with pbzarr.open(cohort) as ds:
+        depth = ds["depth"]
+        counted = depth.copy(
+            data=depth.data.map_blocks(count, dtype=depth.dtype, meta=np.empty((0, 0), depth.dtype))
+        )
+        thresholds = [1, 10, 50, 100, 120]
+        variables = {"mean": counted.mean("sample")}
+        variables |= {f"over_{t}": (counted >= t).mean("sample") for t in thresholds}
+        pbzarr.write(ds, variables).close()
+        assert len(reads) == counted.data.npartitions
+
+    with pbzarr.open(cohort) as ds:
+        values = ds["depth"].values
+        np.testing.assert_allclose(ds["mean"].values, values.mean(1))
+        for t in thresholds:
+            np.testing.assert_allclose(ds[f"over_{t}"].values, (values >= t).mean(1))
+
+
 def test_write_returns_the_reopened_store_and_leaves_the_input(cohort: Path) -> None:
     with pbzarr.open(cohort) as ds:
         first = ds["depth"].isel(sample=0)
