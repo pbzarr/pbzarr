@@ -349,7 +349,7 @@ struct GlobalOptions {
     /// and errors always print. `RUST_LOG` overrides this when set.
     #[arg(short, long, action = ArgAction::Count, global = true)]
     verbose: u8,
-    /// Hide the summary line and the progress display.
+    /// Hide the summary line and the progress display of import and append.
     #[arg(short, long, global = true)]
     quiet: bool,
 }

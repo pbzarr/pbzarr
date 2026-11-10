@@ -66,7 +66,7 @@ def check_rust_imports(writer, probe, destination):
     sample_metadata = (store / "sample/zarr.json").read_bytes()
     subprocess.run([str(writer), str(store), "add"], check=True)
     assert (store / "sample/zarr.json").read_bytes() == sample_metadata
-    assert "consolidated_metadata" not in json.loads((store / "zarr.json").read_text())
+    assert "consolidated_metadata" in json.loads((store / "zarr.json").read_text())
     with xr.open_zarr(store, chunks=None) as ds:
         assert ds.attrs["notes"] == "Preserve this root annotation."
         np.testing.assert_array_equal(ds.added.values, np.tile([12, 20], (12, 1)))
