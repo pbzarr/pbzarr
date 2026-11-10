@@ -127,14 +127,14 @@ impl Dataset {
 }
 
 use super::{GenomicAxis, Role, Support, VariableInfo};
+use crate::Genome;
 use crate::array::{
     TrackConfig, apply_explicit_spec, default_data_codecs, dtype_to_zarrs, resolve_fill_value,
     validate_node_name,
 };
 use crate::import::destination::Destination;
-use crate::{Genome, Track};
+use crate::track::Track;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::RwLock;
 use zarrs::array::codec::api::ArrayToBytesCodecTraits;
 use zarrs::storage::StoreKey;
 
@@ -380,9 +380,7 @@ impl Dataset {
                 genome: genome.clone(),
                 dtype: config.dtype,
                 rank: array.shape().len(),
-                column_dim,
-                storage: self.storage.clone(),
-                values: RwLock::new(Some(array)),
+                values: array,
             };
             targets.push(Destination {
                 track,
@@ -422,7 +420,7 @@ impl Dataset {
     fn finish_import(&mut self, prepared: &PreparedImport) -> Result<()> {
         for target in &prepared.targets {
             target
-                .values_array()?
+                .values_array()
                 .store_metadata()
                 .map_err(storage_error)?;
         }
@@ -671,9 +669,7 @@ impl Dataset {
                 genome: genome.clone(),
                 dtype: config.dtype,
                 rank: 2,
-                column_dim: Some(dim.clone()),
-                storage: self.storage.clone(),
-                values: RwLock::new(Some(array)),
+                values: array,
             };
             targets.push(Destination {
                 track,

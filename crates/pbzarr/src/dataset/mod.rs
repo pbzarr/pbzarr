@@ -1,6 +1,4 @@
-//! Reading and source imports for the provisional PBZ root-Dataset convention.
-//!
-//! These additive APIs do not change format 0.4 or its existing entry points.
+//! Reading and source imports for the PBZ root-Dataset convention.
 mod metadata;
 mod read;
 mod reference;

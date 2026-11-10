@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use noodles_bgzf as bgzf;
+use pbzarr::Measurement;
 use pbzarr::dataset::Dataset;
 use pbzarr::io::{Dtype, Numeric};
-use pbzarr::{Measurement, PbzError, PbzStore};
 
 /// Target bytes fetched per batch (full stored width).
 const BATCH_TARGET_BYTES: usize = 64 << 20;
@@ -89,56 +89,27 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
     Ok(())
 }
 
-/// An opened store in whichever layout its root declares.
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum Store {
-    Legacy(PbzStore),
-    Root(Dataset),
+pub(crate) fn open_store(path: &Path) -> Result<Dataset> {
+    Dataset::open(path).with_context(|| format!("open store {}", path.display()))
 }
 
-/// Open by format: a 0.5 root Dataset, else the 0.4 per-track group layout.
-pub(crate) fn open_store(path: &Path) -> Result<Store> {
-    match Dataset::open(path) {
-        Ok(dataset) => Ok(Store::Root(dataset)),
-        Err(PbzError::LegacyFormat) => PbzStore::open(path)
-            .map(Store::Legacy)
-            .with_context(|| format!("open store {} (format 0.4)", path.display())),
-        Err(error) => Err(error).with_context(|| format!("open store {}", path.display())),
-    }
-}
-
-impl Store {
-    /// Track names in sorted order.
-    fn track_names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = match self {
-            Store::Legacy(store) => store.track_names().collect(),
-            Store::Root(dataset) => dataset
-                .variables()
-                .values()
-                .filter(|v| v.is_track())
-                .map(|v| v.name.as_str())
-                .collect(),
-        };
-        names.sort_unstable();
-        names
-    }
-
-    fn measurement(&self, name: &str) -> Result<Measurement<'_>> {
-        match self {
-            Store::Legacy(store) => store
-                .track(name)
-                .map(Measurement::legacy)
-                .context("listed track is missing"),
-            Store::Root(dataset) => Measurement::root(dataset, name).map_err(Into::into),
-        }
-    }
+/// Track names in sorted order.
+fn track_names(store: &Dataset) -> Vec<&str> {
+    let mut names: Vec<&str> = store
+        .variables()
+        .values()
+        .filter(|v| v.is_track())
+        .map(|v| v.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names
 }
 
 pub(crate) fn resolve_measurement<'s>(
-    store: &'s Store,
+    store: &'s Dataset,
     requested: Option<&str>,
 ) -> Result<Measurement<'s>> {
-    let available = store.track_names();
+    let available = track_names(store);
     match requested {
         Some(name) => {
             if !available.contains(&name) {
@@ -147,11 +118,11 @@ pub(crate) fn resolve_measurement<'s>(
                     available.join(", ")
                 );
             }
-            store.measurement(name)
+            Ok(Measurement::root(store, name)?)
         }
         None => match available.as_slice() {
             [] => bail!("store has no tracks"),
-            [only] => store.measurement(only),
+            [only] => Ok(Measurement::root(store, only)?),
             _ => bail!(
                 "store has {} tracks; name one (available: {})",
                 available.len(),

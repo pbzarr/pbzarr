@@ -2,7 +2,7 @@
 
 PBZ is a small Zarr v3 convention for dense, per-base genomic data. The format supplies genomic interpretation and a flat track layout; Zarr supplies storage and codecs; xarray and Dask supply the Python read and analysis model.
 
-Format 0.5 (one root Dataset) is what imports write and what Python reads; see the [format 0.5 specification](../spec/README.md). The 0.4 per-track layout described in parts of this document is legacy: nothing writes it, and the Rust `PbzStore` reader, `pbz view`, and `pbz stat` still read it. Earlier contig-major and wrapper-oriented designs are historical only.
+pbzarr reads and writes format 0.5 (one root Dataset) only; see the [format 0.5 specification](../spec/README.md). Earlier contig-major, per-track, and wrapper-oriented designs are historical only.
 
 ## Development reader
 
@@ -15,10 +15,10 @@ The module caches metadata and reference geometry, so callers must reopen after
 external changes. It does not provide a concurrent-mutation snapshot.
 
 CLI imports and appends write format `0.5`, and `pbz view` and `pbz stat`
-read both layouts. Python opens a `0.5` store as an `xr.Dataset` with
-`pbzarr.open` and refuses `0.4` stores. `PbzStore` remains the `0.4` Rust
-reader. `Dataset` refuses a format `0.4` root with `PbzError::LegacyFormat`.
-The CLI and Python imports also refuse a `0.4` destination.
+read it. Python opens a `0.5` store as an `xr.Dataset` with `pbzarr.open`.
+A format `0.4` store used one group per track. Every reader and writer, in
+Rust, the CLI, and Python, refuses it with the same message. In Rust, the
+error is `PbzError::LegacyFormat`.
 
 The root `zarr.json` of a `0.5` store holds a consolidated metadata copy in
 the zarr-python inline form. Every import, append, and Python write replaces
@@ -36,65 +36,17 @@ The format serves scalar signals as well as wide column tracks. A column axis ca
 
 PBZ does not define a new container, codec, coordinate conversion layer, or query language. Coordinates are 0-based and half-open. Callers convert external 1-based formats at their own boundaries.
 
-## Per-track data model
+## Data model
 
-A collection is a set of named tracks. A track owns its own genome: ordered `(contig name, length)` pairs, a decorative optional genome name, and a checksum that identifies its geometry.
+A store holds one reference: ordered `(contig name, length)` pairs. Every track covers the whole reference, and the `position` dimension is all contigs concatenated in reference order.
 
-A scalar track has `values` shaped `(position,)`. A 2D track has `values` shaped `(position, column)`, where `column` is the declared dimension name and has a corresponding string coordinate array.
+A scalar track is a root array shaped `(position,)`. A 2D track is shaped `(position, column)`, where `column` is the declared dimension name. The labels of that dimension are a string array of the same name at the root, and tracks that share the dimension share its labels.
 
-Track genomes are intentionally independent. A collection can contain tracks with different contigs or lengths; only tracks with the same genome checksum can be composed into one xarray Dataset.
-
-The genome checksum is `md5:` followed by the MD5 of the canonical `"{name}\t{length}\n"` payload, with pairs sorted in byte-order by name. `genome_name` is decorative and does not participate in identity.
-
-Every `values` array declares a fill value: 0 for integer tracks, NaN for float tracks, false for bool tracks. The d4, BED, and BAM/CRAM importers fill uncovered positions with 0. A bigWig stores no value at an uncovered base, so bigWig tracks import as float32 with a NaN fill. xarray reductions skip NaN by default, so uncovered bases do not bias region statistics.
-
-## Flat v0.4 layout and metadata
-
-The `.pbz` root is a bare Zarr group. Its attributes contain a `zarr_conventions` entry whose `name` is `"perbase"`; it does not carry a genome, track map, contigs, or offsets.
-
-Each direct child is a track group. The child group has its own `zarr.json`, `values`, `offsets`, `contigs`, and, for 2D tracks, a column-coordinate array named after the second dimension.
-
-```text
-example.pbz/
-├── zarr.json                  # root marker + consolidated metadata
-├── depth/
-│   ├── zarr.json              # perbase: interpretation attributes
-│   ├── values                 # (ΣL, n_columns), (position, sample)
-│   ├── offsets                # int64[k + 1], (contig_boundary,)
-│   ├── contigs                # vlen-utf8[k], (contig,)
-│   └── sample                 # vlen-utf8[n_columns], (sample,)
-└── mask/
-    ├── zarr.json
-    ├── values                 # (ΣL,), (position,)
-    ├── offsets
-    └── contigs
-```
-
-`offsets` is a prefix-sum ragged index. For `k` contigs, `offsets[0] == 0`, `offsets[k] == ΣL`, and contig `i` occupies flat positions `[offsets[i], offsets[i + 1])`. There is no `contig_lengths` array.
-
-Track metadata contains the convention marker plus these interpretation fields:
-
-```json
-{
-  "zarr_conventions": [{"uuid": "b7e3c1a2-...", "name": "perbase"}],
-  "perbase:version": "0.4",
-  "perbase:genome_checksum": "md5:...",
-  "perbase:genome_name": "hg38",
-  "perbase:ragged_index": "offsets",
-  "perbase:ragged_contigs": "contigs",
-  "perbase:coordinates": "0-based-half-open"
-}
-```
-
-Optional `perbase:description` and `perbase:source` annotate a track. Dtype, fill value, chunk grid, shard grid, dimension names, and coordinate labels remain in ordinary Zarr array metadata rather than being duplicated here.
-
-Discovery skips a child group without the `perbase:` interpretation block.
-
-The root `zarr.json` also carries a consolidated metadata map in the zarr-python v3 flavor: every node’s metadata document, inlined verbatim. The copy is advisory: the per-node `zarr.json` documents stay authoritative.
+Every track declares a fill value: 0 for integer tracks, NaN for float tracks, false for bool tracks. The d4, BED, and BAM/CRAM importers fill uncovered positions with 0. A bigWig stores no value at an uncovered base, so bigWig tracks import as float32 with a NaN fill. xarray reductions skip NaN by default, so uncovered bases do not bias region statistics.
 
 ## Chunks and shards
 
-By default, every `values` array uses Blosc with zstd level 5 and byte shuffle. Scalar tracks are chunked by position; 2D tracks are chunked by position and column so compression can exploit similarity across columns. Import entry points accept an explicit Zarr v3 codec spec (`--codecs` on the CLI, `codecs=` in Python) that replaces this default: a standard `codecs` list, with sharding expressed as a `sharding_indexed` codec and an optional `chunk_grid` member for the outer grid.
+By default, every imported track uses Blosc with zstd level 5 and byte shuffle. Scalar tracks are chunked by position; 2D tracks are chunked by position and column so compression can exploit similarity across columns. Import entry points accept an explicit Zarr v3 codec spec (`--codecs` on the CLI, `codecs=` in Python) that replaces this default: a standard `codecs` list, with sharding expressed as a `sharding_indexed` codec and an optional `chunk_grid` member for the outer grid.
 
 Sharding is optional and has an outer position-first shard grid with full declared column width by default. The normal Zarr chunk shape is retained as the shard’s subchunk shape. Sharded writes append encoded subchunks through Zarr partial encoding instead of rewriting whole shards.
 
@@ -128,7 +80,7 @@ Every `xr.DataArray` and `xr.Dataset` from `open` carries a 0-d coordinate named
 
 `Dataset::create(path, reference)` and `Dataset::open(path)` operate on filesystem stores. `create_with_storage` and `open_with_storage` take any synchronous readable, writable, listable Zarr storage handle. `TrackConfig::new(dtype)` configures scalar or 2D tracks with generic columns, chunking, optional sharding, fill value, and optional description or source metadata. `Dataset::read_region<T>` reads one region of a track at full column width.
 
-`PbzStore::open(path)` reads a format 0.4 store. `Genome` owns named contigs and derives offsets and the checksum. `Track::read_region<T>` uses 0-based, half-open regions and preserves the track rank at runtime-checked dtype `T`.
+`Reference` and `Genome` hold named contigs and derive flat offsets. Regions are 0-based and half-open.
 
 The format-agnostic import engine drives any `ValueReader`. A reader exposes an ordered schema of named dtype fields. `read_into` fills one sink per field for one contig window in a single decode pass. `read_windows` decodes a run of adjacent windows and reports which windows have no data, so the engine can skip them. `fork` gives each worker its own handle.
 

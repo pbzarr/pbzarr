@@ -153,8 +153,8 @@ fn version_rule_names_each_failure() {
     assert_eq!(open(value).to_string(), legacy);
     let mut value = root();
     value["attributes"]["zarr_conventions"] = json!([{
-        "uuid": pbzarr::PERBASE_CONVENTION_UUID,
-        "name": pbzarr::PERBASE_CONVENTION_NAME,
+        "uuid": "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c",
+        "name": "perbase",
     }]);
     assert_eq!(open(value).to_string(), legacy);
     for version in [Value::Null, json!(5)] {

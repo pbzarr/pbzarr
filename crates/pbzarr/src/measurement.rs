@@ -1,28 +1,24 @@
-//! Read handles that let `view` and `stat` work on either store layout.
+//! The read handle that `view` and `stat` use for one track.
 
 use crate::dataset::{Dataset, GenomicAxis, Role, Support, VariableInfo};
 use crate::io::{Dtype, Numeric};
-use crate::{Genome, PbzError, Result, Track};
+use crate::{Genome, PbzError, Result};
 use ndarray::ArrayD;
 use std::ops::Range;
 use std::sync::Arc;
 
-/// One readable track: a format-0.4 track group, or a format-0.5 root data
-/// variable on the base-resolution `position` axis.
-pub enum Measurement<'a> {
-    Legacy(&'a Track),
-    /// Metadata resolved once at open, plus the Dataset that decodes values.
-    Root {
-        dataset: &'a Dataset,
-        name: String,
-        dims: Vec<String>,
-        genome: Arc<Genome>,
-        dtype: Dtype,
-        columns: u64,
-        chunk: usize,
-        /// Decode unit as (positions, columns): the subchunk when sharded.
-        inner: (u64, u64),
-    },
+/// One readable track: a format-0.5 root data variable on the
+/// base-resolution `position` axis, with its metadata resolved once at open.
+pub struct Measurement<'a> {
+    dataset: &'a Dataset,
+    name: String,
+    dims: Vec<String>,
+    genome: Arc<Genome>,
+    dtype: Dtype,
+    columns: u64,
+    chunk: usize,
+    /// Decode unit as (positions, columns): the subchunk when sharded.
+    inner: (u64, u64),
 }
 
 fn unsupported(info: &VariableInfo, reason: &str) -> PbzError {
@@ -46,10 +42,6 @@ fn missing_is_nan(info: &VariableInfo) -> bool {
 }
 
 impl<'a> Measurement<'a> {
-    pub fn legacy(track: &'a Track) -> Self {
-        Self::Legacy(track)
-    }
-
     /// Resolve one root data variable into a read handle, rejecting the shapes
     /// and encodings these commands cannot render without changing meaning.
     pub fn root(dataset: &'a Dataset, name: &str) -> Result<Self> {
@@ -100,7 +92,7 @@ impl<'a> Measurement<'a> {
         let shape = dataset.inner_chunk_shape(name)?;
         let inner = (shape[0], shape.get(1).copied().unwrap_or(1));
         let genome = Arc::new(Genome::new(dataset.reference()?.contigs().to_vec())?);
-        Ok(Self::Root {
+        Ok(Self {
             dataset,
             name: name.to_owned(),
             dims: info.dims.clone(),
@@ -113,109 +105,64 @@ impl<'a> Measurement<'a> {
     }
 
     pub fn name(&self) -> &str {
-        match self {
-            Self::Legacy(track) => track.name(),
-            Self::Root { name, .. } => name,
-        }
+        &self.name
     }
 
     pub fn genome(&self) -> &Arc<Genome> {
-        match self {
-            Self::Legacy(track) => track.genome(),
-            Self::Root { genome, .. } => genome,
-        }
+        &self.genome
     }
 
     pub fn dtype(&self) -> Dtype {
-        match self {
-            Self::Legacy(track) => track.dtype(),
-            Self::Root { dtype, .. } => *dtype,
-        }
+        self.dtype
     }
 
     pub fn rank(&self) -> usize {
-        match self {
-            Self::Legacy(track) => track.rank(),
-            Self::Root { dims, .. } => dims.len(),
-        }
+        self.dims.len()
     }
 
     /// Axis names in stored order, for messages about unsupported shapes.
     pub fn dimensions(&self) -> Vec<String> {
-        match self {
-            Self::Legacy(track) => std::iter::once("position".to_owned())
-                .chain(track.column_dim().map(str::to_owned))
-                .collect(),
-            Self::Root { dims, .. } => dims.clone(),
-        }
+        self.dims.clone()
     }
 
     pub fn columns_count(&self) -> Result<usize> {
-        match self {
-            Self::Legacy(track) => track.columns_count(),
-            Self::Root { columns, .. } => usize::try_from(*columns)
-                .map_err(|e| PbzError::Metadata(format!("{}: {e}", self.name()))),
-        }
+        usize::try_from(self.columns).map_err(|e| PbzError::Metadata(format!("{}: {e}", self.name)))
     }
 
     /// Position chunk extent, which `stat` uses to plan chunk-aligned batches.
     pub fn chunk_size(&self) -> Result<usize> {
-        match self {
-            Self::Legacy(track) => track.chunk_size(),
-            Self::Root { chunk, .. } => Ok(*chunk),
-        }
+        Ok(self.chunk)
     }
 
     /// Decode unit as (positions, columns), which `stat` plans reads around.
     pub(crate) fn inner_chunk_shape(&self) -> Result<(u64, u64)> {
-        match self {
-            Self::Legacy(track) => track.inner_chunk_shape(),
-            Self::Root { inner, .. } => Ok(*inner),
-        }
+        Ok(self.inner)
     }
 
     pub fn column_labels(&self) -> Result<Vec<String>> {
-        match self {
-            Self::Legacy(track) => track.column_labels(),
-            Self::Root {
-                dataset,
-                name,
-                dims,
-                columns,
-                ..
-            } => {
-                let dim = dims.get(1).ok_or_else(|| {
-                    PbzError::Metadata(format!("track {name:?} has no column axis"))
-                })?;
-                #[allow(clippy::single_range_in_vec_init)]
-                let labels = dataset
-                    .read_raw::<String>(dim, &[0..*columns])
-                    .map_err(|e| {
-                        PbzError::Metadata(format!("labels for {dim:?} of track {name:?}: {e}"))
-                    })?;
-                Ok(labels.into_raw_vec_and_offset().0)
-            }
-        }
+        let name = &self.name;
+        let dim = self
+            .dims
+            .get(1)
+            .ok_or_else(|| PbzError::Metadata(format!("track {name:?} has no column axis")))?;
+        #[allow(clippy::single_range_in_vec_init)]
+        let labels = self
+            .dataset
+            .read_raw::<String>(dim, &[0..self.columns])
+            .map_err(|e| {
+                PbzError::Metadata(format!("labels for {dim:?} of track {name:?}: {e}"))
+            })?;
+        Ok(labels.into_raw_vec_and_offset().0)
     }
 
     /// Read a half-open flat position range at full column width.
     pub fn read_flat<T: Numeric>(&self, position: Range<u64>) -> Result<ArrayD<T>> {
-        match self {
-            Self::Legacy(track) => track.read_flat(position),
-            Self::Root {
-                dataset,
-                name,
-                dims,
-                columns,
-                ..
-            } => {
-                if dims.len() == 1 {
-                    #[allow(clippy::single_range_in_vec_init)]
-                    dataset.read_checked(name, &[position])
-                } else {
-                    dataset.read_checked(name, &[position, 0..*columns])
-                }
-            }
+        if self.dims.len() == 1 {
+            #[allow(clippy::single_range_in_vec_init)]
+            self.dataset.read_checked(&self.name, &[position])
+        } else {
+            self.dataset
+                .read_checked(&self.name, &[position, 0..self.columns])
         }
     }
 
@@ -225,9 +172,6 @@ impl<'a> Measurement<'a> {
         position: Range<u64>,
         columns: Range<u64>,
     ) -> Result<ArrayD<T>> {
-        match self {
-            Self::Legacy(track) => track.read_flat_columns(position, columns),
-            Self::Root { dataset, name, .. } => dataset.read_checked(name, &[position, columns]),
-        }
+        self.dataset.read_checked(&self.name, &[position, columns])
     }
 }

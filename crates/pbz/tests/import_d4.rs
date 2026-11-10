@@ -185,7 +185,7 @@ fn import_creates_the_store_then_adds_tracks_and_refuses_a_used_name() {
 }
 
 #[test]
-fn import_into_a_format_0_4_store_fails_with_the_legacy_message() {
+fn import_view_and_stat_on_a_format_0_4_store_fail_with_the_legacy_message() {
     let dir = TempDir::new().unwrap();
     let store = dir.path().join("old.pbz");
     std::fs::create_dir(&store).unwrap();
@@ -205,7 +205,11 @@ fn import_into_a_format_0_4_store_fails_with_the_legacy_message() {
         "--no-progress".into(),
         fixture("banded_1k.d4").into_os_string(),
     ]);
-    assert!(!import.status.success());
-    let stderr = String::from_utf8_lossy(&import.stderr);
-    assert!(stderr.contains(legacy), "{stderr}");
+    let view = run_pbz(["view".into(), store.as_os_str().to_owned()]);
+    let stat = run_pbz(["stat".into(), store.as_os_str().to_owned()]);
+    for output in [import, view, stat] {
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(legacy), "{stderr}");
+    }
 }

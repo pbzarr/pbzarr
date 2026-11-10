@@ -1,5 +1,5 @@
-//! Import: bulk-write per-base data from `ValueReader` sources into `PbzStore`
-//! tracks or root Dataset arrays via a `crossbeam-channel` worker pool.
+//! Import: bulk-write per-base data from `ValueReader` sources into root
+//! Dataset arrays via a `crossbeam-channel` worker pool.
 //!
 //! The engine is format-agnostic: it drives any `ValueReader`. Format readers
 //! (d4, bigWig, BED, BAM/CRAM) live in their own crates and start runs through

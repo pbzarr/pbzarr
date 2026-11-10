@@ -178,7 +178,7 @@ cohort.pbz/
 
 Every track declares one data type and fill value. Imported tracks are chunked and compressed with Blosc (zstd with byte shuffle) by default; imports can override the codec pipeline and chunk grid with standard Zarr v3 metadata (`--codecs` on the CLI, `codecs=` in Python). A store opens with plain xarray (`xr.open_zarr`), with no pbzarr code.
 
-Format 0.4 stores, which used one group per track, are not readable from Python in this version. The `pbz view` and `pbz stat` commands still read them.
+pbzarr reads and writes format 0.5 only. It refuses a format 0.4 store, which used one group per track. To read such a store, use pbzarr 0.7, or import the data again.
 
 See the [format specification](spec/README.md) for the full rules and the [design document](docs/DESIGN.md) for the Rust API.
 

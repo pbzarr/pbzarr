@@ -1,6 +1,7 @@
 //! Private destinations for the existing import engine.
 use crate::io::{Dtype, Numeric};
-use crate::{Genome, PbzError, Result, Track};
+use crate::track::Track;
+use crate::{Genome, PbzError, Result};
 use ndarray::ArrayD;
 use std::{ops::Range, sync::Arc};
 use zarrs::array::Array;
@@ -45,9 +46,7 @@ impl Destination {
             .clone()
             .ok_or_else(|| PbzError::Metadata("rank-one destination has no column labels".into()))
     }
-    pub(crate) fn values_array(
-        &self,
-    ) -> Result<Arc<Array<dyn ReadableWritableListableStorageTraits>>> {
+    pub(crate) fn values_array(&self) -> Arc<Array<dyn ReadableWritableListableStorageTraits>> {
         self.track().values_array()
     }
     pub(crate) fn write_unit_shape(&self) -> Result<Vec<usize>> {

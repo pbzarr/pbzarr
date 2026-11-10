@@ -114,7 +114,7 @@ impl std::fmt::Display for Dtype {
 /// dtype-erased Zarr-writer boundary.
 ///
 /// The `zarrs::array::Element + ElementOwned` supertrait bounds are required by
-/// the zarrs I/O methods in `Track::read_region` / `write_region`.
+/// the zarrs array read and write methods.
 pub trait Numeric:
     Copy + Send + Sync + 'static + zarrs::array::Element + zarrs::array::ElementOwned
 {

@@ -1309,7 +1309,7 @@ fn target_geometries<'t>(
 ) -> Result<Vec<TargetGeom<'t>>> {
     let mut geoms: Vec<TargetGeom<'_>> = Vec::with_capacity(tracks.len());
     for (track, target) in tracks.iter().zip(&routing.targets) {
-        let array = track.values_array()?;
+        let array = track.values_array();
         let rank = track.rank();
         let width = track.columns_count()? as u64;
         let sharded = array.is_sharded();
