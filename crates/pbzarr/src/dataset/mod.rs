@@ -11,7 +11,11 @@ pub use metadata::{
 };
 pub(crate) use read::float_fill;
 pub use reference::{BinInterval, GenomicAxis, Reference};
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 pub(crate) use write::{DatasetPlan, Prepared};
 use zarrs::storage::ReadableWritableListableStorage;
 
@@ -33,6 +37,8 @@ pub const REFERENCE_ARRAYS: [&str; 3] = [CONTIG_ID, CONTIG_LENGTH, CONTIG_MD5];
 /// variable's encoding is supported or that its values satisfy PBZ invariants.
 pub struct Dataset {
     storage: ReadableWritableListableStorage,
+    /// The store directory when the storage is a filesystem store.
+    dir: Option<PathBuf>,
     reference_cache: std::sync::OnceLock<Reference>,
     handles: std::sync::Mutex<BTreeMap<String, Arc<read::ArrayHandle>>>,
     root: serde_json::Value,
@@ -41,14 +47,18 @@ pub struct Dataset {
 
 impl Dataset {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let storage = zarrs::filesystem::FilesystemStore::new(path)
+        let storage = zarrs::filesystem::FilesystemStore::new(path.as_ref())
             .map_err(|e| PbzError::Store(e.to_string()))?;
-        Self::open_with_storage(Arc::new(storage))
+        Self::open_in(Arc::new(storage), Some(path.as_ref().to_path_buf()))
     }
     pub fn open_with_storage(storage: ReadableWritableListableStorage) -> Result<Self> {
+        Self::open_in(storage, None)
+    }
+    fn open_in(storage: ReadableWritableListableStorage, dir: Option<PathBuf>) -> Result<Self> {
         let (root, variables) = metadata::catalog(&storage)?;
         Ok(Self {
             storage,
+            dir,
             reference_cache: std::sync::OnceLock::new(),
             handles: std::sync::Mutex::new(BTreeMap::new()),
             root,

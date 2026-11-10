@@ -161,7 +161,7 @@ A `.pbz` store is one Zarr v3 group. Tracks and coordinates are arrays directly 
 
 ```text
 cohort.pbz/
-├── zarr.json        root attributes: zarr_conventions, pbz:version
+├── zarr.json        root attributes (zarr_conventions, pbz:version), metadata copy
 ├── contig_id        contig names     (contig)
 ├── contig_length    contig lengths   (contig)
 ├── sample           column labels
@@ -174,6 +174,7 @@ cohort.pbz/
 - Offsets are not stored. The first row of contig `i` is the sum of the lengths before it, so the rows for `chr2:10-20` are that sum plus 10 up to that sum plus 20. All coordinates are zero-based and half-open.
 - A column axis such as `sample` has a label array of the same name. Tracks that share it share its labels.
 - Binned tracks use a `bin_N` dimension. Bins restart at each contig, so a contig's last bin can be short.
+- The root `zarr.json` holds a consolidated copy of the metadata of every array. Each import, append, and `pbzarr.write` replaces it as its last step, so a reader that cannot list the store can still find every array.
 
 Every track declares one data type and fill value. Imported tracks are chunked and compressed with Blosc (zstd with byte shuffle) by default; imports can override the codec pipeline and chunk grid with standard Zarr v3 metadata (`--codecs` on the CLI, `codecs=` in Python). A store opens with plain xarray (`xr.open_zarr`), with no pbzarr code.
 

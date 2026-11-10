@@ -178,6 +178,36 @@ fn append_adds_columns_and_leaves_the_existing_chunks_alone() {
     assert!(keys.iter().any(|key| key == "depth/c/0/1"), "{keys:?}");
 }
 
+/// The root consolidated copy, as `{path: zarr.json}`.
+fn snapshot(
+    storage: &ReadableWritableListableStorage,
+) -> serde_json::Map<String, serde_json::Value> {
+    let root = storage
+        .get(&"zarr.json".try_into().unwrap())
+        .unwrap()
+        .unwrap();
+    let root: serde_json::Value = serde_json::from_slice(&root).unwrap();
+    let copy = &root["consolidated_metadata"];
+    assert_eq!(copy["kind"], "inline");
+    assert_eq!(copy["must_understand"], false);
+    copy["metadata"].as_object().unwrap().clone()
+}
+
+#[test]
+fn import_and_append_write_the_consolidated_copy() {
+    let (mut ds, storage) = store();
+    import(&mut ds, "depth", &["s0", "s1"], 2, 1);
+    let copy = snapshot(&storage);
+    let names: Vec<&str> = copy.keys().map(String::as_str).collect();
+    assert_eq!(names, ["contig_id", "contig_length", "depth", "sample"]);
+    assert_eq!(copy["depth"], ds.variables()["depth"].metadata);
+
+    append(&mut ds, "depth", &["s2", "s3"], 3).unwrap();
+    let copy = snapshot(&storage);
+    assert_eq!(copy["depth"]["shape"], serde_json::json!([12, 4]));
+    assert_eq!(copy["sample"]["shape"], serde_json::json!([4]));
+}
+
 #[test]
 fn append_grows_every_variable_over_the_dimension() {
     let (mut ds, _) = store();

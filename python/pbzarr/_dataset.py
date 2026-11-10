@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import warnings
 
 import numpy as np
 import xarray as xr
@@ -281,7 +282,7 @@ def write(
         raise TypeError("variables must be a nonempty mapping of name to DataArray")
     encoding = dict(encoding or {})
 
-    store = _read(source, storage_options, None)
+    store = _read(source, storage_options, None, listed=True)
     try:
         values = {}
         coords = {}
@@ -320,6 +321,7 @@ def write(
     except BaseException:
         store.remove([*values, *coords])
         raise
+    _consolidate(store.source, storage_options)
     return open(store.source, storage_options=storage_options)
 
 
@@ -336,17 +338,23 @@ def _target_source(target):
     return target
 
 
-def _read(source, storage_options, chunks) -> _Store:
+def _read(source, storage_options, chunks, *, listed: bool = False) -> _Store:
+    """Read the store metadata from the root consolidated copy when there is
+    one. ``listed=True`` lists the store instead, for writes."""
     if isinstance(source, (str, os.PathLike)):
         source = os.fspath(source)
-    root_attrs = _root_attrs(source, storage_options)
+    group = zarr.open_group(
+        source, mode="r", use_consolidated=False if listed else None,
+        **_storage_kwargs(storage_options),
+    )
+    root_attrs = dict(group.attrs)
     _check_identity(root_attrs)
-    catalog = _catalog(source, storage_options)
+    catalog = _catalog(group)
 
     data = xr.open_zarr(
         source,
         chunks=None if chunks is _STORED_CHUNKS else chunks,
-        consolidated=False,
+        consolidated=group.metadata.consolidated_metadata is not None,
         storage_options=_options(storage_options),
     )
     try:
@@ -421,17 +429,17 @@ def _storage_kwargs(storage_options) -> dict:
     return {} if storage_options is None else {"storage_options": dict(storage_options)}
 
 
-def _root_attrs(source, storage_options) -> dict:
+def _consolidate(source, storage_options) -> None:
     group = zarr.open_group(
-        source, mode="r", use_consolidated=False, **_storage_kwargs(storage_options)
+        source, mode="r+", use_consolidated=False, **_storage_kwargs(storage_options)
     )
-    return dict(group.attrs)
+    with warnings.catch_warnings():
+        # zarr-python warns that consolidated metadata is not in the Zarr v3 spec.
+        warnings.simplefilter("ignore", category=UserWarning)
+        zarr.consolidate_metadata(group.store, path=group.path)
 
 
-def _catalog(source, storage_options) -> dict[str, _Stored]:
-    group = zarr.open_group(
-        source, mode="r", use_consolidated=False, **_storage_kwargs(storage_options)
-    )
+def _catalog(group: zarr.Group) -> dict[str, _Stored]:
     catalog = {}
     for name, array in group.arrays():
         metadata = array.metadata.to_dict()

@@ -29,8 +29,13 @@ impl Dataset {
     ///
     /// The storage namespace must be empty. No conversion or replacement is performed.
     pub fn create(path: impl AsRef<Path>, reference: Reference) -> Result<Self> {
-        let storage = zarrs::filesystem::FilesystemStore::new(path).map_err(storage_error)?;
-        Self::create_with_storage(Arc::new(storage), reference)
+        let storage =
+            zarrs::filesystem::FilesystemStore::new(path.as_ref()).map_err(storage_error)?;
+        Self::create_in(
+            Arc::new(storage),
+            Some(path.as_ref().to_path_buf()),
+            reference,
+        )
     }
 
     /// Create a Dataset in an empty storage namespace.
@@ -39,6 +44,14 @@ impl Dataset {
     /// incomplete output; automatic cleanup and recovery are not implemented.
     pub fn create_with_storage(
         storage: ReadableWritableListableStorage,
+        reference: Reference,
+    ) -> Result<Self> {
+        Self::create_in(storage, None, reference)
+    }
+
+    fn create_in(
+        storage: ReadableWritableListableStorage,
+        dir: Option<std::path::PathBuf>,
         reference: Reference,
     ) -> Result<Self> {
         let entries = storage
@@ -91,7 +104,25 @@ impl Dataset {
             .expect("literal attribute object"),
         );
         root.store_metadata().map_err(storage_error)?;
-        Self::open_with_storage(storage)
+        let mut dataset = Self::open_in(storage, dir)?;
+        dataset.write_snapshot()?;
+        Ok(dataset)
+    }
+
+    /// Reopen after a write, then replace the root consolidated metadata.
+    /// This is the last step of every write: until it lands, the old copy
+    /// stays a correct view of the store before the write.
+    fn publish(&mut self) -> Result<()> {
+        *self = Self::open_in(self.storage.clone(), self.dir.clone())?;
+        self.write_snapshot()
+    }
+
+    fn write_snapshot(&mut self) -> Result<()> {
+        let mut root = self.root.clone();
+        crate::consolidated::insert_snapshot(&self.storage, &mut root)?;
+        crate::consolidated::replace_root(&self.storage, self.dir.as_deref(), &root)?;
+        self.root = root;
+        Ok(())
     }
 }
 
@@ -374,28 +405,7 @@ impl Dataset {
         })
     }
 
-    /// Consolidation must not hide additions from native Xarray discovery.
-    fn unconsolidate(&mut self) -> Result<()> {
-        if self.root.get("consolidated_metadata").is_some() {
-            let mut root = self.root.clone();
-            root.as_object_mut()
-                .expect("validated root object")
-                .remove("consolidated_metadata");
-            self.storage
-                .set(
-                    &StoreKey::new("zarr.json").expect("root key"),
-                    serde_json::to_vec(&root)
-                        .map_err(|e| PbzError::Metadata(e.to_string()))?
-                        .into(),
-                )
-                .map_err(storage_error)?;
-            self.root = root;
-        }
-        Ok(())
-    }
-
     fn begin_import(&mut self, prepared: &PreparedImport) -> Result<()> {
-        self.unconsolidate()?;
         for (array, labels) in &prepared.coordinates {
             if !labels.is_empty() {
                 array
@@ -414,8 +424,7 @@ impl Dataset {
                 .store_metadata()
                 .map_err(storage_error)?;
         }
-        *self = Self::open_with_storage(self.storage.clone())?;
-        Ok(())
+        self.publish()
     }
 }
 
@@ -717,10 +726,6 @@ impl Dataset {
         })
     }
 
-    pub(crate) fn begin_append(&mut self) -> Result<()> {
-        self.unconsolidate()
-    }
-
     fn publish_metadata(&self, name: &str, metadata: &serde_json::Value) -> Result<()> {
         let key = StoreKey::new(format!("{name}/zarr.json"))
             .map_err(|e| PbzError::Metadata(e.to_string()))?;
@@ -748,8 +753,7 @@ impl Dataset {
             .store_array_subset(&appended, ndarray::Array1::from(prepared.labels.clone()))
             .map_err(storage_error)?;
         self.publish_metadata(name, metadata)?;
-        *self = Self::open_with_storage(self.storage.clone())?;
-        Ok(())
+        self.publish()
     }
 
     pub(crate) fn prepare(
@@ -766,7 +770,7 @@ impl Dataset {
     pub(crate) fn begin(&mut self, prepared: &Prepared) -> Result<()> {
         match prepared {
             Prepared::Import(prepared) => self.begin_import(prepared),
-            Prepared::Append(_) => self.begin_append(),
+            Prepared::Append(_) => Ok(()),
         }
     }
 

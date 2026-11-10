@@ -1,4 +1,5 @@
 pub mod codec_spec;
+mod consolidated;
 pub mod dataset;
 pub mod error;
 pub mod genome;
