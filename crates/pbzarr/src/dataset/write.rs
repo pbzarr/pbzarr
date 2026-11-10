@@ -12,16 +12,16 @@ fn storage_error(error: impl std::fmt::Display) -> PbzError {
 }
 
 /// A shard edge must be a whole number of chunks, or the sharding codec
-/// rejects the array. Reject a request that is not, then cap at the array
-/// extent without breaking divisibility.
+/// rejects the array. Reject a request that is not, then cap at the fewest
+/// whole chunks that cover the array extent.
 fn shard_extent(request: u64, chunk: u64, extent: u64, axis: &str) -> Result<u64> {
     if !request.is_multiple_of(chunk) {
         return Err(PbzError::Metadata(format!(
             "import: {axis} shard {request} must be a multiple of the {axis} chunk {chunk}"
         )));
     }
-    let capped = request.min(extent.max(1)).max(chunk);
-    Ok((capped / chunk).max(1) * chunk)
+    let cover = extent.max(1).div_ceil(chunk) * chunk;
+    Ok(request.min(cover).max(chunk))
 }
 
 impl Dataset {

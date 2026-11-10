@@ -59,10 +59,29 @@ struct Archive {
     end: u64,
     entries: Vec<Entry>,
     by_name: HashMap<String, usize>,
+    /// Set when a write or a seek fails. The file can then hold bytes that no
+    /// entry records, so later writes and finish are refused.
+    failed: bool,
 }
 
 impl Archive {
+    fn check(&self) -> std::io::Result<()> {
+        if self.failed {
+            return Err(std::io::Error::other(
+                "an earlier write to the archive failed",
+            ));
+        }
+        Ok(())
+    }
+
     fn append(&mut self, name: &str, value: &[u8]) -> std::io::Result<()> {
+        self.check()?;
+        let result = self.write_entry(name, value);
+        self.failed |= result.is_err();
+        result
+    }
+
+    fn write_entry(&mut self, name: &str, value: &[u8]) -> std::io::Result<()> {
         let crc = crc32fast::hash(value);
         let size = value.len() as u64;
         let offset = self.end;
@@ -105,12 +124,16 @@ impl Archive {
         file.seek(SeekFrom::Start(at))?;
         let mut out = vec![0; len as usize];
         let read = file.read_exact(&mut out);
-        file.seek(SeekFrom::Start(self.end))?;
+        if let Err(e) = file.seek(SeekFrom::Start(self.end)) {
+            self.failed = true;
+            return Err(e);
+        }
         read.map(|()| out)
     }
 
     /// Write the central directory in `order` and the end records.
     fn close(&mut self, order: &[usize]) -> std::io::Result<()> {
+        self.check()?;
         let start = self.end;
         let mut directory = Vec::new();
         for &index in order {
@@ -234,6 +257,7 @@ impl ZipStore {
                 end: 0,
                 entries: Vec::new(),
                 by_name: HashMap::new(),
+                failed: false,
             })),
         })
     }
@@ -455,16 +479,18 @@ impl WritableStorageTraits for ZipStore {
     }
 
     fn erase_prefix(&self, prefix: &StorePrefix) -> std::result::Result<(), StorageError> {
-        let guard = self.open_archive()?;
-        let archive = guard.as_ref().expect("open archive");
-        if let Some(key) = archive
-            .by_name
-            .keys()
-            .find(|k| k.starts_with(prefix.as_str()))
         {
-            return Err(storage_error(format!(
-                "{key} is already written and cannot be erased"
-            )));
+            let guard = self.open_archive()?;
+            let archive = guard.as_ref().expect("open archive");
+            if let Some(key) = archive
+                .by_name
+                .keys()
+                .find(|k| k.starts_with(prefix.as_str()))
+            {
+                return Err(storage_error(format!(
+                    "{key} is already written and cannot be erased"
+                )));
+            }
         }
         self.metadata()
             .map_err(|e| StorageError::Other(e.to_string()))?
