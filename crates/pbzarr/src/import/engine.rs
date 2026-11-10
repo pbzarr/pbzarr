@@ -725,6 +725,17 @@ impl RunCtx<'_> {
         self.gate.abort();
     }
 
+    /// Every target shares one inner position chunk length.
+    fn chunk_len(&self) -> u64 {
+        self.geoms[0].array_chunk_len
+    }
+
+    /// Flat positions of chunk `idx`, clamped at the end of the genome.
+    fn chunk_range(&self, idx: u64) -> Range<u64> {
+        let lo = idx * self.chunk_len();
+        lo..(lo + self.chunk_len()).min(self.total)
+    }
+
     fn slot(&self, key: SlotKey) -> Arc<SlotHandle> {
         let mut map = self.slots.lock().expect("slot map poisoned");
         Arc::clone(map.entry(key).or_insert_with(|| {
@@ -804,7 +815,7 @@ impl RunCtx<'_> {
         data: Option<TileBuffer>,
     ) -> Result<()> {
         if self.geoms[t_idx].shard_aligned {
-            return self.close_shard_part(t_idx, chunk_idx, cc, data);
+            return self.close_shard_part(t_idx, chunk_idx, chunk, cc, data);
         }
         let done = {
             let mut groups = self.chunk_groups.lock().expect("chunk group map poisoned");
@@ -918,11 +929,11 @@ impl RunCtx<'_> {
         &self,
         t_idx: usize,
         chunk_idx: usize,
+        chunk: Range<u64>,
         cc: u64,
         data: Option<TileBuffer>,
     ) -> Result<()> {
         let geom = &self.geoms[t_idx];
-        let chunk_len = geom.array_chunk_len.max(1);
         let cps = geom.chunks_per_shard.max(1);
         let row = chunk_idx as u64 / cps;
         let cs = geom.col_shard(cc);
@@ -932,7 +943,7 @@ impl RunCtx<'_> {
             match groups.entry(key) {
                 Entry::Occupied(e) => Arc::clone(e.get()),
                 Entry::Vacant(e) => {
-                    let n_chunks = self.total.div_ceil(chunk_len);
+                    let n_chunks = self.total.div_ceil(self.chunk_len());
                     let row_chunks = (n_chunks.min((row + 1) * cps) - row * cps) as usize;
                     let ccs = *self.plan.col_shard_ccs[t_idx].get(&cs).ok_or_else(|| {
                         PbzError::Metadata(
@@ -961,11 +972,9 @@ impl RunCtx<'_> {
                         &geom.fill,
                     )?);
                 }
-                let pos_lo = chunk_idx as u64 * chunk_len;
-                let pos_hi = (pos_lo + chunk_len).min(self.total);
-                let rows = (pos_hi - pos_lo) as usize;
+                let rows = (chunk.end - chunk.start) as usize;
                 let cols = geom.buffer_columns(cc);
-                let dst_row = (pos_lo - row * geom.shard_pos) as usize;
+                let dst_row = (chunk.start - row * geom.shard_pos) as usize;
                 let dst_col = (cols.start - cs * geom.shard_col) as usize;
                 group
                     .data
@@ -1001,11 +1010,6 @@ impl RunCtx<'_> {
         parts: Vec<(usize, u64, bool)>,
     ) -> Result<()> {
         let geom = &self.geoms[t_idx];
-        let chunk_len = geom.array_chunk_len.max(1);
-        let chunk_range = |chunk_idx: usize| {
-            let lo = chunk_idx as u64 * chunk_len;
-            lo..(lo + chunk_len).min(self.total)
-        };
         if let Some(shard) = shard {
             let write_start = Instant::now();
             shard.store_chunk(&geom.array, geom.track.name(), geom.rank, &[row, cs])?;
@@ -1013,7 +1017,11 @@ impl RunCtx<'_> {
         }
         for &(chunk_idx, cc, covered) in &parts {
             if covered {
-                self.record_written(geom, chunk_range(chunk_idx), geom.buffer_columns(cc));
+                self.record_written(
+                    geom,
+                    self.chunk_range(chunk_idx as u64),
+                    geom.buffer_columns(cc),
+                );
             } else {
                 self.record_skipped();
             }
@@ -1042,10 +1050,6 @@ struct PieceSink<'a, 'c> {
 }
 
 impl PieceSink<'_, '_> {
-    fn chunk_len(&self) -> u64 {
-        self.ctx.geoms[0].array_chunk_len.max(1)
-    }
-
     fn flat(&self, local: u64) -> u64 {
         self.window_flat_base + (local - self.window_local_base)
     }
@@ -1054,9 +1058,7 @@ impl PieceSink<'_, '_> {
     /// ones it finished. Called exactly once per chunk of the span, covered
     /// or not, so the counts stay exact.
     fn finish_chunk(&self, chunk_idx: u64, covered: bool) -> Result<()> {
-        let chunk_len = self.chunk_len();
-        let lo = chunk_idx * chunk_len;
-        let hi = (lo + chunk_len).min(self.ctx.total);
+        let chunk = self.ctx.chunk_range(chunk_idx);
         let mut closed: Vec<(usize, u64, Option<TileBuffer>, bool)> = Vec::new();
         for entry in self.entries {
             let handle = self.ctx.slot((entry.t_idx, chunk_idx as usize, entry.cc));
@@ -1074,7 +1076,7 @@ impl PieceSink<'_, '_> {
                 cc,
             ));
             self.ctx
-                .close_buffer(t_idx, cc, chunk_idx as usize, lo..hi, data, any_data)?;
+                .close_buffer(t_idx, cc, chunk_idx as usize, chunk.clone(), data, any_data)?;
         }
         Ok(())
     }
@@ -1083,11 +1085,10 @@ impl PieceSink<'_, '_> {
     /// chunk's buffers. Each lock covers one region copy, so pieces sharing a
     /// buffer stay concurrent through decode.
     fn merge(&self, flat_lo: u64, n: usize) -> Result<()> {
-        let chunk_len = self.chunk_len();
-        let chunk_idx = flat_lo / chunk_len;
-        let chunk_lo = chunk_idx * chunk_len;
-        let row0 = (flat_lo - chunk_lo) as usize;
-        let rows = ((chunk_lo + chunk_len).min(self.ctx.total) - chunk_lo) as usize;
+        let chunk_idx = flat_lo / self.ctx.chunk_len();
+        let chunk = self.ctx.chunk_range(chunk_idx);
+        let row0 = (flat_lo - chunk.start) as usize;
+        let rows = (chunk.end - chunk.start) as usize;
         for (idx, entry) in self.entries.iter().enumerate() {
             let wait_start = Instant::now();
             let handle = self.ctx.slot((entry.t_idx, chunk_idx as usize, entry.cc));
@@ -1122,7 +1123,7 @@ impl PieceSink<'_, '_> {
 
     /// Finish every chunk of the span from `from_chunk` on with no data.
     fn finish_rest(&self, from_chunk: u64) -> Result<()> {
-        let last = (self.piece.end - 1) / self.chunk_len();
+        let last = (self.piece.end - 1) / self.ctx.chunk_len();
         for chunk_idx in from_chunk..=last {
             self.finish_chunk(chunk_idx, false)?;
         }
@@ -1163,7 +1164,7 @@ impl WindowSink for PieceSink<'_, '_> {
         covered: bool,
     ) -> std::result::Result<(), ReaderError> {
         let flat_lo = self.flat(start);
-        let chunk_idx = flat_lo / self.chunk_len();
+        let chunk_idx = flat_lo / self.ctx.chunk_len();
         // Windows arrive in ascending order, so leaving a chunk means the
         // piece is done with it. A chunk split by a contig boundary keeps its
         // coverage flag across both windows.
@@ -1187,7 +1188,7 @@ impl WindowSink for PieceSink<'_, '_> {
 fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece) -> Result<()> {
     let windows = contig_windows(ctx.reference, piece.start, piece.end);
     let entries = &ctx.plan.entries[piece.reader];
-    let chunk_len = ctx.geoms[0].array_chunk_len.max(1);
+    let chunk_len = ctx.chunk_len();
     let first_chunk = piece.start / chunk_len;
     let mut sink = PieceSink {
         ctx,
