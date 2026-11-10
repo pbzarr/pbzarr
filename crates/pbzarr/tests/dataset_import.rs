@@ -82,7 +82,7 @@ fn creation_rejects_occupied_namespaces_without_writing() {
 
 use pbzarr::import::{Import, PipelineOptions};
 use pbzarr::io::{Dtype, OutputField, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{ExplicitArraySpec, Genome, PbzStore, TrackConfig};
+use pbzarr::{ExplicitArraySpec, Genome, TrackConfig};
 use std::sync::Mutex;
 use zarrs::storage::storage_adapter::usage_log::UsageLogStorageAdapter;
 
@@ -250,7 +250,7 @@ fn multifield_cohorts_preserve_shards_and_reuse_shared_labels() {
     }
 }
 #[test]
-fn one_dimensional_import_matches_legacy_and_elides_fill_chunks() {
+fn one_dimensional_import_elides_fill_chunks() {
     for value in [0, 19] {
         let (mut ds, storage, _) = traced_dataset();
         let cfg = TrackConfig::new(Dtype::U32)
@@ -258,7 +258,7 @@ fn one_dimensional_import_matches_legacy_and_elides_fill_chunks() {
             .fill_value(serde_json::json!(0));
         Import::from_readers(vec![ConstReader::new(vec![value])])
             .unwrap()
-            .into_dataset(&mut ds, vec![("depth".into(), cfg.clone())])
+            .into_dataset(&mut ds, vec![("depth".into(), cfg)])
             .run()
             .unwrap();
         let got = ds.read_raw::<u32>("depth", &[0..12]).unwrap();
@@ -266,25 +266,6 @@ fn one_dimensional_import_matches_legacy_and_elides_fill_chunks() {
             got,
             ndarray::ArrayD::from_elem(ndarray::IxDyn(&[12]), value)
         );
-        let legacy_storage: ReadableWritableListableStorage = Arc::new(MemoryStore::new());
-        let mut legacy = PbzStore::create_with_storage(legacy_storage).unwrap();
-        let genome = Genome::new(reference().contigs().to_vec()).unwrap();
-        legacy.create_track("depth", genome.clone(), cfg).unwrap();
-        Import::from_readers(vec![ConstReader::new(vec![value])])
-            .unwrap()
-            .into_track(legacy.track("depth").unwrap())
-            .run()
-            .unwrap();
-        let old = legacy
-            .track("depth")
-            .unwrap()
-            .read_region::<u32>(&pbzarr::Region {
-                contig: genome.id("chr2").unwrap(),
-                start: 0,
-                end: 7,
-            })
-            .unwrap();
-        assert_eq!(old.as_slice().unwrap(), &got.as_slice().unwrap()[5..]);
         if value == 0 {
             assert!(
                 storage
@@ -303,6 +284,7 @@ fn invalid_imports_fail_before_any_mutation() {
         "duplicate-label",
         "reserved-dim",
         "name-collision",
+        "node-name",
         "orphan",
         "bare",
         "codec",
@@ -322,6 +304,7 @@ fn invalid_imports_fail_before_any_mutation() {
             "duplicate-label" => cfg = cfg.columns(vec!["S1".into(), "S1".into()]),
             "reserved-dim" => cfg = cfg.columns(vec!["S1".into()]).column_dim("bin_4"),
             "name-collision" => name = "contig".into(),
+            "node-name" => name = "nested/track".into(),
             "orphan" | "bare" => { let key = if case == "orphan" {"depth/c/0"} else {"depth"};
                 storage.set(&StoreKey::new(key).unwrap(), b"existing".to_vec().into()).unwrap(); },
             "codec" => cfg.codecs = Some(ExplicitArraySpec::parse(r#"[{"name":"not-a-codec"}]"#).unwrap()),

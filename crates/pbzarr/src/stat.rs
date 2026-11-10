@@ -1047,13 +1047,88 @@ mod tests {
         assert_eq!(coalesce(&mut ranges), vec![(0, 80), (100, 110)]);
     }
 
+    use crate::TrackConfig;
+    use crate::dataset::{Dataset, Reference};
     use crate::genome::{Contig, Genome, Region};
-    use crate::io::Dtype;
-    use crate::store::PbzStore;
-    use crate::track::TrackConfig;
+    use crate::import::Import;
+    use crate::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 
-    fn fixture(dir: &std::path::Path) -> PbzStore {
-        let genome = Genome::new(vec![
+    /// Writes runs of `(contig, start, values)`; other positions keep the fill.
+    #[derive(Clone)]
+    struct RunReader {
+        genome: Genome,
+        schema: OutputSchema,
+        runs: Vec<(&'static str, u64, Vec<f64>)>,
+    }
+
+    impl ValueReader for RunReader {
+        fn contigs(&self) -> &Genome {
+            &self.genome
+        }
+
+        fn output_schema(&self) -> &OutputSchema {
+            &self.schema
+        }
+
+        fn read_into(
+            &mut self,
+            contig: &str,
+            start: u64,
+            end: u64,
+            outputs: &mut [OutputSinkMut<'_>],
+        ) -> std::result::Result<(), crate::io::ReaderError> {
+            for (name, at, values) in &self.runs {
+                if *name != contig {
+                    continue;
+                }
+                for (pos, &v) in (*at..).zip(values) {
+                    if pos < start || pos >= end {
+                        continue;
+                    }
+                    let row = (pos - start) as usize;
+                    match &mut outputs[0] {
+                        OutputSinkMut::I32(dst) => dst[row] = v as i32,
+                        OutputSinkMut::F32(dst) => dst[row] = v as f32,
+                        _ => panic!("test reader supports i32/f32 sinks only"),
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
+            Ok(self.clone())
+        }
+    }
+
+    type Runs = Vec<(&'static str, u64, Vec<f64>)>;
+
+    /// Import one reader per entry of `columns`, as columns when `cfg` has
+    /// labels.
+    fn import(ds: &mut Dataset, name: &str, cfg: TrackConfig, columns: Vec<Runs>) {
+        let genome = Genome::new(ds.reference().unwrap().contigs().to_vec()).unwrap();
+        let readers: Vec<RunReader> = columns
+            .into_iter()
+            .map(|runs| RunReader {
+                genome: genome.clone(),
+                schema: OutputSchema::single("value", cfg.dtype),
+                runs,
+            })
+            .collect();
+        let as_columns = cfg.columns.is_some();
+        let builder = Import::from_readers(readers)
+            .unwrap()
+            .into_dataset(ds, vec![(name.into(), cfg)]);
+        let builder = if as_columns {
+            builder.readers_as_columns()
+        } else {
+            builder
+        };
+        builder.run().unwrap();
+    }
+
+    fn reference() -> Reference {
+        Reference::new(vec![
             Contig {
                 name: "chr1".into(),
                 length: 10,
@@ -1063,59 +1138,41 @@ mod tests {
                 length: 6,
             },
         ])
-        .unwrap();
-        let mut store = PbzStore::create(dir.join("stat.pbz")).unwrap();
-        store
-            .create_track("depth", genome.clone(), TrackConfig::new(Dtype::I32))
-            .unwrap();
-        store
-            .create_track(
-                "af",
-                genome.clone(),
-                TrackConfig::new(Dtype::F32)
-                    .columns(vec!["s1".into(), "s2".into()])
-                    .column_dim("sample"),
-            )
-            .unwrap();
-        let depth = store.track("depth").unwrap();
-        let chr1 = genome.resolve(&"chr1".parse().unwrap()).unwrap();
-        depth
-            .write_region(
-                &chr1,
-                ndarray::Array1::from(vec![5i32, 5, 5, 7, 7, 0, 0, 0, 0, 0]).into_dyn(),
-            )
-            .unwrap();
-        let af = store.track("af").unwrap();
-        let window = genome.resolve(&"chr1:2-6".parse().unwrap()).unwrap();
-        af.write_region(
-            &window,
-            ndarray::Array2::from_shape_vec(
-                (4, 2),
-                vec![0.5f32, 1.0, 0.5, 1.0, 0.25, 1.0, 0.25, 1.0],
-            )
-            .unwrap()
-            .into_dyn(),
-        )
-        .unwrap();
-        store
-            .create_track(
-                "cov",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns(vec!["s1".into(), "s2".into()])
-                    .column_dim("sample"),
-            )
-            .unwrap();
-        let cov = store.track("cov").unwrap();
-        let head = genome.resolve(&"chr1:0-4".parse().unwrap()).unwrap();
-        cov.write_region(
-            &head,
-            ndarray::Array2::from_shape_vec((4, 2), vec![1i32, 5, 1, 5, 2, 5, 0, 7])
-                .unwrap()
-                .into_dyn(),
-        )
-        .unwrap();
-        store
+        .unwrap()
+    }
+
+    fn fixture(dir: &std::path::Path) -> Dataset {
+        let mut ds = Dataset::create(dir.join("stat.pbz"), reference()).unwrap();
+        let samples = || vec!["s1".to_string(), "s2".to_string()];
+        import(
+            &mut ds,
+            "depth",
+            TrackConfig::new(Dtype::I32),
+            vec![vec![("chr1", 0, vec![5., 5., 5., 7., 7.])]],
+        );
+        import(
+            &mut ds,
+            "af",
+            TrackConfig::new(Dtype::F32)
+                .columns(samples())
+                .column_dim("sample"),
+            vec![
+                vec![("chr1", 2, vec![0.5, 0.5, 0.25, 0.25])],
+                vec![("chr1", 2, vec![1.0; 4])],
+            ],
+        );
+        import(
+            &mut ds,
+            "cov",
+            TrackConfig::new(Dtype::I32)
+                .columns(samples())
+                .column_dim("sample"),
+            vec![
+                vec![("chr1", 0, vec![1., 1., 2., 0.])],
+                vec![("chr1", 0, vec![5., 5., 5., 7.])],
+            ],
+        );
+        ds
     }
 
     fn whole(measurement: &Measurement) -> Vec<Region> {
@@ -1133,8 +1190,8 @@ mod tests {
     #[test]
     fn run_mean_median_on_integer_track() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let measurement = Measurement::legacy(store.track("depth").unwrap());
+        let ds = fixture(dir.path());
+        let measurement = Measurement::root(&ds, "depth").unwrap();
         let regions = whole(&measurement);
 
         let mean = run(
@@ -1174,8 +1231,8 @@ mod tests {
     #[test]
     fn dispatch_merges_region_partials_across_batches() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let measurement = Measurement::legacy(store.track("depth").unwrap());
+        let ds = fixture(dir.path());
+        let measurement = Measurement::root(&ds, "depth").unwrap();
         let batches = plan_batches(&[range(0, 0, 10), range(1, 10, 16)], 4, 1);
         assert!(batches.len() > 1);
         let StatResult::PerRegion(rows) =
@@ -1199,8 +1256,8 @@ mod tests {
     #[test]
     fn run_hist_unions_overlapping_regions() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let measurement = Measurement::legacy(store.track("depth").unwrap());
+        let ds = fixture(dir.path());
+        let measurement = Measurement::root(&ds, "depth").unwrap();
         let contig = whole(&measurement)[0].contig;
         let overlapping = [
             Region {
@@ -1232,8 +1289,8 @@ mod tests {
     #[test]
     fn run_mean_skips_nan_and_subsets_columns() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let measurement = Measurement::legacy(store.track("af").unwrap());
+        let ds = fixture(dir.path());
+        let measurement = Measurement::root(&ds, "af").unwrap();
         let regions = whole(&measurement);
         let options = StatOptions {
             columns: Some(vec!["s2".into(), "s1".into()]),
@@ -1256,8 +1313,8 @@ mod tests {
     #[test]
     fn run_rejects_median_on_float_and_bad_columns() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let af = Measurement::legacy(store.track("af").unwrap());
+        let ds = fixture(dir.path());
+        let af = Measurement::root(&ds, "af").unwrap();
         let regions = whole(&af);
         let err = run(&af, &regions, StatKind::Median, &StatOptions::default()).unwrap_err();
         assert!(err.to_string().contains("median"), "{err}");
@@ -1269,7 +1326,7 @@ mod tests {
         let err = run(&af, &regions, StatKind::Mean, &options).unwrap_err();
         assert!(err.to_string().contains("s1"), "{err}");
 
-        let depth = Measurement::legacy(store.track("depth").unwrap());
+        let depth = Measurement::root(&ds, "depth").unwrap();
         let options = StatOptions {
             columns: Some(vec!["s1".into()]),
         };
@@ -1279,8 +1336,8 @@ mod tests {
     #[test]
     fn run_hist_on_rank2_track_counts_per_sample() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let measurement = Measurement::legacy(store.track("cov").unwrap());
+        let ds = fixture(dir.path());
+        let measurement = Measurement::root(&ds, "cov").unwrap();
         let region = measurement
             .genome()
             .resolve(&"chr1:0-4".parse().unwrap())
@@ -1305,53 +1362,47 @@ mod tests {
 
     /// 100 positions × 5 samples, 10×2 inner chunks in 40×2 shards.
     /// value = pos*10 + col.
-    fn sharded(dir: &std::path::Path) -> PbzStore {
-        let genome = Genome::new(vec![Contig {
+    fn sharded(dir: &std::path::Path) -> Dataset {
+        let reference = Reference::new(vec![Contig {
             name: "chr1".into(),
             length: 100,
         }])
         .unwrap();
-        let mut store = PbzStore::create(dir.join("sharded.pbz")).unwrap();
-        store
-            .create_track(
-                "cov",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns((1..=5).map(|i| format!("s{i}")).collect())
-                    .column_dim("sample")
-                    .chunk_size(10)
-                    .column_chunk_size(2)
-                    .shard_size(40)
-                    .shard_column_size(2),
-            )
-            .unwrap();
-        let all = genome.resolve(&"chr1".parse().unwrap()).unwrap();
-        let data: Vec<i32> = (0..100)
-            .flat_map(|pos| (0..5).map(move |col| pos * 10 + col))
+        let mut ds = Dataset::create(dir.join("sharded.pbz"), reference).unwrap();
+        let columns = (0..5)
+            .map(|col| {
+                vec![(
+                    "chr1",
+                    0,
+                    (0..100).map(|pos| (pos * 10 + col) as f64).collect(),
+                )]
+            })
             .collect();
-        store
-            .track("cov")
-            .unwrap()
-            .write_region(
-                &all,
-                ndarray::Array2::from_shape_vec((100, 5), data)
-                    .unwrap()
-                    .into_dyn(),
-            )
-            .unwrap();
-        store
+        import(
+            &mut ds,
+            "cov",
+            TrackConfig::new(Dtype::I32)
+                .columns((1..=5).map(|i| format!("s{i}")).collect())
+                .column_dim("sample")
+                .chunk_size(10)
+                .column_chunk_size(2)
+                .shard_size(40)
+                .shard_column_size(2),
+            columns,
+        );
+        ds
     }
 
     #[test]
     fn inner_chunk_shape_reports_subchunk_of_sharded_track() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = sharded(dir.path());
-        let track = store.track("cov").unwrap();
-        assert_eq!(track.chunk_size().unwrap(), 40);
-        assert_eq!(track.inner_chunk_shape().unwrap(), (10, 2));
+        let ds = sharded(dir.path());
+        let cov = Measurement::root(&ds, "cov").unwrap();
+        assert_eq!(cov.chunk_size().unwrap(), 40);
+        assert_eq!(cov.inner_chunk_shape().unwrap(), (10, 2));
         // Unsharded: the chunk itself (clipped to the 16-position track).
-        let store = fixture(dir.path());
-        let depth = store.track("depth").unwrap();
+        let ds = fixture(dir.path());
+        let depth = Measurement::root(&ds, "depth").unwrap();
         assert_eq!(
             depth.inner_chunk_shape().unwrap(),
             (depth.chunk_size().unwrap() as u64, 1)
@@ -1359,10 +1410,28 @@ mod tests {
     }
 
     #[test]
+    fn read_flat_crosses_contig_boundary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut ds = Dataset::create(dir.path().join("flat.pbz"), reference()).unwrap();
+        import(
+            &mut ds,
+            "depth",
+            TrackConfig::new(Dtype::I32),
+            vec![vec![
+                ("chr1", 0, (0..10).map(f64::from).collect()),
+                ("chr2", 0, (100..106).map(f64::from).collect()),
+            ]],
+        );
+        let depth = Measurement::root(&ds, "depth").unwrap();
+        let flat = depth.read_flat::<i32>(8..12).unwrap();
+        assert_eq!(flat.into_raw_vec_and_offset().0, vec![8, 9, 100, 101]);
+    }
+
+    #[test]
     fn plan_reads_only_touched_inner_chunks_within_a_shard() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = sharded(dir.path());
-        let cov = Measurement::legacy(store.track("cov").unwrap());
+        let ds = sharded(dir.path());
+        let cov = Measurement::root(&ds, "cov").unwrap();
         // Both regions sit in shard 0 (positions 0..40) but in inner chunks 0 and 3.
         let ranges = [range(0, 0, 5), range(1, 30, 35)];
         let batches = plan(&cov, &ranges).unwrap();
@@ -1391,8 +1460,8 @@ mod tests {
     #[test]
     fn run_mean_on_sharded_track_across_column_tiles() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = sharded(dir.path());
-        let cov = Measurement::legacy(store.track("cov").unwrap());
+        let ds = sharded(dir.path());
+        let cov = Measurement::root(&ds, "cov").unwrap();
         let contig = whole(&cov)[0].contig;
         let region = |start, end| Region { contig, start, end };
         let regions = [region(0, 5), region(30, 35), region(35, 85)];

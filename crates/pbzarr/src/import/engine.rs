@@ -1744,11 +1744,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::genome::{Contig, Region};
-    use crate::import::Import;
+    use crate::TrackConfig;
+    use crate::dataset::{Dataset, Reference};
+    use crate::genome::Contig;
+    use crate::import::{Import, ImportBuilder};
     use crate::io::{OutputSchema, ValueReader};
-    use crate::store::PbzStore;
-    use crate::track::TrackConfig;
 
     /// Synthetic single-field reader over one contig: position `p` inside
     /// `covered` (or `extra`) reads as `base + p`; everything else is left
@@ -1895,15 +1895,37 @@ mod tests {
         .unwrap()
     }
 
-    fn whole(store: &PbzStore, track: &str, len: u64) -> Region {
-        Region {
-            contig: store.genome_for(track).unwrap().id("chr1").unwrap(),
-            start: 0,
-            end: len,
+    fn dataset(path: &Path, genome: &Genome) -> Dataset {
+        Dataset::create(path, Reference::new(genome.contigs().to_vec()).unwrap()).unwrap()
+    }
+
+    /// Import into a new track. A config with columns takes one reader per
+    /// column.
+    fn import<'t, R: ValueReader>(
+        ds: &'t mut Dataset,
+        name: &str,
+        cfg: TrackConfig,
+        readers: Vec<R>,
+    ) -> ImportBuilder<'t, R> {
+        let labels = cfg.columns.clone();
+        let builder = Import::from_readers(readers)
+            .unwrap()
+            .into_dataset(ds, vec![(name.into(), cfg)]);
+        match labels {
+            Some(labels) => builder.readers_as_columns().expect_column_labels(labels),
+            None => builder,
         }
     }
 
-    /// Number of chunk files (anything but `zarr.json`) under a values dir.
+    fn read_contig<T: zarrs::array::ElementOwned>(
+        ds: &Dataset,
+        name: &str,
+        contig: &str,
+    ) -> ndarray::ArrayD<T> {
+        ds.read_region::<T>(name, &contig.parse().unwrap()).unwrap()
+    }
+
+    /// Number of chunk files (anything but `zarr.json`) under an array dir.
     fn chunk_file_count(values_dir: &Path) -> usize {
         fn walk(dir: &Path, n: &mut usize) {
             for entry in std::fs::read_dir(dir).unwrap() {
@@ -1957,15 +1979,8 @@ mod tests {
                 .collect()
         };
         let run = |dir: &Path, name: &str, cfg: TrackConfig, decode_chunks: usize| {
-            let mut store = PbzStore::create(dir.join(name)).unwrap();
-            store
-                .create_track("v", genome.clone(), cfg.columns(labels.clone()))
-                .unwrap();
-            Import::from_readers(readers())
-                .unwrap()
-                .into_track(store.track("v").unwrap())
-                .readers_as_columns()
-                .expect_column_labels(labels.clone())
+            let mut ds = dataset(&dir.join(name), &genome);
+            import(&mut ds, "v", cfg.columns(labels.clone()), readers())
                 .options(PipelineOptions {
                     workers: 3,
                     decode_chunks,
@@ -1973,7 +1988,7 @@ mod tests {
                 })
                 .run()
                 .unwrap();
-            store
+            ds
         };
         let sharded = || {
             TrackConfig::new(Dtype::I32)
@@ -1993,13 +2008,10 @@ mod tests {
                 .column_chunk_size(2),
             3,
         );
-        let read = |s: &PbzStore| -> ndarray::Array2<i32> {
-            s.track("v")
-                .unwrap()
-                .read_region::<i32>(&whole(s, "v", len))
-                .unwrap()
-                .into_dimensionality::<Ix2>()
-                .unwrap()
+        let read = |ds: &Dataset| -> ndarray::Array2<i32> {
+            let values = read_contig::<i32>(ds, "v", "chr1");
+            assert_eq!(values.shape()[0], len as usize);
+            values.into_dimensionality::<Ix2>().unwrap()
         };
         assert_eq!(read(&a), read(&b));
         assert_eq!(read(&a), read(&c));
@@ -2011,20 +2023,12 @@ mod tests {
     fn uncovered_chunk_inside_covered_span_elides() {
         let dir = TempDir::new().unwrap();
         let genome = one_contig(64);
-        let mut store = PbzStore::create(dir.path().join("elide.pbz")).unwrap();
-        store
-            .create_track(
-                "v",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32).chunk_size(16),
-            )
-            .unwrap();
+        let mut ds = dataset(&dir.path().join("elide.pbz"), &genome);
         // Covered: chunk 0 (0..16) and chunk 3 (48..64); chunks 1 and 2 empty.
         let reader =
             SynthReader::new(genome.clone(), Dtype::I32, 0..16, 7).with_extra_cover(48..64);
-        let report = Import::from_readers(vec![reader])
-            .unwrap()
-            .into_track(store.track("v").unwrap())
+        let cfg = TrackConfig::new(Dtype::I32).chunk_size(16);
+        let report = import(&mut ds, "v", cfg, vec![reader])
             .options(PipelineOptions {
                 workers: 1,
                 decode_chunks: 4,
@@ -2033,34 +2037,26 @@ mod tests {
             .run()
             .unwrap();
         assert_eq!(report.chunks_skipped, 2);
-        assert_eq!(chunk_file_count(&dir.path().join("elide.pbz/v/values")), 2);
+        assert_eq!(chunk_file_count(&dir.path().join("elide.pbz/v")), 2);
     }
 
     /// A shard-aligned target writes one file per covered shard and no file
     /// for an uncovered one; the tail shard pads with fill and reads back
-    /// clipped.
+    /// clipped. Uncovered positions read back as the custom fill.
     #[test]
     fn whole_shard_write_and_elision() {
         let dir = TempDir::new().unwrap();
         let len = 80u64;
         let genome = one_contig(len);
-        let mut store = PbzStore::create(dir.path().join("shard.pbz")).unwrap();
-        store
-            .create_track(
-                "v",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .chunk_size(16)
-                    .shard_size(48)
-                    .fill_value(serde_json::json!(0)),
-            )
-            .unwrap();
+        let mut ds = dataset(&dir.path().join("shard.pbz"), &genome);
+        let cfg = TrackConfig::new(Dtype::I32)
+            .chunk_size(16)
+            .shard_size(48)
+            .fill_value(serde_json::json!(-1));
         // Shard row 0 holds chunks 0..3 (0..48); row 1 holds chunks 3..5
         // (48..80). Coverage 0..40 leaves row 1 untouched.
         let reader = SynthReader::new(genome.clone(), Dtype::I32, 0..40, 7);
-        let report = Import::from_readers(vec![reader])
-            .unwrap()
-            .into_track(store.track("v").unwrap())
+        let report = import(&mut ds, "v", cfg, vec![reader])
             .options(PipelineOptions {
                 workers: 2,
                 decode_chunks: 2,
@@ -2070,12 +2066,8 @@ mod tests {
             .unwrap();
         assert_eq!(report.chunks_written, 3);
         assert_eq!(report.chunks_skipped, 2);
-        assert_eq!(chunk_file_count(&dir.path().join("shard.pbz/v/values")), 1);
-        let values = store
-            .track("v")
-            .unwrap()
-            .read_region::<i32>(&whole(&store, "v", len))
-            .unwrap()
+        assert_eq!(chunk_file_count(&dir.path().join("shard.pbz/v")), 1);
+        let values = read_contig::<i32>(&ds, "v", "chr1")
             .into_dimensionality::<Ix1>()
             .unwrap();
         assert_eq!(values.len(), len as usize);
@@ -2083,7 +2075,7 @@ mod tests {
             assert_eq!(values[p], 7 + p as i32);
         }
         for p in 40..len as usize {
-            assert_eq!(values[p], 0);
+            assert_eq!(values[p], -1);
         }
     }
 
@@ -2104,19 +2096,10 @@ mod tests {
             },
         ])
         .unwrap();
-        let mut store = PbzStore::create(dir.path().join("split.pbz")).unwrap();
-        store
-            .create_track(
-                "v",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32).chunk_size(8),
-            )
-            .unwrap();
-
+        let mut ds = dataset(&dir.path().join("split.pbz"), &genome);
         let reader = SynthReader::new(genome, Dtype::I32, 0..22, 100);
-        let report = Import::from_readers(vec![reader])
-            .unwrap()
-            .into_track(store.track("v").unwrap())
+        let cfg = TrackConfig::new(Dtype::I32).chunk_size(8);
+        let report = import(&mut ds, "v", cfg, vec![reader])
             .options(PipelineOptions {
                 workers: 1,
                 decode_chunks: 4,
@@ -2128,18 +2111,10 @@ mod tests {
         assert_eq!(report.chunks_skipped, 0);
 
         for (contig, len) in [("chr1", 10u64), ("chr2", 22u64)] {
-            let region = Region {
-                contig: store.genome_for("v").unwrap().id(contig).unwrap(),
-                start: 0,
-                end: len,
-            };
-            let values = store
-                .track("v")
-                .unwrap()
-                .read_region::<i32>(&region)
-                .unwrap()
+            let values = read_contig::<i32>(&ds, "v", contig)
                 .into_dimensionality::<Ix1>()
                 .unwrap();
+            assert_eq!(values.len(), len as usize);
             for pos in 0..len as usize {
                 assert_eq!(values[pos], 100 + pos as i32, "{contig} position {pos}");
             }
@@ -2152,22 +2127,14 @@ mod tests {
         // `--threads N` bounds the busy threads at N rather than 2N.
         let dir = TempDir::new().unwrap();
         let genome = one_contig(400);
-        let mut store = PbzStore::create(dir.path().join("pool.pbz")).unwrap();
-        store
-            .create_track(
-                "v",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32).chunk_size(16),
-            )
-            .unwrap();
+        let mut ds = dataset(&dir.path().join("pool.pbz"), &genome);
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reader = ThreadProbe {
             inner: SynthReader::new(genome, Dtype::I32, 0..400, 0),
             seen: Arc::clone(&seen),
         };
-        Import::from_readers(vec![reader])
-            .unwrap()
-            .into_track(store.track("v").unwrap())
+        let cfg = TrackConfig::new(Dtype::I32).chunk_size(16);
+        import(&mut ds, "v", cfg, vec![reader])
             .options(PipelineOptions {
                 workers: 3,
                 decode_chunks: 1,
@@ -2187,31 +2154,16 @@ mod tests {
     fn nan_fill_prefill_and_elision() {
         let dir = TempDir::new().unwrap();
         let genome = one_contig(40);
-        let mut store = PbzStore::create(dir.path().join("fill.pbz")).unwrap();
-        // F32 tracks default to a NaN fill.
-        store
-            .create_track(
-                "signal",
-                genome.clone(),
-                TrackConfig::new(Dtype::F32).chunk_size(16),
-            )
-            .unwrap();
-
+        let mut ds = dataset(&dir.path().join("fill.pbz"), &genome);
         let reader = SynthReader::new(genome, Dtype::F32, 16..26, 0);
-        let report = Import::from_readers(vec![reader])
-            .unwrap()
-            .into_track(store.track("signal").unwrap())
-            .run()
-            .unwrap();
+        // F32 tracks default to a NaN fill.
+        let cfg = TrackConfig::new(Dtype::F32).chunk_size(16);
+        let report = import(&mut ds, "signal", cfg, vec![reader]).run().unwrap();
         // Chunks 16,16,8: only the middle has coverage.
         assert_eq!(report.chunks_written, 1);
         assert_eq!(report.chunks_skipped, 2);
 
-        let values = store
-            .track("signal")
-            .unwrap()
-            .read_region::<f32>(&whole(&store, "signal", 40))
-            .unwrap()
+        let values = read_contig::<f32>(&ds, "signal", "chr1")
             .into_dimensionality::<Ix1>()
             .unwrap();
         for pos in 16..26 {
@@ -2222,10 +2174,7 @@ mod tests {
         for pos in (0..16).chain(26..40) {
             assert!(values[pos].is_nan(), "position {pos} should be NaN");
         }
-        assert_eq!(
-            chunk_file_count(&dir.path().join("fill.pbz/signal/values")),
-            1
-        );
+        assert_eq!(chunk_file_count(&dir.path().join("fill.pbz/signal")), 1);
     }
 
     /// Reader whose `read_into` records how many decodes run at once. Each
@@ -2290,17 +2239,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let genome = one_contig(16);
         let labels = vec!["a".to_string(), "b".to_string()];
-        let mut store = PbzStore::create(dir.path().join("conc.pbz")).unwrap();
-        store
-            .create_track(
-                "depth",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns(labels.clone())
-                    .chunk_size(16)
-                    .column_chunk_size(2),
-            )
-            .unwrap();
+        let mut ds = dataset(&dir.path().join("conc.pbz"), &genome);
+        let cfg = TrackConfig::new(Dtype::I32)
+            .columns(labels)
+            .chunk_size(16)
+            .column_chunk_size(2);
 
         let gauge = Arc::new((Mutex::new((0usize, 0usize)), Condvar::new()));
         let readers: Vec<ConcurrencyProbe> = (0..2)
@@ -2311,11 +2254,7 @@ mod tests {
             })
             .collect();
 
-        Import::from_readers(readers)
-            .unwrap()
-            .into_track(store.track("depth").unwrap())
-            .readers_as_columns()
-            .expect_column_labels(labels)
+        import(&mut ds, "depth", cfg, readers)
             .options(PipelineOptions {
                 workers: 2,
                 ..PipelineOptions::default()
@@ -2346,37 +2285,16 @@ mod tests {
         };
 
         let dir = TempDir::new().unwrap();
-        let mut plain = PbzStore::create(dir.path().join("plain.pbz")).unwrap();
-        plain
-            .create_track(
-                "depth",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns(labels.clone())
-                    .chunk_size(16)
-                    .column_chunk_size(2),
-            )
-            .unwrap();
-        let mut sharded = PbzStore::create(dir.path().join("sharded.pbz")).unwrap();
-        sharded
-            .create_track(
-                "depth",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns(labels.clone())
-                    .chunk_size(16)
-                    .column_chunk_size(2)
-                    .shard_size(32)
-                    .shard_column_size(4),
-            )
-            .unwrap();
+        let plain_cfg = TrackConfig::new(Dtype::I32)
+            .columns(labels.clone())
+            .chunk_size(16)
+            .column_chunk_size(2);
+        let sharded_cfg = plain_cfg.clone().shard_size(32).shard_column_size(4);
+        let mut plain = dataset(&dir.path().join("plain.pbz"), &genome);
+        let mut sharded = dataset(&dir.path().join("sharded.pbz"), &genome);
 
-        for store in [&plain, &sharded] {
-            let report = Import::from_readers(readers())
-                .unwrap()
-                .into_track(store.track("depth").unwrap())
-                .readers_as_columns()
-                .expect_column_labels(labels.clone())
+        for (ds, cfg) in [(&mut plain, plain_cfg), (&mut sharded, sharded_cfg)] {
+            let report = import(ds, "depth", cfg, readers())
                 .options(PipelineOptions {
                     workers: 4,
                     ..PipelineOptions::default()
@@ -2386,20 +2304,13 @@ mod tests {
             assert!(report.chunks_written > 0);
         }
 
-        let plain_data = plain
-            .track("depth")
-            .unwrap()
-            .read_region::<i32>(&whole(&plain, "depth", len))
-            .unwrap()
+        let plain_data = read_contig::<i32>(&plain, "depth", "chr1")
             .into_dimensionality::<Ix2>()
             .unwrap();
-        let sharded_data = sharded
-            .track("depth")
-            .unwrap()
-            .read_region::<i32>(&whole(&sharded, "depth", len))
-            .unwrap()
+        let sharded_data = read_contig::<i32>(&sharded, "depth", "chr1")
             .into_dimensionality::<Ix2>()
             .unwrap();
+        assert_eq!(plain_data.nrows(), len as usize);
         assert_eq!(plain_data, sharded_data);
 
         // Spot-check the source formula, and the zero fill outside the
@@ -2413,18 +2324,10 @@ mod tests {
         }
         // Sharding must be the sole outer codec: that is what makes the
         // per-call `experimental_partial_encoding` append path available.
-        assert_eq!(
-            sharded.track("depth").unwrap().write_unit_shape().unwrap(),
-            vec![32, 4]
-        );
-        assert!(
-            sharded
-                .track("depth")
-                .unwrap()
-                .values_array()
-                .unwrap()
-                .is_exclusively_sharded()
-        );
+        let storage = zarrs::filesystem::FilesystemStore::new(dir.path().join("sharded.pbz"));
+        let array = Array::open(Arc::new(storage.unwrap()), "/depth").unwrap();
+        assert_eq!(array.chunk_shape_usize(&[0, 0]).unwrap(), vec![32, 4]);
+        assert!(array.is_exclusively_sharded());
     }
 
     /// Width-1 column chunks on a sharded track: the batched chunk flush must
@@ -2442,37 +2345,16 @@ mod tests {
         };
 
         let dir = TempDir::new().unwrap();
-        let mut plain = PbzStore::create(dir.path().join("plain.pbz")).unwrap();
-        plain
-            .create_track(
-                "depth",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns(labels.clone())
-                    .chunk_size(16)
-                    .column_chunk_size(1),
-            )
-            .unwrap();
-        let mut sharded = PbzStore::create(dir.path().join("sharded.pbz")).unwrap();
-        sharded
-            .create_track(
-                "depth",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns(labels.clone())
-                    .chunk_size(16)
-                    .column_chunk_size(1)
-                    .shard_size(32)
-                    .shard_column_size(2),
-            )
-            .unwrap();
+        let plain_cfg = TrackConfig::new(Dtype::I32)
+            .columns(labels.clone())
+            .chunk_size(16)
+            .column_chunk_size(1);
+        let sharded_cfg = plain_cfg.clone().shard_size(32).shard_column_size(2);
+        let mut plain = dataset(&dir.path().join("plain.pbz"), &genome);
+        let mut sharded = dataset(&dir.path().join("sharded.pbz"), &genome);
 
-        for store in [&plain, &sharded] {
-            let report = Import::from_readers(readers())
-                .unwrap()
-                .into_track(store.track("depth").unwrap())
-                .readers_as_columns()
-                .expect_column_labels(labels.clone())
+        for (ds, cfg) in [(&mut plain, plain_cfg), (&mut sharded, sharded_cfg)] {
+            let report = import(ds, "depth", cfg, readers())
                 .options(PipelineOptions {
                     workers: 4,
                     ..PipelineOptions::default()
@@ -2484,28 +2366,14 @@ mod tests {
             assert_eq!(report.chunks_skipped, 8);
         }
 
-        let plain_data = plain
-            .track("depth")
-            .unwrap()
-            .read_region::<i32>(&whole(&plain, "depth", len))
-            .unwrap()
-            .into_dimensionality::<Ix2>()
-            .unwrap();
-        let sharded_data = sharded
-            .track("depth")
-            .unwrap()
-            .read_region::<i32>(&whole(&sharded, "depth", len))
-            .unwrap()
-            .into_dimensionality::<Ix2>()
-            .unwrap();
+        let plain_data = read_contig::<i32>(&plain, "depth", "chr1");
+        let sharded_data = read_contig::<i32>(&sharded, "depth", "chr1");
+        assert_eq!(plain_data.shape(), [len as usize, 4]);
         assert_eq!(plain_data, sharded_data);
 
         // 3 x 2 shard grid; the uncovered position shard (64..96) elides, so
         // its two shard files are never created.
-        assert_eq!(
-            chunk_file_count(&dir.path().join("sharded.pbz/depth/values")),
-            4
-        );
+        assert_eq!(chunk_file_count(&dir.path().join("sharded.pbz/depth")), 4);
     }
 
     /// Counts live forks of one reader so a test can assert the pool cap.
@@ -2568,14 +2436,7 @@ mod tests {
     fn handle_pool_caps_forks_and_completes() {
         let dir = TempDir::new().unwrap();
         let genome = one_contig(64);
-        let mut store = PbzStore::create(dir.path().join("pool.pbz")).unwrap();
-        store
-            .create_track(
-                "v",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32).chunk_size(4),
-            )
-            .unwrap();
+        let mut ds = dataset(&dir.path().join("pool.pbz"), &genome);
 
         let live = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
@@ -2585,9 +2446,8 @@ mod tests {
             live: Arc::clone(&live),
             peak: Arc::clone(&peak),
         };
-        let report = Import::from_readers(vec![reader])
-            .unwrap()
-            .into_track(store.track("v").unwrap())
+        let cfg = TrackConfig::new(Dtype::I32).chunk_size(4);
+        let report = import(&mut ds, "v", cfg, vec![reader])
             .options(PipelineOptions {
                 workers: 8,
                 ..PipelineOptions::default()
@@ -2599,13 +2459,8 @@ mod tests {
         assert!(peak <= 2, "peak forks {peak}");
         assert_eq!(report.chunks_written, 16);
 
-        let values = store
-            .track("v")
-            .unwrap()
-            .read_region::<i32>(&whole(&store, "v", 64))
-            .unwrap()
-            .into_dimensionality::<Ix1>()
-            .unwrap();
+        let values = read_contig::<i32>(&ds, "v", "chr1");
+        assert_eq!(values.len(), 64);
         assert!(values.iter().all(|&x| x == 1));
     }
 
@@ -2615,25 +2470,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let genome = one_contig(32);
         let labels = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let mut store = PbzStore::create(dir.path().join("floor.pbz")).unwrap();
-        store
-            .create_track(
-                "v",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns(labels.clone())
-                    .chunk_size(8),
-            )
-            .unwrap();
+        let mut ds = dataset(&dir.path().join("floor.pbz"), &genome);
+        let cfg = TrackConfig::new(Dtype::I32).columns(labels).chunk_size(8);
 
         let readers: Vec<SynthReader> = (0..3)
             .map(|i| SynthReader::new(genome.clone(), Dtype::I32, 0..32, (i + 1) * 100))
             .collect();
-        Import::from_readers(readers)
-            .unwrap()
-            .into_track(store.track("v").unwrap())
-            .readers_as_columns()
-            .expect_column_labels(labels)
+        import(&mut ds, "v", cfg, readers)
             .options(PipelineOptions {
                 workers: 4,
                 ..PipelineOptions::default()
@@ -2642,11 +2485,7 @@ mod tests {
             .run()
             .unwrap();
 
-        let values = store
-            .track("v")
-            .unwrap()
-            .read_region::<i32>(&whole(&store, "v", 32))
-            .unwrap()
+        let values = read_contig::<i32>(&ds, "v", "chr1")
             .into_dimensionality::<Ix2>()
             .unwrap();
         assert_eq!(values[[5, 2]], 300 + 5);
