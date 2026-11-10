@@ -756,15 +756,23 @@ impl RunCtx<'_> {
         Arc::clone(map.entry(key).or_default())
     }
 
-    fn record_skipped(&self) {
-        self.chunks_skipped.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn record_written(&self, geom: &TargetGeom<'_>, chunk: Range<u64>, columns: Range<u64>) {
-        let bytes =
-            (chunk.end - chunk.start) * (columns.end - columns.start) * geom.dtype.size() as u64;
-        self.bytes_written.fetch_add(bytes, Ordering::Relaxed);
-        self.chunks_written.fetch_add(1, Ordering::Relaxed);
+    /// Count one closed buffer as written or elided.
+    fn record_close(
+        &self,
+        geom: &TargetGeom<'_>,
+        chunk: Range<u64>,
+        columns: Range<u64>,
+        written: bool,
+    ) {
+        if written {
+            let bytes = (chunk.end - chunk.start)
+                * (columns.end - columns.start)
+                * geom.dtype.size() as u64;
+            self.bytes_written.fetch_add(bytes, Ordering::Relaxed);
+            self.chunks_written.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.chunks_skipped.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Write, batch, or elide one closed buffer.
@@ -784,16 +792,19 @@ impl RunCtx<'_> {
         }
         let geom = &self.geoms[t_idx];
         let progress_bytes = geom.progress_bytes(&chunk, cc);
-        if geom.sharded {
-            self.close_sharded(t_idx, chunk_idx, chunk, cc, data)?;
-        } else if let Some(data) = data {
-            let columns = geom.buffer_columns(cc);
-            let write_start = Instant::now();
-            data.write_unsharded(geom.track, chunk.clone(), columns.clone())?;
-            self.timings.write.record(write_start.elapsed());
-            self.record_written(geom, chunk, columns);
-        } else {
-            self.record_skipped();
+        match (geom.sharded, geom.shard_aligned) {
+            (false, _) => {
+                let columns = geom.buffer_columns(cc);
+                let written = data.is_some();
+                if let Some(data) = data {
+                    let write_start = Instant::now();
+                    data.write_unsharded(geom.track, chunk.clone(), columns.clone())?;
+                    self.timings.write.record(write_start.elapsed());
+                }
+                self.record_close(geom, chunk, columns, written);
+            }
+            (true, true) => self.close_shard_part(t_idx, chunk_idx, chunk, cc, data)?,
+            (true, false) => self.park_in_chunk_group(t_idx, chunk_idx, chunk, cc, data)?,
         }
         if let Some(p) = self.progress {
             p.tick(progress_bytes);
@@ -806,7 +817,7 @@ impl RunCtx<'_> {
     /// rewrites the shard index under that shard's mutex, so the batch gives
     /// one index rewrite and one lock acquisition per chunk instead of one per
     /// buffer.
-    fn close_sharded(
+    fn park_in_chunk_group(
         &self,
         t_idx: usize,
         chunk_idx: usize,
@@ -814,9 +825,6 @@ impl RunCtx<'_> {
         cc: u64,
         data: Option<TileBuffer>,
     ) -> Result<()> {
-        if self.geoms[t_idx].shard_aligned {
-            return self.close_shard_part(t_idx, chunk_idx, chunk, cc, data);
-        }
         let done = {
             let mut groups = self.chunk_groups.lock().expect("chunk group map poisoned");
             let group = groups
@@ -865,8 +873,8 @@ impl RunCtx<'_> {
             // That trades a little elision for the batched write: fill
             // columns encode to almost nothing.
             if parts[lo..hi].iter().all(|(_, data)| data.is_none()) {
-                for _ in lo..hi {
-                    self.record_skipped();
+                for &(cc, _) in &parts[lo..hi] {
+                    self.record_close(geom, chunk.clone(), geom.buffer_columns(cc), false);
                 }
                 lo = hi;
                 continue;
@@ -916,7 +924,7 @@ impl RunCtx<'_> {
             drop(guard);
 
             for &(cc, _) in &parts[lo..hi] {
-                self.record_written(geom, chunk.clone(), geom.buffer_columns(cc));
+                self.record_close(geom, chunk.clone(), geom.buffer_columns(cc), true);
             }
             lo = hi;
         }
@@ -1016,15 +1024,8 @@ impl RunCtx<'_> {
             self.timings.write.record(write_start.elapsed());
         }
         for &(chunk_idx, cc, covered) in &parts {
-            if covered {
-                self.record_written(
-                    geom,
-                    self.chunk_range(chunk_idx as u64),
-                    geom.buffer_columns(cc),
-                );
-            } else {
-                self.record_skipped();
-            }
+            let chunk = self.chunk_range(chunk_idx as u64);
+            self.record_close(geom, chunk, geom.buffer_columns(cc), covered);
         }
         Ok(())
     }
@@ -1038,7 +1039,6 @@ fn to_reader_err(err: PbzError) -> ReaderError {
 /// into the shared buffers each time the walk leaves a chunk.
 struct PieceSink<'a, 'c> {
     ctx: &'a RunCtx<'c>,
-    piece: Piece,
     entries: &'a [TouchEntry],
     scratch: Vec<TileBuffer>,
     /// Flat and contig-local start of the contig window being streamed.
@@ -1120,15 +1120,6 @@ impl PieceSink<'_, '_> {
         }
         Ok(())
     }
-
-    /// Finish every chunk of the span from `from_chunk` on with no data.
-    fn finish_rest(&self, from_chunk: u64) -> Result<()> {
-        let last = (self.piece.end - 1) / self.ctx.chunk_len();
-        for chunk_idx in from_chunk..=last {
-            self.finish_chunk(chunk_idx, false)?;
-        }
-        Ok(())
-    }
 }
 
 impl WindowSink for PieceSink<'_, '_> {
@@ -1192,7 +1183,6 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
     let first_chunk = piece.start / chunk_len;
     let mut sink = PieceSink {
         ctx,
-        piece,
         entries,
         scratch: Vec::new(),
         window_flat_base: 0,
@@ -1238,7 +1228,10 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
         }
         None => first_chunk,
     };
-    sink.finish_rest(next)
+    for chunk_idx in next..=(piece.end - 1) / chunk_len {
+        sink.finish_chunk(chunk_idx, false)?;
+    }
+    Ok(())
 }
 
 fn build_touch_plan(
