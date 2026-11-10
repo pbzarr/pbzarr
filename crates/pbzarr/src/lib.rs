@@ -3,7 +3,6 @@ pub mod codec_spec;
 mod consolidated;
 pub mod dataset;
 pub mod error;
-pub mod genome;
 pub mod import;
 pub mod io;
 pub mod measurement;
@@ -12,8 +11,8 @@ pub mod stat;
 
 pub use array::{TrackConfig, validate_column_dimension_name, validate_node_name};
 pub use codec_spec::ExplicitArraySpec;
+pub use dataset::{Contig, ContigId, Reference, Region};
 pub use error::{PbzError, Result};
-pub use genome::{Contig, ContigId, Genome, Region};
 pub use measurement::Measurement;
 pub use region_query::{RegionQuery, parse_region_query};
 pub use stat::{HistTable, StatKind, StatOptions, StatOutput, StatResult, StatValue};

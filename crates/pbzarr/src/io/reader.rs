@@ -4,7 +4,7 @@
 //! dtype-erased [`OutputSchema`] and fills one [`OutputSinkMut`] per schema
 //! field in a single decode pass.
 
-use crate::genome::Genome;
+use crate::dataset::Reference;
 use crate::io::dtype::Dtype;
 use crate::io::error::ReaderError;
 use ndarray::ArrayViewMut1;
@@ -123,7 +123,7 @@ pub trait WindowSink {
 /// its file handles and decode buffers directly, with no internal `Mutex`.
 pub trait ValueReader: Send + Sized {
     /// Contigs present in the source, with lengths.
-    fn contigs(&self) -> &Genome;
+    fn contigs(&self) -> &Reference;
 
     fn output_schema(&self) -> &OutputSchema;
 
@@ -212,7 +212,7 @@ mod tests {
         }
         struct Ones;
         impl ValueReader for Ones {
-            fn contigs(&self) -> &Genome {
+            fn contigs(&self) -> &Reference {
                 unimplemented!()
             }
             fn output_schema(&self) -> &OutputSchema {

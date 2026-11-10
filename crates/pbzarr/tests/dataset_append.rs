@@ -5,7 +5,7 @@ use std::sync::Arc;
 use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::{Axes, Import, PipelineOptions, Target};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, Genome, TrackConfig};
+use pbzarr::{Contig, TrackConfig};
 use zarrs::storage::store::MemoryStore;
 use zarrs::storage::{
     ListableStorageTraits, ReadableStorageTraits, ReadableWritableListableStorage,
@@ -25,14 +25,10 @@ fn reference() -> Reference {
     .unwrap()
 }
 
-fn genome() -> Genome {
-    Genome::new(reference().contigs().to_vec()).unwrap()
-}
-
 /// Serves one constant value everywhere.
 #[derive(Clone)]
 struct ConstReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     value: u32,
 }
@@ -40,7 +36,7 @@ struct ConstReader {
 impl ConstReader {
     fn new(value: u32) -> Self {
         Self {
-            genome: genome(),
+            genome: reference(),
             schema: OutputSchema::single("value", Dtype::U32),
             value,
         }
@@ -48,7 +44,7 @@ impl ConstReader {
 }
 
 impl ValueReader for ConstReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
     fn output_schema(&self) -> &OutputSchema {
@@ -101,7 +97,7 @@ fn append(
         .collect();
     let owned: Vec<String> = labels.iter().map(|l| (*l).to_owned()).collect();
     Target::Append(dataset).append(
-        vec![(track.into(), genome(), cohort(labels, 2))],
+        vec![(track.into(), cohort(labels, 2))],
         readers,
         Axes::default().readers_as_columns(owned),
         PipelineOptions::default(),

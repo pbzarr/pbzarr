@@ -4,10 +4,10 @@
 
 mod common;
 
+use pbzarr::Contig;
 use pbzarr::dataset::{Dataset, Reference, ValidationStatus};
 use pbzarr::import::{Config, Source, Target};
 use pbzarr::io::ValueReader as _;
-use pbzarr::{Contig, Genome};
 use pbzarr_readers::{BedImportOptions, BigWigReader, from_bed_matrix, from_bigwig};
 use tempfile::TempDir;
 
@@ -100,7 +100,7 @@ fn bed_wide_track_imports_into_a_dataset() {
     from_bed_matrix(
         &mut dataset,
         &[Source::new(bed)],
-        Genome::new(contigs).unwrap(),
+        Reference::new(contigs).unwrap(),
         &BedImportOptions {
             track: Some("stats".to_owned()),
             ..BedImportOptions::default()
@@ -156,7 +156,7 @@ fn headered_bed_appends_into_its_track() {
     from_bed_matrix(
         &mut dataset,
         &[Source::labeled(a, "s0")],
-        Genome::new(contigs.clone()).unwrap(),
+        Reference::new(contigs.clone()).unwrap(),
         &BedImportOptions::default(),
         config(),
     )
@@ -166,7 +166,7 @@ fn headered_bed_appends_into_its_track() {
     from_bed_matrix(
         Target::Append(&mut dataset),
         &[Source::labeled(b, "s1")],
-        Genome::new(contigs).unwrap(),
+        Reference::new(contigs).unwrap(),
         &BedImportOptions {
             track: Some("score".to_owned()),
             dtype: Some(pbzarr::io::Dtype::U8),

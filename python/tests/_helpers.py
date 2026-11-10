@@ -75,7 +75,7 @@ def write_bed_bgzip_tabix(dirp: Path, name: str, header: list[str],
 
 
 def write_sizes(dirp: Path, name: str, contigs: list[tuple[str, int]]) -> Path:
-    """Write a 2-column chrom.sizes (accepted by Genome::from_fai)."""
+    """Write a 2-column chrom.sizes (accepted by Reference::from_fai)."""
     p = dirp / f"{name}.sizes"
     p.write_text("".join(f"{c}\t{n}\n" for c, n in contigs))
     return p

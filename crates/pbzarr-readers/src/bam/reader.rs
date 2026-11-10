@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use ndarray::ArrayView1;
 
-use pbzarr::genome::Genome;
+use pbzarr::Reference;
 use pbzarr::io::{
     Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader, WindowSink,
 };
@@ -27,7 +27,7 @@ use super::{DepthFilter, RecordFields};
 struct Shared {
     path: PathBuf,
     reference: Option<PathBuf>,
-    genome: Genome,
+    genome: Reference,
     filter: DepthFilter,
     mode: ImportMode,
     fields: RecordFields,
@@ -207,7 +207,7 @@ fn copy_fields(
 }
 
 impl ValueReader for BamReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.shared.genome
     }
 

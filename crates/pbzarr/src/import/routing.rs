@@ -8,8 +8,8 @@
 use std::ops::Range;
 
 use super::destination::Destination;
+use crate::dataset::Reference;
 use crate::error::{PbzError, Result};
-use crate::genome::Genome;
 use crate::io::error::ReaderError;
 use crate::io::{Dtype, OutputSchema};
 
@@ -49,11 +49,11 @@ pub struct ImportRouting {
 }
 
 impl ImportRouting {
-    /// Derive and validate a routing from the reader schemas and genomes, the
+    /// Derive and validate a routing from the reader schemas and references, the
     /// destination tracks, and the builder's axis statements.
     pub(crate) fn resolve(
         schemas: &[&OutputSchema],
-        genomes: &[&Genome],
+        references: &[&Reference],
         tracks: &[Destination],
         tracks_from: Option<SourceAxis>,
         columns_from: Option<SourceAxis>,
@@ -62,9 +62,9 @@ impl ImportRouting {
         if schemas.is_empty() {
             return Err(PbzError::Metadata("import routing: no readers".into()));
         }
-        if schemas.len() != genomes.len() {
+        if schemas.len() != references.len() {
             return Err(PbzError::Metadata(
-                "import routing: schema/genome count mismatch".into(),
+                "import routing: schema/reference count mismatch".into(),
             ));
         }
         if tracks.is_empty() {
@@ -98,14 +98,12 @@ impl ImportRouting {
             }
         }
 
-        // Genomes must match as ordered contig sequences: the flat position
-        // axis is defined by contig order, so the order-insensitive checksum
-        // cannot stand in for this check.
-        let reference = genomes[0];
-        for (i, genome) in genomes.iter().enumerate().skip(1) {
-            if genome.contigs() != reference.contigs() {
+        // The flat position axis is defined by contig order.
+        let reference = references[0];
+        for (i, other) in references.iter().enumerate().skip(1) {
+            if other.contigs() != reference.contigs() {
                 return Err(PbzError::Metadata(format!(
-                    "import routing: reader {i} genome differs from reader 0 \
+                    "import routing: reader {i} reference differs from reader 0 \
                      (ordered contig sequences must be identical)"
                 )));
             }
@@ -113,7 +111,7 @@ impl ImportRouting {
         for track in tracks {
             if track.reference().contigs() != reference.contigs() {
                 return Err(PbzError::Metadata(format!(
-                    "import routing: track {:?} genome differs from the readers \
+                    "import routing: track {:?} reference differs from the readers \
                      (ordered contig sequences must be identical)",
                     track.name()
                 )));

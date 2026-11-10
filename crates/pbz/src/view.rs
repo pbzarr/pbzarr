@@ -312,9 +312,9 @@ fn export<T: Cell, W: Write>(
 ) -> Result<()> {
     let per_row = measurement.columns_count()? * measurement.dtype().size();
     let batch_rows = (BATCH_TARGET_BYTES / per_row.max(1)).clamp(1, 4 << 20) as u64;
-    let offsets = measurement.genome().offsets();
-    for (id, contig) in measurement.genome().iter() {
-        let base = offsets[id.as_usize()] as u64;
+    let offsets = measurement.reference().offsets();
+    for (id, contig) in measurement.reference().iter() {
+        let base = offsets[id.as_usize()];
         // Open run on this contig: (start, end, values).
         let mut run: Option<(u64, u64, Vec<T>)> = None;
         let mut start = 0u64;

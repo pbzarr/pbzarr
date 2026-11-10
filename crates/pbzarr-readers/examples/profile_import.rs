@@ -14,7 +14,7 @@ use std::time::Instant;
 use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::{Config, Import, PipelineOptions, Source};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, Genome, TrackConfig};
+use pbzarr::{Contig, TrackConfig};
 use pbzarr_readers::from_d4;
 use tempfile::TempDir;
 
@@ -30,7 +30,7 @@ struct Args {
     keep: bool,
     out: Option<PathBuf>,
     /// If set, import using `D4Reader` against this file (replicated `cols` times).
-    /// Genome and `length` come from the d4 header.
+    /// Reference and `length` come from the d4 header.
     d4: Option<PathBuf>,
 }
 
@@ -80,13 +80,13 @@ impl Args {
 /// Pattern defeats trivial compression but is cheap to compute, so the cost
 /// stays on the writer (encode + IO) rather than the reader.
 struct SynthReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     seed: u32,
 }
 
 impl SynthReader {
-    fn new(genome: Genome, seed: u32) -> Self {
+    fn new(genome: Reference, seed: u32) -> Self {
         Self {
             genome,
             schema: OutputSchema::single("depth", Dtype::U32),
@@ -96,7 +96,7 @@ impl SynthReader {
 }
 
 impl ValueReader for SynthReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
 
@@ -140,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("config: {args:?}");
 
     // For --d4 mode, override the synthetic contigs with the d4 file's genome.
-    let (genome, total_length): (Genome, u64) = if let Some(ref d4) = args.d4 {
+    let (genome, total_length): (Reference, u64) = if let Some(ref d4) = args.d4 {
         let r = pbzarr_readers::D4Reader::open(d4)?;
         let g = r.contigs().clone();
         let total: u64 = g.contigs().iter().map(|c| c.length).sum();
@@ -152,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 length: args.length,
             })
             .collect();
-        let g = Genome::new(contigs)?;
+        let g = Reference::new(contigs)?;
         let total: u64 = g.contigs().iter().map(|c| c.length).sum();
         (g, total)
     };
@@ -164,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .unwrap_or_else(|| tmp.path().join("profile.pbz"));
 
-    let mut dataset = Dataset::create(&path, Reference::new(genome.contigs().to_vec())?)?;
+    let mut dataset = Dataset::create(&path, genome.clone())?;
 
     let import_cfg = Config {
         workers: args.workers,

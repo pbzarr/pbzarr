@@ -131,10 +131,10 @@ impl<'t, R: ValueReader> ImportBuilder<'t, R> {
             .iter()
             .map(ValueReader::output_schema)
             .collect();
-        let genomes: Vec<_> = self.readers.iter().map(ValueReader::contigs).collect();
+        let references: Vec<_> = self.readers.iter().map(ValueReader::contigs).collect();
         let routing = ImportRouting::resolve(
             &schemas,
-            &genomes,
+            &references,
             tracks,
             self.tracks_from,
             self.columns_from,

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use noodles_bgzf as bgzf;
 use pbzarr::stat::{StatKind, StatOptions, StatOutput, StatResult, StatValue};
-use pbzarr::{Genome, Region, RegionQuery};
+use pbzarr::{Reference, Region, RegionQuery};
 
 use crate::fmt::write_g;
 
@@ -36,7 +36,7 @@ fn open_bed_reader(path: &Path) -> Result<Box<dyn BufRead>> {
     }
 }
 
-pub(crate) fn load_bed_regions(path: &Path, genome: &Genome) -> Result<Vec<NamedRegion>> {
+pub(crate) fn load_bed_regions(path: &Path, genome: &Reference) -> Result<Vec<NamedRegion>> {
     let reader = open_bed_reader(path)?;
     let mut out = Vec::new();
     for (index, line) in reader.lines().enumerate() {
@@ -69,7 +69,7 @@ pub(crate) fn load_bed_regions(path: &Path, genome: &Genome) -> Result<Vec<Named
             end: Some(end),
         };
         let region = genome
-            .resolve(&query)
+            .region(&query)
             .with_context(|| format!("{} line {lineno}", path.display()))?;
         out.push(NamedRegion {
             chrom: chrom.to_string(),
@@ -106,9 +106,9 @@ pub(crate) fn run_stat(spec: &StatSpec) -> Result<()> {
     let store = crate::view::open_store(&spec.store)?;
     let measurement = crate::view::resolve_measurement(&store, spec.track.as_deref())?;
     let named = match &spec.region {
-        Some(path) => load_bed_regions(path, measurement.genome())?,
+        Some(path) => load_bed_regions(path, measurement.reference())?,
         None => measurement
-            .genome()
+            .reference()
             .iter()
             .map(|(id, contig)| NamedRegion {
                 chrom: contig.name.clone(),
@@ -226,8 +226,8 @@ mod tests {
     use pbzarr::Contig;
     use std::io::Write;
 
-    fn genome() -> Genome {
-        Genome::new(vec![
+    fn genome() -> Reference {
+        Reference::new(vec![
             Contig {
                 name: "chr1".into(),
                 length: 10,
@@ -265,12 +265,12 @@ mod tests {
     }
 
     #[test]
-    fn load_bed_clamps_end_and_reports_line_numbers() {
+    fn load_bed_refuses_end_past_contig_and_reports_line_numbers() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("r.bed");
-        std::fs::write(&path, "chr1\t5\t9999\n").unwrap();
-        let regions = load_bed_regions(&path, &genome()).unwrap();
-        assert_eq!(regions[0].region.end, 10);
+        std::fs::write(&path, "chr1\t5\t11\n").unwrap();
+        let err = load_bed_regions(&path, &genome()).unwrap_err();
+        assert!(format!("{err:#}").contains("outside length 10"), "{err:#}");
 
         std::fs::write(&path, "chr1\t3\t8\nchrX\t0\t5\n").unwrap();
         let err = load_bed_regions(&path, &genome()).unwrap_err();

@@ -3,11 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use pbzarr::Contig;
+use pbzarr::TrackConfig;
 use pbzarr::dataset::{Dataset, Reference};
-use pbzarr::genome::Contig;
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Genome, TrackConfig};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -16,12 +16,12 @@ const EXPECTED_NODES: &[&str] = &["af", "contig_id", "contig_length", "depth", "
 
 #[derive(Clone)]
 struct OneReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
 }
 
 impl ValueReader for OneReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
 
@@ -51,7 +51,7 @@ impl ValueReader for OneReader {
 
 fn import(ds: &mut Dataset, name: &str, cfg: TrackConfig) {
     let reader = OneReader {
-        genome: Genome::new(ds.reference().unwrap().contigs().to_vec()).unwrap(),
+        genome: ds.reference().unwrap().clone(),
         schema: OutputSchema::single("value", cfg.dtype),
     };
     let width = cfg.columns.as_ref().map_or(1, Vec::len);

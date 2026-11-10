@@ -1,26 +1,24 @@
 //! D4-specific import glue. Wires `D4Reader` into the import engine.
 
 use log::{debug, info};
-use pbzarr::Genome;
 use pbzarr::PbzError;
 use pbzarr::Result;
 use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
 use pbzarr::io::Dtype;
-use pbzarr::io::ValueReader as _;
 
 use super::reader::D4Reader;
 
 /// Bulk-import one or more d4 files into a new `int32` track.
 ///
-/// Builds the track's `Genome` from the source headers and sizes the column
-/// axis from the file list. One source with no configured column dimension
-/// yields a scalar track; otherwise the sources form a 2D track whose labels
-/// come from each source's `column_label` (falling back to its file stem).
-/// All sources must share a genome (checked by checksum).
+/// Sizes the column axis from the file list. One source with no configured
+/// column dimension yields a scalar track; otherwise the sources form a 2D
+/// track whose labels come from each source's `column_label` (falling back to
+/// its file stem). All source headers must list the same contigs in the same
+/// order.
 ///
 /// A Dataset keeps its own reference, which the sources must match.
 /// A [`Target::Path`] that does not exist becomes a new store whose
-/// reference is the checked genome of the sources.
+/// reference is the contig list of the sources.
 pub fn from_d4<'t>(
     target: impl Into<Target<'t>>,
     track_name: &str,
@@ -44,7 +42,7 @@ pub fn from_d4<'t>(
         })
         .collect::<Result<_>>()?;
 
-    let genome = shared_genome(&readers, sources)?;
+    crate::check_same_contigs("d4", &readers, sources)?;
     // Several sources, or an explicit column dimension, make a 2D track; a
     // single source with neither stays scalar.
     let labels = (sources.len() > 1 || config.column_dim.is_some())
@@ -60,26 +58,9 @@ pub fn from_d4<'t>(
         axes = axes.readers_as_columns(labels);
     }
     target.into().import(
-        vec![(track_name.to_owned(), genome, track_config)],
+        vec![(track_name.to_owned(), track_config)],
         readers,
         axes,
         options,
     )
-}
-
-/// The genome shared by every source, taken from the first and required to
-/// match the rest by checksum (all files must describe the same reference).
-fn shared_genome(readers: &[D4Reader], sources: &[Source]) -> Result<Genome> {
-    let genome = readers[0].contigs().clone();
-    let checksum = genome.checksum();
-    for (reader, source) in readers.iter().zip(sources).skip(1) {
-        if reader.contigs().checksum() != checksum {
-            return Err(PbzError::Metadata(format!(
-                "d4 import: {} genome differs from {}",
-                source.path.display(),
-                sources[0].path.display()
-            )));
-        }
-    }
-    Ok(genome)
 }

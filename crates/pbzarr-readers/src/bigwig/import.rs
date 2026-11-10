@@ -1,26 +1,24 @@
 //! bigWig-specific import glue. Wires `BigWigReader` into the import engine.
 
 use log::{debug, info};
-use pbzarr::Genome;
 use pbzarr::PbzError;
 use pbzarr::Result;
 use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
 use pbzarr::io::Dtype;
-use pbzarr::io::ValueReader as _;
 
 use super::reader::BigWigReader;
 
 /// Bulk-import one or more bigWig files into a new `float32` track.
 ///
-/// Builds the track's `Genome` from the source headers and sizes the column axis
-/// from the file list. One source with no configured column dimension yields a
-/// scalar track; otherwise the sources form a 2D track whose labels come from
-/// each source's `column_label` (falling back to its file stem). All sources
-/// must share a genome (checked by checksum).
+/// Sizes the column axis from the file list. One source with no configured
+/// column dimension yields a scalar track; otherwise the sources form a 2D
+/// track whose labels come from each source's `column_label` (falling back to
+/// its file stem). All source headers must list the same contigs in the same
+/// order.
 ///
 /// A Dataset keeps its own reference, which the sources must match.
 /// A [`Target::Path`] that does not exist becomes a new store whose
-/// reference is the checked genome of the sources.
+/// reference is the contig list of the sources.
 ///
 /// A bigWig has no value at an uncovered base, so the track takes the `float32`
 /// default fill of `NaN`: gaps read back as missing data, not as zero.
@@ -47,7 +45,7 @@ pub fn from_bigwig<'t>(
         })
         .collect::<Result<_>>()?;
 
-    let genome = shared_genome(&readers, sources)?;
+    crate::check_same_contigs("bigWig", &readers, sources)?;
     // Several sources, or an explicit column dimension, make a 2D track; a
     // single source with neither stays scalar.
     let labels = (sources.len() > 1 || config.column_dim.is_some())
@@ -63,26 +61,9 @@ pub fn from_bigwig<'t>(
         axes = axes.readers_as_columns(labels);
     }
     target.into().import(
-        vec![(track_name.to_owned(), genome, track_config)],
+        vec![(track_name.to_owned(), track_config)],
         readers,
         axes,
         options,
     )
-}
-
-/// The genome shared by every source, taken from the first and required to
-/// match the rest by checksum (all files must describe the same reference).
-fn shared_genome(readers: &[BigWigReader], sources: &[Source]) -> Result<Genome> {
-    let genome = readers[0].contigs().clone();
-    let checksum = genome.checksum();
-    for (reader, source) in readers.iter().zip(sources).skip(1) {
-        if reader.contigs().checksum() != checksum {
-            return Err(PbzError::Metadata(format!(
-                "bigWig import: {} genome differs from {}",
-                source.path.display(),
-                sources[0].path.display()
-            )));
-        }
-    }
-    Ok(genome)
 }

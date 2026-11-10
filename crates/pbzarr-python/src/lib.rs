@@ -8,12 +8,12 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use pbzarr::Contig;
 use pbzarr::ExplicitArraySpec;
 use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::progress::make_sink;
-use pbzarr::import::{Config, Report, Source, reference_genome};
+use pbzarr::import::{Config, Report, Source, store_reference};
 use pbzarr::io::Dtype;
-use pbzarr::{Contig, Genome};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
     OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam as rs_from_bam,
@@ -334,9 +334,9 @@ fn import_bed(
             return Err(PbzError::new_err("bed import: no sources"));
         }
         let genome = genome
-            .map(Genome::from_fai)
+            .map(Reference::from_fai)
             .transpose()
-            .and_then(|genome| reference_genome(Path::new(&store_path), genome))
+            .and_then(|genome| store_reference(Path::new(&store_path), genome))
             .map_err(|e| PbzError::new_err(format!("{e}")))?;
 
         let mut config = Config {

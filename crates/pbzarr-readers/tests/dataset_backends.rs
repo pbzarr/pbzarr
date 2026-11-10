@@ -4,7 +4,7 @@ mod bam_common;
 mod common;
 
 use pbzarr::TrackConfig;
-use pbzarr::dataset::{Dataset, Reference};
+use pbzarr::dataset::Dataset;
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, ValueReader};
 use pbzarr_readers::{BamReader, BigWigReader, DepthFilter, ImportMode};
@@ -21,7 +21,7 @@ fn bigwig_imports_to_root_with_singleton_sample_and_gap_fill() {
         false,
     );
     let reader = BigWigReader::open(&source).unwrap();
-    let reference = Reference::new(reader.contigs().contigs().to_vec()).unwrap();
+    let reference = reader.contigs().clone();
     let path = dir.path().join("signal.pbz");
     let mut ds = Dataset::create(&path, reference).unwrap();
     Import::from_readers(vec![reader])
@@ -58,7 +58,7 @@ fn bam_depth_imports_to_root_with_uncovered_contig_fill() {
         DepthFilter::default(),
     )
     .unwrap();
-    let reference = Reference::new(reader.contigs().contigs().to_vec()).unwrap();
+    let reference = reader.contigs().clone();
     let path = dir.path().join("depth.pbz");
     let mut ds = Dataset::create(&path, reference).unwrap();
     Import::from_readers(vec![reader])
@@ -99,7 +99,7 @@ fn bam_composition_shares_sample_coordinates_across_fields() {
         },
     )
     .unwrap();
-    let reference = Reference::new(reader.contigs().contigs().to_vec()).unwrap();
+    let reference = reader.contigs().clone();
     let configs = reader
         .output_schema()
         .fields

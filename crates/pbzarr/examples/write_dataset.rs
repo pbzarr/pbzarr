@@ -2,7 +2,7 @@
 use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, ExplicitArraySpec, Genome, TrackConfig};
+use pbzarr::{Contig, ExplicitArraySpec, TrackConfig};
 
 #[derive(Clone, Copy)]
 enum Value {
@@ -11,14 +11,14 @@ enum Value {
 }
 #[derive(Clone)]
 struct ConstantReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     value: Value,
 }
 impl ConstantReader {
     fn new(value: Value) -> Self {
         Self {
-            genome: Genome::new(reference().contigs().to_vec()).unwrap(),
+            genome: reference().clone(),
             schema: OutputSchema::single(
                 "value",
                 match value {
@@ -31,7 +31,7 @@ impl ConstantReader {
     }
 }
 impl ValueReader for ConstantReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
     fn output_schema(&self) -> &OutputSchema {

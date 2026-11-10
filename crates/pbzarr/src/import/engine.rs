@@ -1744,9 +1744,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::Contig;
     use crate::TrackConfig;
     use crate::dataset::{Dataset, Reference};
-    use crate::genome::{Contig, Genome};
     use crate::import::{Import, ImportBuilder};
     use crate::io::{OutputSchema, ValueReader};
 
@@ -1755,7 +1755,7 @@ mod tests {
     /// untouched.
     #[derive(Clone)]
     struct SynthReader {
-        genome: Genome,
+        genome: Reference,
         schema: OutputSchema,
         covered: Range<u64>,
         extra: Option<Range<u64>>,
@@ -1763,7 +1763,7 @@ mod tests {
     }
 
     impl SynthReader {
-        fn new(genome: Genome, dtype: Dtype, covered: Range<u64>, base: i64) -> Self {
+        fn new(genome: Reference, dtype: Dtype, covered: Range<u64>, base: i64) -> Self {
             Self {
                 genome,
                 schema: OutputSchema::single("value", dtype),
@@ -1785,7 +1785,7 @@ mod tests {
     }
 
     impl ValueReader for SynthReader {
-        fn contigs(&self) -> &Genome {
+        fn contigs(&self) -> &Reference {
             &self.genome
         }
 
@@ -1857,7 +1857,7 @@ mod tests {
     }
 
     impl<R: ValueReader> ValueReader for ThreadProbe<R> {
-        fn contigs(&self) -> &Genome {
+        fn contigs(&self) -> &Reference {
             self.inner.contigs()
         }
 
@@ -1887,16 +1887,16 @@ mod tests {
         }
     }
 
-    fn one_contig(len: u64) -> Genome {
-        Genome::new(vec![Contig {
+    fn one_contig(len: u64) -> Reference {
+        Reference::new(vec![Contig {
             name: "chr1".into(),
             length: len,
         }])
         .unwrap()
     }
 
-    fn dataset(path: &Path, genome: &Genome) -> Dataset {
-        Dataset::create(path, Reference::new(genome.contigs().to_vec()).unwrap()).unwrap()
+    fn dataset(path: &Path, genome: &Reference) -> Dataset {
+        Dataset::create(path, genome.clone()).unwrap()
     }
 
     /// Import into a new track. A config with columns takes one reader per
@@ -2085,7 +2085,7 @@ mod tests {
     #[test]
     fn span_crossing_contig_boundary_places_both_contigs() {
         let dir = TempDir::new().unwrap();
-        let genome = Genome::new(vec![
+        let genome = Reference::new(vec![
             Contig {
                 name: "chr1".into(),
                 length: 10,
@@ -2181,14 +2181,14 @@ mod tests {
     /// call waits (bounded) for a peer, so serialized decodes stay at 1.
     #[derive(Clone)]
     struct ConcurrencyProbe {
-        genome: Genome,
+        genome: Reference,
         schema: OutputSchema,
         /// `(currently decoding, max observed)`.
         gauge: Arc<(Mutex<(usize, usize)>, Condvar)>,
     }
 
     impl ValueReader for ConcurrencyProbe {
-        fn contigs(&self) -> &Genome {
+        fn contigs(&self) -> &Reference {
             &self.genome
         }
 
@@ -2378,7 +2378,7 @@ mod tests {
 
     /// Counts live forks of one reader so a test can assert the pool cap.
     struct ForkCounter {
-        genome: Genome,
+        genome: Reference,
         schema: OutputSchema,
         live: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
@@ -2391,7 +2391,7 @@ mod tests {
     }
 
     impl ValueReader for ForkCounter {
-        fn contigs(&self) -> &Genome {
+        fn contigs(&self) -> &Reference {
             &self.genome
         }
 

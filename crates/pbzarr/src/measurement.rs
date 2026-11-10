@@ -1,11 +1,10 @@
 //! The read handle that `view` and `stat` use for one track.
 
-use crate::dataset::{Dataset, GenomicAxis, Role, Support, VariableInfo};
+use crate::dataset::{Dataset, GenomicAxis, Reference, Role, Support, VariableInfo};
 use crate::io::{Dtype, Numeric};
-use crate::{Genome, PbzError, Result};
+use crate::{PbzError, Result};
 use ndarray::ArrayD;
 use std::ops::Range;
-use std::sync::Arc;
 
 /// One readable track: a format-0.5 root data variable on the
 /// base-resolution `position` axis, with its metadata resolved once at open.
@@ -13,7 +12,7 @@ pub struct Measurement<'a> {
     dataset: &'a Dataset,
     name: String,
     dims: Vec<String>,
-    genome: Arc<Genome>,
+    reference: &'a Reference,
     dtype: Dtype,
     columns: u64,
     chunk: usize,
@@ -91,12 +90,12 @@ impl<'a> Measurement<'a> {
         dataset.check_scope(name)?;
         let shape = dataset.inner_chunk_shape(name)?;
         let inner = (shape[0], shape.get(1).copied().unwrap_or(1));
-        let genome = Arc::new(Genome::new(dataset.reference()?.contigs().to_vec())?);
+        let reference = dataset.reference()?;
         Ok(Self {
             dataset,
             name: name.to_owned(),
             dims: info.dims.clone(),
-            genome,
+            reference,
             dtype,
             columns: info.shape.get(1).copied().unwrap_or(1),
             chunk,
@@ -108,8 +107,8 @@ impl<'a> Measurement<'a> {
         &self.name
     }
 
-    pub fn genome(&self) -> &Arc<Genome> {
-        &self.genome
+    pub fn reference(&self) -> &'a Reference {
+        self.reference
     }
 
     pub fn dtype(&self) -> Dtype {

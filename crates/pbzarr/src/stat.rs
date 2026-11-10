@@ -5,8 +5,8 @@ use std::str::FromStr;
 
 use rayon::prelude::*;
 
+use crate::Region;
 use crate::error::{PbzError, Result};
-use crate::genome::Region;
 use crate::io::{Dtype, Numeric};
 use crate::measurement::Measurement;
 
@@ -420,12 +420,12 @@ pub fn run(
     options: &StatOptions,
 ) -> Result<StatOutput> {
     let (selected, samples) = resolve_columns(measurement, options)?;
-    let offsets = measurement.genome().offsets();
+    let offsets = measurement.reference().offsets();
     let mut ranges: Vec<FlatRange> = regions
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let base = offsets[r.contig.as_usize()] as u64;
+            let base = offsets[r.contig.as_usize()];
             FlatRange {
                 region_pos: i,
                 lo: base + r.start,
@@ -1049,20 +1049,20 @@ mod tests {
 
     use crate::TrackConfig;
     use crate::dataset::{Dataset, Reference};
-    use crate::genome::{Contig, Genome, Region};
     use crate::import::Import;
     use crate::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
+    use crate::{Contig, Region};
 
     /// Writes runs of `(contig, start, values)`; other positions keep the fill.
     #[derive(Clone)]
     struct RunReader {
-        genome: Genome,
+        genome: Reference,
         schema: OutputSchema,
         runs: Vec<(&'static str, u64, Vec<f64>)>,
     }
 
     impl ValueReader for RunReader {
-        fn contigs(&self) -> &Genome {
+        fn contigs(&self) -> &Reference {
             &self.genome
         }
 
@@ -1106,7 +1106,7 @@ mod tests {
     /// Import one reader per entry of `columns`, as columns when `cfg` has
     /// labels.
     fn import(ds: &mut Dataset, name: &str, cfg: TrackConfig, columns: Vec<Runs>) {
-        let genome = Genome::new(ds.reference().unwrap().contigs().to_vec()).unwrap();
+        let genome = ds.reference().unwrap().clone();
         let readers: Vec<RunReader> = columns
             .into_iter()
             .map(|runs| RunReader {
@@ -1177,7 +1177,7 @@ mod tests {
 
     fn whole(measurement: &Measurement) -> Vec<Region> {
         measurement
-            .genome()
+            .reference()
             .iter()
             .map(|(id, c)| Region {
                 contig: id,
@@ -1339,8 +1339,8 @@ mod tests {
         let ds = fixture(dir.path());
         let measurement = Measurement::root(&ds, "cov").unwrap();
         let region = measurement
-            .genome()
-            .resolve(&"chr1:0-4".parse().unwrap())
+            .reference()
+            .region(&"chr1:0-4".parse().unwrap())
             .unwrap();
         let out = run(
             &measurement,

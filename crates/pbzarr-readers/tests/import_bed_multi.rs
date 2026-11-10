@@ -9,9 +9,9 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use ndarray::Ix2;
+use pbzarr::Contig;
 use pbzarr::RegionQuery;
 use pbzarr::dataset::{Dataset, Reference};
-use pbzarr::genome::{Contig, Genome};
 use pbzarr::import::Config;
 use pbzarr::io::Dtype;
 use pbzarr_readers::{
@@ -22,8 +22,8 @@ use tempfile::TempDir;
 
 use common::{write_bed_bgzip_tabix, write_headerless_bed_bgzip_tabix};
 
-fn genome(cs: &[(&str, u64)]) -> Genome {
-    Genome::new(
+fn genome(cs: &[(&str, u64)]) -> Reference {
+    Reference::new(
         cs.iter()
             .map(|(n, l)| Contig {
                 name: (*n).to_owned(),

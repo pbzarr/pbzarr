@@ -7,7 +7,7 @@
 use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::{Import, PipelineOptions};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ReaderError, ValueReader};
-use pbzarr::{Contig, ExplicitArraySpec, Genome, TrackConfig};
+use pbzarr::{Contig, ExplicitArraySpec, TrackConfig};
 
 const SPEC: &str = r#"{
   "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1048576, 8]}},
@@ -24,13 +24,13 @@ const SPEC: &str = r#"{
 /// Depth-like values that cost a fixed amount of CPU per position to decode.
 #[derive(Clone)]
 struct BusyReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     seed: u64,
 }
 
 impl ValueReader for BusyReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
 
@@ -72,11 +72,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("usage: import_threads <out.pbz> [workers]")?;
     let workers: usize = args.next().map_or(Ok(4), |s| s.parse())?;
     let samples = 16;
-    let genome = Genome::new(vec![Contig {
+    let genome = Reference::new(vec![Contig {
         name: "chr1".into(),
         length: 24_000_000,
     }])?;
-    let mut dataset = Dataset::create(&path, Reference::new(genome.contigs().to_vec())?)?;
+    let mut dataset = Dataset::create(&path, genome.clone())?;
     let config = TrackConfig::new(Dtype::U32)
         .columns((0..samples).map(|i| format!("s{i}")).collect())
         .column_dim("sample")

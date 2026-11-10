@@ -6,7 +6,7 @@
 mod common;
 
 use ndarray::Array1;
-use pbzarr::Genome;
+use pbzarr::Reference;
 use pbzarr::io::{OutputSinkMut, ValueReader};
 use pbzarr_readers::BigWigReader;
 use tempfile::TempDir;
@@ -23,7 +23,7 @@ fn open_reports_contigs_and_schema() {
     );
 
     let reader = BigWigReader::open(&bw).unwrap();
-    let genome: &Genome = reader.contigs();
+    let genome: &Reference = reader.contigs();
 
     assert_eq!(genome.len(), 2);
     let c1 = genome.get(genome.id("chr1").unwrap()).unwrap();
@@ -31,14 +31,6 @@ fn open_reports_contigs_and_schema() {
     assert_eq!(c1.length, 1000);
     assert_eq!(c2.length, 500);
     assert_eq!(reader.output_schema().len(), 1);
-
-    // bigtools does not guarantee chrom order, so compare as a sorted set.
-    let mut contigs = pbzarr_readers::bigwig::contigs(&bw).unwrap();
-    contigs.sort();
-    assert_eq!(
-        contigs,
-        vec![("chr1".to_owned(), 1000u64), ("chr2".to_owned(), 500u64)]
-    );
 
     assert!(BigWigReader::open("/no/such/file.bw").is_err());
 }

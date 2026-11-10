@@ -14,7 +14,7 @@ use log::{debug, info};
 use noodles_bgzf as bgzf;
 use noodles_csi::BinningIndex;
 
-use pbzarr::genome::Genome;
+use pbzarr::Reference;
 use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
 use pbzarr::io::{
     ColumnSinkMut, Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, ValueReader,
@@ -349,7 +349,7 @@ struct MultiShared {
     ref_ids: HashMap<String, usize>,
     columns: Vec<(Option<usize>, Dtype, Option<String>)>,
     schema: OutputSchema,
-    genome: Genome,
+    genome: Reference,
 }
 
 /// Multi-column BED reader. One tabix seek per region; each line's cells are
@@ -368,7 +368,7 @@ impl BedMultiReader {
     pub fn open<P: AsRef<Path>>(
         bed_gz: P,
         columns: Vec<(Option<usize>, Dtype, Option<String>)>,
-        genome: Genome,
+        genome: Reference,
     ) -> IoResult<Self> {
         let path = bed_gz.as_ref().to_path_buf();
         let tbi = PathBuf::from(format!("{}.tbi", path.display()));
@@ -545,7 +545,7 @@ fn column_sink<'a>(output: &'a mut OutputSinkMut<'_>) -> ColumnSinkMut<'a> {
 }
 
 impl ValueReader for BedMultiReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.shared.genome
     }
 
@@ -598,7 +598,7 @@ impl ValueReader for BedMultiReader {
 pub fn execute_bed_schema_plan<'t>(
     target: impl Into<Target<'t>>,
     plan: BedSchemaPlan,
-    genome: Genome,
+    genome: Reference,
     config: Config,
 ) -> Result<Report> {
     if config.column_dim != plan.column_dim {
@@ -637,7 +637,7 @@ pub fn execute_bed_schema_plan<'t>(
                     if let Some(description) = &column.description {
                         track_config = track_config.description(description.clone());
                     }
-                    (column.track_name.clone(), genome.clone(), track_config)
+                    (column.track_name.clone(), track_config)
                 })
                 .collect();
             let reader_columns = resolved
@@ -682,7 +682,7 @@ pub fn execute_bed_schema_plan<'t>(
                 })?;
             let options = pipeline_options(&config);
             target.import(
-                vec![(track_name, genome, track_config)],
+                vec![(track_name, track_config)],
                 vec![reader],
                 Axes::default().fields_as_columns(column_labels),
                 options,
@@ -700,7 +700,7 @@ pub fn execute_bed_schema_plan<'t>(
 pub fn from_bed_matrix<'t>(
     target: impl Into<Target<'t>>,
     sources: &[pbzarr::import::Source],
-    genome: Genome,
+    genome: Reference,
     options: &BedImportOptions,
     config: Config,
 ) -> Result<Report> {
@@ -741,13 +741,7 @@ pub fn from_bed_matrix<'t>(
                 "sample",
             );
             let readers = open_readers(sources, &[(column, dtype, None)], &genome)?;
-            run_field_tracks(
-                target,
-                vec![(track, genome, cfg)],
-                readers,
-                column_labels,
-                &config,
-            )
+            run_field_tracks(target, vec![(track, cfg)], readers, column_labels, &config)
         }
         ResolvedImport::Wide {
             track,
@@ -772,7 +766,7 @@ pub fn from_bed_matrix<'t>(
                 .map_err(|e| PbzError::Store(format!("open {}: {e}", sources[0].path.display())))?;
             let options = pipeline_options(&config);
             target.import(
-                vec![(track, genome, cfg)],
+                vec![(track, cfg)],
                 vec![reader],
                 Axes::default().fields_as_columns(column_labels),
                 options,
@@ -794,7 +788,7 @@ pub fn from_bed_matrix<'t>(
                         column_labels,
                         "sample",
                     );
-                    (field.name.clone(), genome.clone(), cfg)
+                    (field.name.clone(), cfg)
                 })
                 .collect();
             let reader_columns: Vec<(Option<usize>, Dtype, Option<String>)> = columns
@@ -812,7 +806,7 @@ pub fn from_bed_matrix<'t>(
 fn open_readers(
     sources: &[pbzarr::import::Source],
     columns: &[(Option<usize>, Dtype, Option<String>)],
-    genome: &Genome,
+    genome: &Reference,
 ) -> Result<Vec<BedMultiReader>> {
     sources
         .iter()
@@ -833,7 +827,7 @@ fn pipeline_options(config: &Config) -> PipelineOptions {
 
 fn run_field_tracks(
     target: Target<'_>,
-    specs: Vec<(String, Genome, TrackConfig)>,
+    specs: Vec<(String, TrackConfig)>,
     readers: Vec<BedMultiReader>,
     // `Some` labels put the sources on the column axis; `None` keeps the
     // tracks rank-1. Source count alone cannot decide: one source with an

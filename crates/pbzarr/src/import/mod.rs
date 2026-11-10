@@ -19,4 +19,4 @@ pub use config::{Config, ProgressSink, Report};
 pub use engine::PipelineOptions;
 pub use routing::{ImportRouting, SourceAxis, TrackTarget};
 pub use source::Source;
-pub use target::{Axes, Target, reference_genome};
+pub use target::{Axes, Target, store_reference};

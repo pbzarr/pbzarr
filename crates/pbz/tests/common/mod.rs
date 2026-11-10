@@ -12,10 +12,10 @@ use noodles_tabix as tabix;
 use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, Genome, TrackConfig};
+use pbzarr::{Contig, TrackConfig};
 
-fn genome() -> Genome {
-    Genome::new(vec![
+fn genome() -> Reference {
+    Reference::new(vec![
         Contig {
             name: "chr1".into(),
             length: 10,
@@ -95,7 +95,7 @@ enum Column {
 /// Serves one pre-built value per position, per contig in genome order.
 #[derive(Clone)]
 struct ColumnReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     column: Column,
 }
@@ -115,7 +115,7 @@ impl ColumnReader {
 }
 
 impl ValueReader for ColumnReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
     fn output_schema(&self) -> &OutputSchema {
@@ -149,7 +149,7 @@ impl ValueReader for ColumnReader {
 #[allow(dead_code)]
 pub fn build_store(dir: &Path) -> PathBuf {
     let path = dir.join("store.pbz");
-    let reference = Reference::new(genome().contigs().to_vec()).unwrap();
+    let reference = genome().clone();
     let mut dataset = Dataset::create(&path, reference).unwrap();
     let depth = Column::Ints(vec![vec![5, 5, 5, 7, 7, 0, 0, 0, 0, 0], vec![0; 6]]);
     Import::from_readers(vec![ColumnReader::new(depth)])

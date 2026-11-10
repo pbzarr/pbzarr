@@ -1,22 +1,22 @@
 use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::{Import, PipelineOptions};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, Genome, TrackConfig};
+use pbzarr::{Contig, TrackConfig};
 use tempfile::TempDir;
 
-fn dataset(path: &std::path::Path, genome: &Genome) -> Dataset {
-    Dataset::create(path, Reference::new(genome.contigs().to_vec()).unwrap()).unwrap()
+fn dataset(path: &std::path::Path, genome: &Reference) -> Dataset {
+    Dataset::create(path, genome.clone()).unwrap()
 }
 
 /// A reader that fills every position with a constant value.
 struct ConstReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     val: u32,
 }
 
 impl ConstReader {
-    fn new(genome: Genome, val: u32) -> Self {
+    fn new(genome: Reference, val: u32) -> Self {
         Self {
             genome,
             schema: OutputSchema::single("value", Dtype::U32),
@@ -26,7 +26,7 @@ impl ConstReader {
 }
 
 impl ValueReader for ConstReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
 
@@ -54,7 +54,7 @@ impl ValueReader for ConstReader {
 fn pipeline_writes_constants_into_cohort_track() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("t.pbz");
-    let genome = Genome::new(vec![
+    let genome = Reference::new(vec![
         Contig {
             name: "chr1".into(),
             length: 5_000,
@@ -102,7 +102,7 @@ fn pipeline_writes_constants_into_cohort_track() {
 fn cohort_pipeline_tiles_columns_with_multiple_workers() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("tiled.pbz");
-    let genome = Genome::new(vec![Contig {
+    let genome = Reference::new(vec![Contig {
         name: "chr1".into(),
         length: 8,
     }])
@@ -144,12 +144,12 @@ fn cohort_pipeline_tiles_columns_with_multiple_workers() {
 /// read-back reveals whether a span handed the reader the right contig name and
 /// local range.
 struct RampReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
 }
 
 impl RampReader {
-    fn new(genome: Genome) -> Self {
+    fn new(genome: Reference) -> Self {
         Self {
             genome,
             schema: OutputSchema::single("value", Dtype::U32),
@@ -158,7 +158,7 @@ impl RampReader {
 }
 
 impl ValueReader for RampReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
 
@@ -195,7 +195,7 @@ impl ValueReader for RampReader {
 fn pipeline_span_straddling_contig_boundary_maps_local_coords() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("r.pbz");
-    let genome = Genome::new(vec![
+    let genome = Reference::new(vec![
         Contig {
             name: "chr1".into(),
             length: 2_000,

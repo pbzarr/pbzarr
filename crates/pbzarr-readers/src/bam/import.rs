@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 
 use log::{debug, info, warn};
-use pbzarr::Genome;
 use pbzarr::PbzError;
 use pbzarr::Result;
 use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
@@ -21,8 +20,8 @@ use super::{DepthFilter, OverlapMode};
 /// per [`FIELDS`] entry: index 0 (`"depth"`) keeps the bare `track_name`, the
 /// rest are named `"{track_name}_{field}"` (e.g. `"{track_name}_ins"`).
 ///
-/// Every source's `Genome` is built from its own header and must
-/// checksum-match the rest (mirrors `from_d4`/`from_bigwig`). CRAM sources
+/// Every source header must list the same contigs in the same order
+/// (as in `from_d4` and `from_bigwig`). CRAM sources
 /// need `reference`; BAM sources ignore it. One source with no configured
 /// column dimension yields scalar tracks; otherwise the sources become the
 /// columns of cohort tracks, whose dimension name comes from
@@ -30,7 +29,7 @@ use super::{DepthFilter, OverlapMode};
 ///
 /// A Dataset keeps its own reference, which the sources must match.
 /// A [`Target::Path`] that does not exist becomes a new store whose
-/// reference is the checked genome of the sources.
+/// reference is the contig list of the sources.
 pub fn from_bam<'t>(
     target: impl Into<Target<'t>>,
     track_name: &str,
@@ -120,12 +119,15 @@ pub fn from_bam<'t>(
         })
         .collect();
 
-    let genome = shared_genome(&readers, sources)?;
-    debug!(
-        "bam import genome: {} contig(s), {} positions",
-        genome.contigs().len(),
-        genome.contigs().iter().map(|c| c.length).sum::<u64>()
-    );
+    crate::check_same_contigs("bam", &readers, sources)?;
+    if let Some(reader) = readers.first() {
+        let reference = reader.contigs();
+        debug!(
+            "bam import reference: {} contig(s), {} positions",
+            reference.len(),
+            reference.contigs().iter().map(|c| c.length).sum::<u64>()
+        );
+    }
 
     let names = track_names(track_name, mode);
     info!("bam import writes track(s) {names:?}");
@@ -150,7 +152,7 @@ pub fn from_bam<'t>(
                 )
                 .description(describe_track(name, track_name, &filter))
                 .source(source_paths.clone());
-            (name.clone(), genome.clone(), cfg)
+            (name.clone(), cfg)
         })
         .collect();
 
@@ -167,27 +169,6 @@ pub fn from_bam<'t>(
         axes = axes.readers_as_columns(labels);
     }
     target.into().import(specs, readers, axes, options)
-}
-
-/// The genome shared by every source, taken from the first and required to
-/// match the rest by checksum (all files must describe the same reference).
-fn shared_genome(readers: &[BamReader], sources: &[Source]) -> Result<Genome> {
-    let genome = readers
-        .first()
-        .ok_or_else(|| PbzError::Metadata("bam import: no readers to derive a genome from".into()))?
-        .contigs()
-        .clone();
-    let checksum = genome.checksum();
-    for (reader, source) in readers.iter().zip(sources).skip(1) {
-        if reader.contigs().checksum() != checksum {
-            return Err(PbzError::Metadata(format!(
-                "bam import: {} genome differs from {}",
-                source.path.display(),
-                sources[0].path.display()
-            )));
-        }
-    }
-    Ok(genome)
 }
 
 /// Spec-required `description`: field name plus the filter settings that

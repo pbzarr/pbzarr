@@ -4,8 +4,8 @@
 mod common;
 
 use pbzarr::dataset::Dataset;
-use pbzarr::genome::{Contig, Genome};
 use pbzarr::import::{Config, Source};
+use pbzarr::{Contig, Reference};
 use pbzarr_readers::{BedImportOptions, from_bed_matrix};
 use tempfile::TempDir;
 
@@ -27,7 +27,7 @@ fn single_column_selection_imports_a_scalar_track() {
     from_bed_matrix(
         store.as_path(),
         &[Source::labeled(bed, "s1")],
-        Genome::new(vec![Contig {
+        Reference::new(vec![Contig {
             name: "chr1".into(),
             length: 60,
         }])

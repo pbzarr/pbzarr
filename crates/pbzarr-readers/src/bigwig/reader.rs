@@ -12,28 +12,12 @@ use std::sync::Arc;
 use bigtools::BigWigRead;
 use bigtools::utils::file::reopen::ReopenableFile;
 
-use pbzarr::genome::{Contig, Genome};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader};
-
-/// Read a bigWig file's contig list from its header.
-///
-/// Returns `(name, length)` pairs in the file's chrom order. Used by the Python
-/// `PbzStore.from_bigwig` constructor to size a store directly from the source,
-/// so callers do not need pybigtools.
-pub fn contigs<P: AsRef<Path>>(src: P) -> Result<Vec<(String, u64)>> {
-    let path = src.as_ref();
-    let reader = BigWigRead::open_file(path)
-        .map_err(|e| ReaderError::Other(anyhow::anyhow!("open {}: {e}", path.display())))?;
-    Ok(reader
-        .chroms()
-        .iter()
-        .map(|c| (c.name.clone(), c.length as u64))
-        .collect())
-}
+use pbzarr::{Contig, Reference};
 
 struct Shared {
     path: PathBuf,
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
 }
 
@@ -45,7 +29,7 @@ pub struct BigWigReader {
 }
 
 impl BigWigReader {
-    /// Open a bigWig file. Reads the header to build the canonical `Genome`.
+    /// Open a bigWig file. The header gives the contig list.
     pub fn open<P: AsRef<Path>>(src: P) -> Result<Self> {
         let path = src.as_ref().to_path_buf();
         let inner = BigWigRead::open_file(&path)
@@ -59,7 +43,7 @@ impl BigWigReader {
                 length: c.length as u64,
             })
             .collect();
-        let genome = Genome::new(contigs).map_err(|e| {
+        let genome = Reference::new(contigs).map_err(|e| {
             ReaderError::Other(anyhow::anyhow!(
                 "invalid contig list in {}: {e}",
                 path.display(),
@@ -101,8 +85,7 @@ fn decode_region(
         return Ok(());
     }
 
-    // Resolve the name in the bigWig's own genome; the caller's ContigId
-    // (if it had one) belongs to a different namespace.
+    // Look up the name in the bigWig's own contig list.
     if shared.genome.id(contig_name).is_none() {
         return Err(ReaderError::ContigNotFound {
             path: shared.path.clone(),
@@ -143,7 +126,7 @@ fn decode_region(
 }
 
 impl ValueReader for BigWigReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.shared.genome
     }
 

@@ -11,7 +11,7 @@ use super::engine::PipelineOptions;
 use super::routing::SourceAxis;
 use crate::dataset::{Dataset, DatasetPlan, Reference};
 use crate::io::ValueReader;
-use crate::{Contig, Genome, PbzError, Result, TrackConfig};
+use crate::{Contig, PbzError, Result, TrackConfig};
 
 /// A destination for one import run.
 ///
@@ -27,8 +27,7 @@ pub enum Target<'a> {
     /// path, so every format entry point appends without knowing about it.
     Append(&'a mut Dataset),
     /// A store path. When the path does not exist, the import creates a
-    /// format-0.5 store whose reference is the genome of the checked
-    /// sources. When it exists, the import adds new tracks to that store.
+    /// format-0.5 store whose reference is the contig list of the sources. When it exists, the import adds new tracks to that store.
     Path(&'a Path),
 }
 
@@ -95,7 +94,7 @@ impl Target<'_> {
     /// Create `specs` at this destination and populate them from `readers`.
     pub fn import<R: ValueReader>(
         self,
-        specs: Vec<(String, Genome, TrackConfig)>,
+        specs: Vec<(String, TrackConfig)>,
         readers: Vec<R>,
         axes: Axes,
         options: PipelineOptions,
@@ -120,7 +119,7 @@ impl Target<'_> {
     /// goes stale; nothing detects or marks that.
     pub fn append<R: ValueReader>(
         self,
-        specs: Vec<(String, Genome, TrackConfig)>,
+        specs: Vec<(String, TrackConfig)>,
         readers: Vec<R>,
         axes: Axes,
         options: PipelineOptions,
@@ -145,12 +144,11 @@ impl Target<'_> {
 }
 
 /// Import into the store at `path`, or into a new store there. A new store
-/// takes its reference from the first spec, whose genome the format entry
-/// point has already checked against every source. A failed import into a
-/// new store removes that store.
+/// takes its reference from the first source. A failed import into a new
+/// store removes that store.
 fn import_at<R: ValueReader>(
     path: &Path,
-    specs: Vec<(String, Genome, TrackConfig)>,
+    specs: Vec<(String, TrackConfig)>,
     readers: Vec<R>,
     axes: Axes,
     options: PipelineOptions,
@@ -160,10 +158,11 @@ fn import_at<R: ValueReader>(
         let mut dataset = Dataset::open(path)?;
         return Target::Dataset(&mut dataset).import(specs, readers, axes, options);
     }
-    let (_, genome, _) = specs
+    let reference = readers
         .first()
-        .ok_or_else(|| PbzError::Metadata("import: no destination tracks".into()))?;
-    let reference = Reference::new(genome.contigs().to_vec())?;
+        .ok_or_else(|| PbzError::Metadata("import: no sources".into()))?
+        .contigs()
+        .clone();
     debug!("creating store {}", path.display());
     let mut dataset = Dataset::create(path, reference)?;
     let report = Target::Dataset(&mut dataset).import(specs, readers, axes, options);
@@ -180,7 +179,7 @@ fn import_at<R: ValueReader>(
 /// lengths, such as BED. An existing store gives its own reference, and a
 /// `genome` given with it must match that reference. A new store needs
 /// `genome`.
-pub fn reference_genome(path: &Path, genome: Option<Genome>) -> Result<Genome> {
+pub fn store_reference(path: &Path, genome: Option<Reference>) -> Result<Reference> {
     if !path.exists() {
         return genome.ok_or_else(|| {
             PbzError::Metadata(format!(
@@ -190,41 +189,32 @@ pub fn reference_genome(path: &Path, genome: Option<Genome>) -> Result<Genome> {
         });
     }
     let dataset = Dataset::open(path)?;
-    let store = dataset.reference()?.contigs().to_vec();
+    let store = dataset.reference()?;
     if let Some(genome) = &genome {
-        same_reference(genome.contigs(), &store)?;
+        same_reference(genome.contigs(), store.contigs())?;
     }
-    Genome::new(store)
+    Ok(store.clone())
 }
 
 fn dataset_run<R: ValueReader>(
     dataset: &mut Dataset,
-    specs: Vec<(String, Genome, TrackConfig)>,
+    specs: Vec<(String, TrackConfig)>,
     readers: Vec<R>,
     axes: Axes,
     options: PipelineOptions,
     plan: DatasetPlan,
 ) -> Result<Report> {
-    if plan == DatasetPlan::Append {
-        let reference = dataset.reference()?.contigs().to_vec();
-        for (_, genome, _) in &specs {
-            same_reference(genome.contigs(), &reference)?;
-        }
+    let store = dataset.reference()?;
+    for reader in &readers {
+        same_reference(reader.contigs().contigs(), store.contigs())?;
     }
-    // A Dataset fixes its reference at creation, so the per-spec genome is
-    // dropped here; routing checks every reader against the reference before
-    // the run writes anything.
-    let specs = specs
-        .into_iter()
-        .map(|(name, _, cfg)| (name, cfg))
-        .collect();
     axes.apply(Import::from_readers(readers)?.into_dataset_plan(dataset, specs, plan))
         .options(options)
         .run()
 }
 
-/// An append reads the store's own geometry, so the source must describe the
-/// same reference in the same order.
+/// The store fixes the position axis, so every source must describe the
+/// same contigs in the same order.
 fn same_reference(source: &[Contig], store: &[Contig]) -> Result<()> {
     if source == store {
         return Ok(());

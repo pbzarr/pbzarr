@@ -8,7 +8,7 @@ pub use metadata::{
     Role, Support, ValidationIssue, ValidationReport, ValidationStatus, VariableInfo,
 };
 pub(crate) use read::float_fill;
-pub use reference::{BinInterval, GenomicAxis, Reference};
+pub use reference::{BinInterval, Contig, ContigId, GenomicAxis, Reference, Region};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

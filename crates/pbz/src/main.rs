@@ -10,9 +10,9 @@ use log::{LevelFilter, debug, info};
 use pbzarr::dataset::Dataset;
 use pbzarr::import::Config;
 use pbzarr::import::progress::{self, make_sink};
-use pbzarr::import::{Target, reference_genome};
+use pbzarr::import::{Target, store_reference};
 use pbzarr::io::Dtype;
-use pbzarr::{ExplicitArraySpec, Genome};
+use pbzarr::{ExplicitArraySpec, Reference};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
     OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam, from_bed_matrix,
@@ -747,10 +747,10 @@ fn import_bed(args: BedArgs) -> Result<()> {
         .genome
         .as_deref()
         .map(|path| {
-            Genome::from_fai(path).with_context(|| format!("read genome {}", path.display()))
+            Reference::from_fai(path).with_context(|| format!("read genome {}", path.display()))
         })
         .transpose()?;
-    let genome = reference_genome(&output, genome)?;
+    let genome = store_reference(&output, genome)?;
     info!("genome: {} contig(s)", genome.contigs().len());
     let label = args
         .bed
@@ -1009,7 +1009,7 @@ fn append_bed(args: AppendBedArgs) -> Result<()> {
     init_logging(&args.global);
     let sources = append_sources(&args.target.input)?;
     let (mut dataset, dim) = open_append(&args.target.output, &args.target.track)?;
-    let genome = Genome::new(dataset.reference()?.contigs().to_vec())?;
+    let genome = dataset.reference()?.clone();
     let dtype = Dtype::from_str(
         dataset.variables()[&args.target.track].metadata["data_type"]
             .as_str()

@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use ndarray::Array1;
-use pbzarr::Genome;
+use pbzarr::Reference;
 use pbzarr::io::{OutputSinkMut, ValueReader};
 use pbzarr_readers::D4Reader;
 
@@ -21,7 +21,7 @@ fn open_reports_contigs_and_schema() {
     let d4 = fixture("two_contig_const7.d4");
 
     let reader = D4Reader::open(&d4).unwrap();
-    let genome: &Genome = reader.contigs();
+    let genome: &Reference = reader.contigs();
 
     assert_eq!(genome.len(), 2);
     let c1 = genome.get(genome.id("chr1").unwrap()).unwrap();
@@ -29,12 +29,6 @@ fn open_reports_contigs_and_schema() {
     assert_eq!(c1.length, 1000);
     assert_eq!(c2.length, 500);
     assert_eq!(reader.output_schema().len(), 1);
-
-    let contigs = pbzarr_readers::d4::contigs(&d4).unwrap();
-    assert_eq!(
-        contigs,
-        vec![("chr1".to_owned(), 1000u64), ("chr2".to_owned(), 500u64)]
-    );
 
     assert!(D4Reader::open("/no/such/file.d4").is_err());
 }

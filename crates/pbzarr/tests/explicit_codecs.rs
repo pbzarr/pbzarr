@@ -2,7 +2,7 @@ use ndarray::Array2;
 use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, ExplicitArraySpec, Genome, TrackConfig};
+use pbzarr::{Contig, ExplicitArraySpec, TrackConfig};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -10,14 +10,14 @@ use tempfile::TempDir;
 /// `p * width + column`.
 #[derive(Clone)]
 struct GridReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     column: u64,
     width: u64,
 }
 
 impl ValueReader for GridReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
 
@@ -50,8 +50,8 @@ impl ValueReader for GridReader {
     }
 }
 
-fn genome(len: u64) -> Genome {
-    Genome::new(vec![Contig {
+fn genome(len: u64) -> Reference {
+    Reference::new(vec![Contig {
         name: "chr1".into(),
         length: len,
     }])
@@ -62,7 +62,7 @@ fn genome(len: u64) -> Genome {
 fn import(path: &std::path::Path, len: u64, cfg: TrackConfig) -> pbzarr::Result<Dataset> {
     let genome = genome(len);
     let width = cfg.columns.as_ref().map_or(1, |c| c.len() as u64);
-    let mut ds = Dataset::create(path, Reference::new(genome.contigs().to_vec())?)?;
+    let mut ds = Dataset::create(path, genome.clone())?;
     let readers = (0..width)
         .map(|column| GridReader {
             genome: genome.clone(),

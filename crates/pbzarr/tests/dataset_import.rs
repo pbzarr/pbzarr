@@ -82,13 +82,13 @@ fn creation_rejects_occupied_namespaces_without_writing() {
 
 use pbzarr::import::{Import, PipelineOptions};
 use pbzarr::io::{Dtype, OutputField, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{ExplicitArraySpec, Genome, TrackConfig};
+use pbzarr::{ExplicitArraySpec, TrackConfig};
 use std::sync::Mutex;
 use zarrs::storage::storage_adapter::usage_log::UsageLogStorageAdapter;
 
 #[derive(Clone)]
 struct ConstReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     values: Vec<u32>,
 }
@@ -105,14 +105,14 @@ impl ConstReader {
                 .collect(),
         );
         Self {
-            genome: Genome::new(reference().contigs().to_vec()).unwrap(),
+            genome: reference().clone(),
             schema,
             values,
         }
     }
 }
 impl ValueReader for ConstReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
     fn output_schema(&self) -> &OutputSchema {
@@ -298,7 +298,7 @@ fn invalid_imports_fail_before_any_mutation() {
         let mut cfg = TrackConfig::new(Dtype::U32).chunk_size(4);
         let mut name = "depth".to_string();
         match case {
-            "reference" => { let mut contigs = reference().contigs().to_vec(); contigs.reverse(); reader.genome = Genome::new(contigs).unwrap(); }
+            "reference" => { let mut contigs = reference().contigs().to_vec(); contigs.reverse(); reader.genome = Reference::new(contigs).unwrap(); }
             "dtype" => cfg.dtype = Dtype::I32,
             "shard-shape" => cfg = cfg.shard_size(6).columns(vec!["S1".into()]).column_dim("sample"),
             "duplicate-label" => cfg = cfg.columns(vec!["S1".into(), "S1".into()]),
@@ -464,12 +464,12 @@ fn a_sharded_cohort_shards_one_column_chunk_at_any_width() {
 
 #[derive(Clone)]
 struct PositionReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     column: u32,
 }
 impl ValueReader for PositionReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
     fn output_schema(&self) -> &OutputSchema {
@@ -498,7 +498,7 @@ fn read_region_selects_contig_rows_at_full_width() {
     let (mut ds, _, _) = traced_dataset();
     let readers: Vec<PositionReader> = (0..2)
         .map(|column| PositionReader {
-            genome: Genome::new(reference().contigs().to_vec()).unwrap(),
+            genome: reference().clone(),
             schema: OutputSchema::new(vec![OutputField {
                 name: None,
                 dtype: Dtype::U32,

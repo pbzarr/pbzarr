@@ -20,3 +20,28 @@ pub use bed::{
 pub use bigwig::{BigWigReader, from_bigwig};
 pub use d4::{D4Reader, from_d4};
 pub use pbzarr::import::Source;
+
+use pbzarr::io::ValueReader;
+use pbzarr::{PbzError, Result};
+
+/// Every source must list the same contig names and lengths in the same
+/// order as the first source.
+pub(crate) fn check_same_contigs<R: ValueReader>(
+    format: &str,
+    readers: &[R],
+    sources: &[Source],
+) -> Result<()> {
+    let Some(first) = readers.first() else {
+        return Ok(());
+    };
+    for (reader, source) in readers.iter().zip(sources).skip(1) {
+        if reader.contigs().contigs() != first.contigs().contigs() {
+            return Err(PbzError::Metadata(format!(
+                "{format} import: the contigs of {} differ from {} (names and lengths must match in order)",
+                source.path.display(),
+                sources[0].path.display()
+            )));
+        }
+    }
+    Ok(())
+}
