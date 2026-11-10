@@ -328,7 +328,7 @@ impl Dataset {
                     width,
                     "column",
                 )?;
-                if !width.is_multiple_of(col_chunk) {
+                if self.zip.is_none() && !width.is_multiple_of(col_chunk) {
                     log::warn!(
                         "import: track {name:?} is {width} column(s) wide, which is not a \
                          multiple of its column chunk {col_chunk}; this store cannot be \

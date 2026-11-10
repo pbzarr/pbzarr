@@ -176,6 +176,8 @@ pbz view cohort.pbz --track signal -r chr1:0-1000000 -r chr2:500-900
 
 `pbz view` and `pbz stat` write to stdout when you do not give `-o`. When the store has one track, `--track` is optional.
 
+`pbz view` and `pbz stat` read a track only when `position` is its first dimension and it has at most one other dimension. They do not read tracks on a `bin_N` dimension. A track that declares missing values with `_FillValue` must be a float track with a `NaN` fill. Use Python for the other shapes.
+
 Show the layout of a store:
 
 ```sh
@@ -201,7 +203,7 @@ Import into a single zip file:
 pbz import d4 cohort.pbz.zip s1.d4 s2.d4 --track depth --zip
 ```
 
-A store path that ends in `.zip` also writes a zip store, so `--zip` is optional here. The store path must not exist. The import writes a temporary file beside the store path and renames it at the end, so a failed import leaves no file.
+A store path that ends in `.zip` (in any case) also writes a zip store, so `--zip` is optional here. The store path must not exist. The import writes a temporary file beside the store path and renames it at the end, so a failed import leaves no file.
 
 A zip store is written once. `pbz import` cannot add tracks to it, and `pbz append` refuses it. Without a shard flag or `--codecs`, each shard holds 64 position chunks and all columns. An import refuses `--codecs` without a `sharding_indexed` codec. `pbz view`, `pbz stat`, `pbz info`, and `pbz validate` read zip stores.
 

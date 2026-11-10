@@ -18,7 +18,7 @@ pub(crate) struct StatSpec {
     pub track: Option<String>,
     pub regions: Vec<RegionQuery>,
     pub regions_file: Option<PathBuf>,
-    pub stat: String,
+    pub stat: StatKind,
     pub columns: Vec<String>,
     pub output: Option<PathBuf>,
     pub no_header: bool,
@@ -30,7 +30,7 @@ pub(crate) fn run_stat(spec: &StatSpec) -> Result<()> {
     if !(1..=17).contains(&spec.precision) {
         bail!("--precision must be between 1 and 17 significant digits");
     }
-    let kind: StatKind = spec.stat.parse().map_err(anyhow::Error::new)?;
+    let kind = spec.stat;
     // One rayon pool serves zarrs chunk decode, stat batches, and BGZF.
     if let Some(threads) = spec.threads {
         rayon::ThreadPoolBuilder::new()

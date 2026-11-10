@@ -38,3 +38,19 @@ fn validate_exits_one_when_the_reference_is_broken() {
     assert!(text.contains("missing root array contig_length"), "{text}");
     assert!(!text.contains("R2"), "{text}");
 }
+
+#[test]
+fn a_missing_store_gives_a_plain_error() {
+    let dir = TempDir::new().unwrap();
+    let missing = dir.path().join("typo.pbz");
+    for command in ["view", "stat", "info", "validate"] {
+        let output = run_pbz([command.into(), missing.clone().into_os_string()]);
+        assert!(!output.status.success());
+        let text = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            text.contains("typo.pbz does not exist"),
+            "{command}: {text}"
+        );
+        assert!(!text.contains("R1"), "{command}: {text}");
+    }
+}

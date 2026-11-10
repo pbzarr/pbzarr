@@ -25,19 +25,9 @@ fn check(path: &std::path::Path) -> anyhow::Result<Value> {
         Err(PbzError::LegacyFormat) => {
             return Ok(json!({"status":"unsupported_version","version":"0.4"}));
         }
-        Err(PbzError::InvalidStore(message)) => {
+        Err(PbzError::InvalidStore(message) | PbzError::Metadata(message)) => {
             return Ok(
                 json!({"status":"invalid","issues":[{"array":null,"rule":"R1","message":message}]}),
-            );
-        }
-        Err(PbzError::Metadata(message)) => {
-            let rule = message
-                .split(':')
-                .next()
-                .filter(|r| r.len() == 2)
-                .unwrap_or("R1");
-            return Ok(
-                json!({"status":"invalid","issues":[{"array":null,"rule":rule,"message":message}]}),
             );
         }
         Err(e) => return Err(e.into()),

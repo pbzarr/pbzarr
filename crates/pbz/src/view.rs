@@ -103,7 +103,15 @@ pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
 }
 
 pub(crate) fn open_store(path: &Path) -> Result<Dataset> {
+    require_store(path)?;
     Dataset::open_read_only(path).with_context(|| format!("open store {}", path.display()))
+}
+
+pub(crate) fn require_store(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("store {} does not exist", path.display());
+    }
+    Ok(())
 }
 
 /// Track names in sorted order.

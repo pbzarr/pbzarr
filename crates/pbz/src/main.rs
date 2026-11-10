@@ -12,6 +12,7 @@ use pbzarr::import::progress;
 use pbzarr::import::{Config, ConfigBuilder};
 use pbzarr::import::{Target, store_reference};
 use pbzarr::io::Dtype;
+use pbzarr::stat::StatKind;
 use pbzarr::{ExplicitArraySpec, Reference, RegionQuery};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
@@ -78,9 +79,21 @@ struct ValidateArgs {
     json: bool,
 }
 
+/// The track shapes that `view` and `stat` read.
+macro_rules! track_limits {
+    () => {
+        "The track must have position as its first dimension and at most one other \
+         dimension. Tracks on a bin_N dimension are not supported. A track that declares \
+         missing values with _FillValue must be a float track with a NaN fill."
+    };
+}
+
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  pbz view cohort.pbz --track depth\n  pbz view cohort.pbz --track depth -r chr1:0-1000000 -o depth.bedgraph.gz\n  pbz view cohort.pbz --track af -c s1,s2 -R targets.bed\n\nEach region is written in order. Rows do not extend across region edges."
+    after_help = concat!(
+        "Examples:\n  pbz view cohort.pbz --track depth\n  pbz view cohort.pbz --track depth -r chr1:0-1000000 -o depth.bedgraph.gz\n  pbz view cohort.pbz --track af -c s1,s2 -R targets.bed\n\nEach region is written in order. Rows do not extend across region edges.\n\n",
+        track_limits!()
+    )
 )]
 struct ViewArgs {
     /// PBZ store to export.
@@ -112,7 +125,10 @@ struct ViewArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  pbz stat cohort.pbz --track depth\n  pbz stat cohort.pbz --track depth -s median -R targets.bed\n  pbz stat cohort.pbz --track depth -r chr1:0-1000 -r chr2:500-900\n  pbz stat cohort.pbz --track af -s hist -c s1,s2\n\nWithout a region, stat writes one row per contig."
+    after_help = concat!(
+        "Examples:\n  pbz stat cohort.pbz --track depth\n  pbz stat cohort.pbz --track depth -s median -R targets.bed\n  pbz stat cohort.pbz --track depth -r chr1:0-1000 -r chr2:500-900\n  pbz stat cohort.pbz --track af -s hist -c s1,s2\n\nWithout a region, stat writes one row per contig.\n\n",
+        track_limits!()
+    )
 )]
 struct StatArgs {
     /// PBZ store to read.
@@ -122,9 +138,9 @@ struct StatArgs {
     track: Option<String>,
     #[command(flatten)]
     regions: RegionArgs,
-    /// Statistic: mean, min, max, median, or hist.
-    #[arg(short('s'), long, value_name = "STAT", default_value = "mean")]
-    stat: String,
+    /// Statistic to compute.
+    #[arg(short('s'), long, value_enum, default_value_t = StatArg::Mean)]
+    stat: StatArg,
     /// Column labels of a rank-2 track, comma-separated or repeated.
     /// Default: all columns in stored order.
     #[arg(short('c'), long, value_name = "LABEL", value_delimiter = ',')]
@@ -175,10 +191,12 @@ struct AppendArgs {
 #[command(
     after_help = "The store fixes chunks, shards, codecs and the column dimension, so \
                   append takes no layout flags. Every root variable over the appended \
-                  dimension grows; only --track receives values, and the other grown \
-                  columns read as the array fill value. A variable without that \
-                  dimension, such as a reduction across columns, keeps a legal shape \
-                  and goes stale; pbz neither detects nor marks it."
+                  dimension grows. The tracks that the append writes get values in the \
+                  new columns: --track, and with bam --mode composition also the \
+                  {track}_{field} tracks. In the other variables, the new columns read \
+                  as the fill value. A variable without that dimension, such as a \
+                  reduction across columns, keeps its shape and becomes stale. pbz does \
+                  not detect or mark it."
 )]
 enum AppendCommand {
     /// Append columns decoded from tabix-indexed BED files.
@@ -304,7 +322,7 @@ enum ImportCommand {
 #[command(
     arg_required_else_help = true,
     mut_arg("input_files", |arg| arg.required_unless_present_any(["emit_schema"])),
-    after_help = "Examples:\n  pbz import bed cohort.pbz s1.bed.gz s2.bed.gz --genome genome.fai --track depth --dim sample\n  pbz import bed mask.pbz regions.bed.gz --genome genome.fai --track callable\n  pbz import bed --emit-schema wide.bed.gz > schema.tsv\n  pbz import bed stats.pbz wide.bed.gz --genome genome.fai --dim metric --schema schema.tsv\n  pbz import bed cohort.pbz s1.bed.gz s2.bed.gz --genome genome.fai --track depth --dim sample --codecs '[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},{\"name\":\"zstd\",\"configuration\":{\"level\":3,\"checksum\":false}}]'"
+    after_help = "Examples:\n  pbz import bed cohort.pbz s1.bed.gz s2.bed.gz --genome genome.fai --track depth --dim sample\n  pbz import bed mask.pbz regions.bed.gz --genome genome.fai --track callable\n  pbz import bed --emit-schema wide.bed.gz > schema.tsv\n  pbz import bed stats.pbz wide.bed.gz --genome genome.fai --dim metric --schema schema.tsv\n\nTracks without --schema (S sources, V selected BED value columns):\n  BED3            one bool track, true where an interval covers the base. Needs --track,\n                  and --dim for several sources.\n  S = 1, V = 1    one track (position). Needs --track when the file has no header.\n  S = 1, V > 1    one track (position, V). The header names are the column labels.\n                  Needs --track and --dim.\n  S > 1, V = 1    one track (position, S). The source labels are the column labels.\n                  Needs --dim, and --track when the files have no header.\n  S > 1, V > 1    one track (position, S) for each value column, with the name of\n                  that column. Needs --dim.\nA file without a `#chrom start end ...` header can have one value column only.\n--dim with one source and one value column also makes a (position, S) track.\nBases that no interval covers read as 0 (false for bool)."
 )]
 struct BedArgs {
     #[command(flatten)]
@@ -409,11 +427,16 @@ struct ImportOptions {
     zip: bool,
 }
 
+fn has_zip_extension(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+}
+
 impl ImportOptions {
     /// The import destination for `output`: a new zip store when --zip is
     /// given or the path ends in `.zip`, otherwise a directory store.
     fn target<'a>(&self, output: &'a Path) -> Result<Target<'a>> {
-        let zip = self.zip || output.extension().is_some_and(|e| e == "zip");
+        let zip = self.zip || has_zip_extension(output);
         if !zip {
             return Ok(Target::Path(output));
         }
@@ -583,8 +606,8 @@ struct BedOptions {
     #[arg(long, conflicts_with = "schema")]
     track: Option<String>,
     /// Value dtype for headerless BED4 input (inferred when omitted).
-    #[arg(long, conflicts_with = "schema")]
-    dtype: Option<String>,
+    #[arg(long, value_enum, conflicts_with = "schema")]
+    dtype: Option<DtypeArg>,
     /// TSV schema mapping BED columns to target tracks. Unique target names
     /// create one track per BED column; repeated one-target rows create a
     /// single BED-column-axis track. A BED column is a header name or 1-based
@@ -652,8 +675,16 @@ struct BamDecodeOptions {
     /// Minimum per-base quality for a base to count.
     #[arg(long, default_value_t = 0)]
     min_bq: u8,
-    /// SAM flag bits that exclude a read (default: UNMAP|SECONDARY|QCFAIL|DUP).
-    #[arg(long, default_value_t = 1796)]
+    /// SAM flag bits that exclude a read: a decimal or 0x hex number, or
+    /// comma-separated samtools flag names (PAIRED, PROPER_PAIR, UNMAP,
+    /// MUNMAP, REVERSE, MREVERSE, READ1, READ2, SECONDARY, QCFAIL, DUP,
+    /// SUPPLEMENTARY).
+    #[arg(
+        long,
+        value_name = "FLAGS",
+        value_parser = parse_sam_flags,
+        default_value = "UNMAP,SECONDARY,QCFAIL,DUP"
+    )]
     exclude_flags: u16,
     /// Mate-overlap dedup mode. `proper` (default) matches mosdepth: only
     /// PROPER_PAIR-flagged overlapping mates are collapsed to one count.
@@ -667,6 +698,106 @@ struct BamDecodeOptions {
     /// excluding deletions from depth.
     #[arg(long)]
     count_deletions: bool,
+}
+
+const SAM_FLAGS: [(&str, u16); 12] = [
+    ("PAIRED", 0x1),
+    ("PROPER_PAIR", 0x2),
+    ("UNMAP", 0x4),
+    ("MUNMAP", 0x8),
+    ("REVERSE", 0x10),
+    ("MREVERSE", 0x20),
+    ("READ1", 0x40),
+    ("READ2", 0x80),
+    ("SECONDARY", 0x100),
+    ("QCFAIL", 0x200),
+    ("DUP", 0x400),
+    ("SUPPLEMENTARY", 0x800),
+];
+
+/// Parse SAM flags as samtools does: `1796`, `0x704`, or
+/// `UNMAP,SECONDARY,QCFAIL,DUP`.
+fn parse_sam_flags(value: &str) -> std::result::Result<u16, String> {
+    let mut flags = 0;
+    for item in value.split(',').map(str::trim) {
+        let bits = if let Some(hex) = item.strip_prefix("0x").or(item.strip_prefix("0X")) {
+            u16::from_str_radix(hex, 16).ok()
+        } else if item.bytes().all(|b| b.is_ascii_digit()) {
+            item.parse().ok()
+        } else {
+            SAM_FLAGS
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(item))
+                .map(|&(_, bit)| bit)
+        };
+        flags |= bits
+            .ok_or_else(|| format!("{item:?} is not a SAM flag number or a samtools flag name"))?;
+    }
+    Ok(flags)
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum StatArg {
+    Mean,
+    Min,
+    Max,
+    Median,
+    Hist,
+}
+
+impl From<StatArg> for StatKind {
+    fn from(stat: StatArg) -> Self {
+        match stat {
+            StatArg::Mean => StatKind::Mean,
+            StatArg::Min => StatKind::Min,
+            StatArg::Max => StatKind::Max,
+            StatArg::Median => StatKind::Median,
+            StatArg::Hist => StatKind::Hist,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DtypeArg {
+    Bool,
+    #[value(name = "uint8")]
+    U8,
+    #[value(name = "uint16")]
+    U16,
+    #[value(name = "uint32")]
+    U32,
+    #[value(name = "uint64")]
+    U64,
+    #[value(name = "int8")]
+    I8,
+    #[value(name = "int16")]
+    I16,
+    #[value(name = "int32")]
+    I32,
+    #[value(name = "int64")]
+    I64,
+    #[value(name = "float32")]
+    F32,
+    #[value(name = "float64")]
+    F64,
+}
+
+impl From<DtypeArg> for Dtype {
+    fn from(dtype: DtypeArg) -> Self {
+        match dtype {
+            DtypeArg::Bool => Dtype::Bool,
+            DtypeArg::U8 => Dtype::U8,
+            DtypeArg::U16 => Dtype::U16,
+            DtypeArg::U32 => Dtype::U32,
+            DtypeArg::U64 => Dtype::U64,
+            DtypeArg::I8 => Dtype::I8,
+            DtypeArg::I16 => Dtype::I16,
+            DtypeArg::I32 => Dtype::I32,
+            DtypeArg::I64 => Dtype::I64,
+            DtypeArg::F32 => Dtype::F32,
+            DtypeArg::F64 => Dtype::F64,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -822,7 +953,7 @@ fn stat(args: StatArgs) -> Result<()> {
         track: args.track,
         regions: args.regions.region,
         regions_file: args.regions.regions,
-        stat: args.stat,
+        stat: args.stat.into(),
         columns: args.columns,
         output: args.output,
         no_header: args.no_header,
@@ -873,13 +1004,7 @@ fn import_bed(args: BedArgs, quiet: bool) -> Result<()> {
         let options = BedImportOptions {
             fields: (!args.bed.fields.is_empty()).then_some(args.bed.fields),
             track: args.bed.track,
-            dtype: args
-                .bed
-                .dtype
-                .as_deref()
-                .map(Dtype::from_str)
-                .transpose()
-                .context("invalid --dtype")?,
+            dtype: args.bed.dtype.map(Dtype::from),
             infer_rows,
             ..BedImportOptions::default()
         };
@@ -979,7 +1104,7 @@ fn import_bigwig(args: BigWigArgs, quiet: bool) -> Result<()> {
 /// The dimension comes from the store so that one source still forms a column
 /// batch; an append never names a new dimension.
 fn open_append(path: &Path, track: &str) -> Result<(Dataset, String)> {
-    if pbzarr::is_zip_store(path) || path.extension().is_some_and(|e| e == "zip") {
+    if pbzarr::is_zip_store(path) || has_zip_extension(path) {
         bail!(
             "{} is a zip store. Zip stores are written once, so append cannot add columns to them",
             path.display()
@@ -1341,6 +1466,14 @@ mod tests {
         assert_eq!(labeled.path, PathBuf::from("https://h/x.bam"));
         assert_eq!(labeled.label(), "S1");
         assert_eq!(parse_source("dir/s1.bed.gz").unwrap().label(), "s1");
+    }
+
+    #[test]
+    fn exclude_flags_take_hex_and_flag_names() {
+        let names = parse_sam_flags("UNMAP,SECONDARY,QCFAIL,DUP").unwrap();
+        assert_eq!(parse_sam_flags("0x704").unwrap(), names);
+        assert_eq!(parse_sam_flags("1796").unwrap(), names);
+        assert!(parse_sam_flags("UNMAPPED").is_err());
     }
 
     #[test]

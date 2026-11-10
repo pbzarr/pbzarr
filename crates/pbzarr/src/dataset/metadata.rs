@@ -294,6 +294,9 @@ impl ValidationReport {
         Ok(())
     }
 }
+/// An error with the code of the format rule it breaks. The code goes to a
+/// validation report, not into the message.
+type Ruled<T> = std::result::Result<T, (&'static str, PbzError)>;
 impl GenomicAxis {
     /// Interpret a reserved dimension name, preserving arbitrary-size decimal
     /// widths by capping arithmetic at the largest permitted contig length.
@@ -338,11 +341,14 @@ fn dims_valid(info: &VariableInfo) -> bool {
     syntax && info.dims.iter().collect::<BTreeSet<_>>().len() == info.dims.len()
 }
 impl Dataset {
-    fn reference_arrays(&self) -> Result<(&VariableInfo, &VariableInfo)> {
+    fn reference_arrays(&self) -> Ruled<(&VariableInfo, &VariableInfo)> {
         let resolve = |name: &str| {
-            self.variables
-                .get(name)
-                .ok_or_else(|| PbzError::Metadata(format!("R2: missing root array {name}")))
+            self.variables.get(name).ok_or_else(|| {
+                (
+                    "R2",
+                    PbzError::Metadata(format!("missing root array {name}")),
+                )
+            })
         };
         let names = resolve(CONTIG_ID)?;
         let lengths = resolve(CONTIG_LENGTH)?;
@@ -350,9 +356,12 @@ impl Dataset {
             dims_valid(info) && info.shape.len() == 1 && info.dims == [CONTIG_DIM]
         };
         if !on_contig(names) || names.metadata["data_type"] != "string" {
-            return Err(PbzError::Metadata(format!(
-                "R4: {CONTIG_ID} must be a string array on dimension {CONTIG_DIM}"
-            )));
+            return Err((
+                "R4",
+                PbzError::Metadata(format!(
+                    "{CONTIG_ID} must be a string array on dimension {CONTIG_DIM}"
+                )),
+            ));
         }
         if !on_contig(lengths)
             || !matches!(
@@ -363,48 +372,65 @@ impl Dataset {
             )
             || lengths.attrs()["dtype"] == "bool"
         {
-            return Err(PbzError::Metadata(format!(
-                "R5: {CONTIG_LENGTH} must be an integer array on dimension {CONTIG_DIM}"
-            )));
+            return Err((
+                "R5",
+                PbzError::Metadata(format!(
+                    "{CONTIG_LENGTH} must be an integer array on dimension {CONTIG_DIM}"
+                )),
+            ));
         }
         if let Some(md5) = self.variables.get(CONTIG_MD5)
             && (!on_contig(md5) || md5.metadata["data_type"] != "string")
         {
-            return Err(PbzError::Metadata(format!(
-                "R7: {CONTIG_MD5} must be a string array on dimension {CONTIG_DIM}"
-            )));
+            return Err((
+                "R7",
+                PbzError::Metadata(format!(
+                    "{CONTIG_MD5} must be a string array on dimension {CONTIG_DIM}"
+                )),
+            ));
         }
         Ok((names, lengths))
     }
     /// Load and check reference coordinates lazily; offsets retain stored order.
     pub fn reference(&self) -> Result<&Reference> {
-        root_encoding(&self.root)?;
+        self.checked_reference().map_err(|(_, e)| e)
+    }
+    /// [`Dataset::reference`], with the format rule that a failure breaks.
+    fn checked_reference(&self) -> Ruled<&Reference> {
+        root_encoding(&self.root).map_err(|e| {
+            let rule = if matches!(e, PbzError::Metadata(_)) {
+                "R1"
+            } else {
+                "R6"
+            };
+            (rule, e)
+        })?;
         if let Some(r) = self.reference_cache.get() {
             return Ok(r);
         }
         let (names, lengths) = self.reference_arrays()?;
-        let ns = self.coordinate_values(names)?;
-        let ls = self.coordinate_values(lengths)?;
+        let ns = self.coordinate_values(names).map_err(|e| ("R6", e))?;
+        let ls = self.coordinate_values(lengths).map_err(|e| ("R6", e))?;
+        let invalid =
+            |rule: &'static str, message: &str| (rule, PbzError::Metadata(message.into()));
         let mut seen = BTreeSet::new();
         let mut contigs = Vec::with_capacity(ns.len());
         for (name, length) in ns.iter().zip(ls.iter()) {
             let name = name
                 .as_str()
                 .filter(|n| !n.is_empty() && !super::read::missing(names, name))
-                .ok_or_else(|| PbzError::Metadata("R4: missing or empty contig name".into()))?;
+                .ok_or_else(|| invalid("R4", "missing or empty contig name"))?;
             if !seen.insert(name) {
-                return Err(PbzError::Metadata("R4: duplicate contig name".into()));
+                return Err(invalid("R4", "duplicate contig name"));
             }
             if super::read::missing(lengths, length) {
-                return Err(PbzError::Metadata("R6: missing reference length".into()));
+                return Err(invalid("R6", "missing reference length"));
             }
             let length = length
                 .as_u64()
                 .filter(|n| *n <= i64::MAX as u64)
                 .ok_or_else(|| {
-                    PbzError::Metadata(
-                        "R6: reference length is outside signed 64-bit indexing".into(),
-                    )
+                    invalid("R6", "reference length is outside signed 64-bit indexing")
                 })?;
             contigs.push(Contig {
                 name: name.into(),
@@ -412,7 +438,7 @@ impl Dataset {
             });
         }
         let reference =
-            Reference::new(contigs).map_err(|e| PbzError::Metadata(format!("R6: {e}")))?;
+            Reference::new(contigs).map_err(|e| ("R6", PbzError::Metadata(e.to_string())))?;
         let _ = self.reference_cache.set(reference);
         Ok(self.reference_cache.get().expect("reference initialized"))
     }
@@ -421,21 +447,21 @@ impl Dataset {
             .variables
             .get(dim)
             .filter(|v| v.role == Role::Coordinate && v.dims == [dim] && v.shape.len() == 1)
-            .ok_or_else(|| PbzError::Metadata(format!("D3: no dimension coordinate for {dim}")))?;
+            .ok_or_else(|| PbzError::Metadata(format!("no dimension coordinate for {dim}")))?;
         if info.attrs()["dtype"] == "bool" {
             return Err(PbzError::Metadata(format!(
-                "D3: Boolean labels are not string or numeric: {dim}"
+                "Boolean labels are not string or numeric: {dim}"
             )));
         }
         let values = self.coordinate_values(info)?;
         let mut seen = BTreeSet::new();
         for value in values {
             if super::read::missing(info, &value) {
-                return Err(PbzError::Metadata(format!("D3: missing label on {dim}")));
+                return Err(PbzError::Metadata(format!("missing label on {dim}")));
             }
             let key = value.label_key();
             if !seen.insert(key) {
-                return Err(PbzError::Metadata(format!("D3: duplicate labels on {dim}")));
+                return Err(PbzError::Metadata(format!("duplicate labels on {dim}")));
             }
         }
         Ok(())
@@ -458,19 +484,10 @@ impl Dataset {
                 .flat_map(|v| v.dims.iter().map(String::as_str))
                 .collect(),
         };
-        let reference = match self.reference() {
+        let reference = match self.checked_reference() {
             Ok(r) => Some(r),
-            Err(e) => {
-                let rule = match &e {
-                    PbzError::Metadata(m) => m
-                        .split(':')
-                        .next()
-                        .filter(|r| r.starts_with('R'))
-                        .unwrap_or("R6"),
-                    _ => "R6",
-                }
-                .to_owned();
-                report.error(None, &rule, e)?;
+            Err((rule, e)) => {
+                report.error(None, rule, e)?;
                 None
             }
         };
@@ -635,7 +652,7 @@ pub(super) fn storage_metadata(info: &VariableInfo) -> Result<ArrayMetadataV3> {
     Ok(meta)
 }
 fn root_encoding(root: &Value) -> Result<()> {
-    let meta: zarrs::metadata::v3::GroupMetadataV3 =
-        serde_json::from_value(root.clone()).map_err(|e| PbzError::Metadata(format!("R1: {e}")))?;
+    let meta: zarrs::metadata::v3::GroupMetadataV3 = serde_json::from_value(root.clone())
+        .map_err(|e| PbzError::Metadata(format!("root group metadata: {e}")))?;
     required_extensions(&meta.additional_fields)
 }
