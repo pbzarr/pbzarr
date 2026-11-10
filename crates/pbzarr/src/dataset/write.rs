@@ -141,6 +141,23 @@ pub(crate) struct PreparedImport {
     coordinates: Vec<(Arc<super::read::ArrayHandle>, Vec<String>)>,
 }
 
+/// Refuse a track or dimension name that the store keeps for its genomic axes
+/// and reference.
+fn refuse_reserved(name: &str) -> Result<()> {
+    if name == "position"
+        || name.starts_with("bin_")
+        || name == super::CONTIG_DIM
+        || super::REFERENCE_ARRAYS.contains(&name)
+        || name == "reference"
+    {
+        return Err(PbzError::Metadata(format!(
+            "import: {name:?} is a reserved name. Do not use position, bin_N, contig, \
+             contig_id, contig_length, contig_md5 or reference as a track or dimension name"
+        )));
+    }
+    Ok(())
+}
+
 impl Dataset {
     /// Prepare existing 1D/2D import destinations without writing the store.
     fn prepare_import(&self, specs: &[(String, TrackConfig)]) -> Result<PreparedImport> {
@@ -173,26 +190,17 @@ impl Dataset {
             .collect();
         for (name, _) in specs {
             validate_node_name(name)?;
-            if self.variables.contains_key(name)
-                && !dimensions.contains(name.as_str())
-                && !super::REFERENCE_ARRAYS.contains(&name.as_str())
-            {
+            if self.variables.contains_key(name) && !dimensions.contains(name.as_str()) {
                 return Err(PbzError::Metadata(format!(
                     "import: the store already has a track named {name:?}"
                 )));
             }
             if !names.insert(name.clone())
                 || occupied.contains(name)
-                || name == "position"
                 || dimensions.contains(name.as_str())
             {
                 return Err(PbzError::Metadata(format!(
                     "import: destination {name:?} is occupied or conflicts with a dimension"
-                )));
-            }
-            if super::REFERENCE_ARRAYS.contains(&name.as_str()) {
-                return Err(PbzError::Metadata(format!(
-                    "import: {name:?} is reserved for the reference"
                 )));
             }
         }
@@ -207,9 +215,9 @@ impl Dataset {
                 .map(|_| config.column_dim.clone().unwrap_or_else(|| "column".into()));
             if let (Some(labels), Some(dim)) = (&config.columns, &column_dim) {
                 validate_node_name(dim)?;
-                if GenomicAxis::from_dimension(dim)?.is_some() || names.contains(dim) {
+                if names.contains(dim) {
                     return Err(PbzError::Metadata(format!(
-                        "import: column dimension {dim:?} conflicts with genomic geometry or a track"
+                        "import: column dimension {dim:?} conflicts with a track"
                     )));
                 }
                 let unique: BTreeSet<_> = labels.iter().collect();
@@ -743,6 +751,12 @@ impl Dataset {
         specs: &[(String, TrackConfig)],
         plan: DatasetPlan,
     ) -> Result<Prepared> {
+        for (name, config) in specs {
+            refuse_reserved(name)?;
+            if let Some(dim) = &config.column_dim {
+                refuse_reserved(dim)?;
+            }
+        }
         match plan {
             DatasetPlan::Create => self.prepare_import(specs).map(Prepared::Import),
             DatasetPlan::Append => self.prepare_append(specs).map(Prepared::Append),

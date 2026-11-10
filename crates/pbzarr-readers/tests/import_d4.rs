@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use ndarray::ArrayD;
-use pbzarr::dataset::Dataset;
+use pbzarr::Dataset;
 use pbzarr::import::{Config, Source};
 use pbzarr_readers::{D4Reader, from_d4};
 use tempfile::TempDir;

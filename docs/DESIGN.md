@@ -6,7 +6,7 @@ pbzarr reads and writes format 0.5 (one root Dataset) only; see the [format 0.5 
 
 ## Development reader
 
-The additive Rust `pbzarr::dataset::Dataset` reads the
+The additive Rust `pbzarr::Dataset` reads the
 [format `0.5` root-Dataset schema](../spec/README.md).
 It catalogs direct root arrays, validates reference and dimension coordinates,
 and reads typed rectangular subsets. `read_raw` preserves physical values and
@@ -80,7 +80,11 @@ Every `xr.DataArray` and `xr.Dataset` from `open` carries a 0-d coordinate named
 
 `Dataset::create(path, reference)` and `Dataset::open(path)` operate on filesystem stores. `create_with_storage` and `open_with_storage` take any synchronous readable, writable, listable Zarr storage handle. `TrackConfig::new(dtype)` configures scalar or 2D tracks with generic columns, chunking, optional sharding, fill value, and optional description or source metadata. `Dataset::read_region<T>` reads one region of a track at full column width.
 
-`Reference` and `Genome` hold named contigs and derive flat offsets. Regions are 0-based and half-open.
+`Reference` holds named contigs and derives flat offsets. Regions are 0-based and half-open.
+
+The crate root exports `Dataset`, `Reference`, `GenomicAxis`, `Contig`, `Region`, `TrackConfig`, `Import`, `Measurement`, and the error type `PbzError`. Three modules stay public: `pbzarr::import` holds the import configuration and targets, `pbzarr::io` holds the `ValueReader` trait for reader crates, and `pbzarr::stat` holds the region statistics.
+
+An import refuses a track or dimension name that the store keeps for itself: `position`, any `bin_N`, `contig`, `contig_id`, `contig_length`, `contig_md5`, and `reference`.
 
 The format-agnostic import engine drives any `ValueReader`. A reader exposes an ordered schema of named dtype fields. `read_into` fills one sink per field for one contig window in a single decode pass. `read_windows` decodes a run of adjacent windows and reports which windows have no data, so the engine can skip them. `fork` gives each worker its own handle.
 
@@ -96,7 +100,7 @@ Cross-language validation (`pixi run validate-roundtrip`) imports d4 fixtures wi
 
 ## CLI
 
-The `pbz` CLI ships `import d4`, `import bigwig`, `import bed`, and `import bam`. The import subcommands take positional `PATH[:LABEL]` sources or `--file-list`, plus `--dim`, `--codecs`, `--decode-chunks`, and `-t`/`--threads`. `import bed` also takes a `--schema` TSV. `import bam` takes the CRAM FASTA as `--fasta`. When the output path does not exist, an import creates a format 0.5 store. The import first checks that all sources have the same contigs, then takes the store reference from them. If the import fails, it removes the new store. When the output path exists, the import adds tracks to that store, and the sources must match the store reference. The import refuses a format 0.4 store. The import refuses a track name that the store already uses. BED files have no contig lengths, so `import bed` needs `--genome` only to create a store; an existing store gives its own lengths. In Rust, `Target::Path` holds this rule, and `reference_genome` gives the contig list for BED.
+The `pbz` CLI ships `import d4`, `import bigwig`, `import bed`, and `import bam`. The import subcommands take positional `PATH[:LABEL]` sources or `--file-list`, plus `--dim`, `--codecs`, `--decode-chunks`, and `-t`/`--threads`. `import bed` also takes a `--schema` TSV. `import bam` takes the CRAM FASTA as `--fasta`. When the output path does not exist, an import creates a format 0.5 store. The import first checks that all sources have the same contigs, then takes the store reference from them. If the import fails, it removes the new store. When the output path exists, the import adds tracks to that store, and the sources must match the store reference. The import refuses a format 0.4 store. The import refuses a track name that the store already uses. BED files have no contig lengths, so `import bed` needs `--genome` only to create a store; an existing store gives its own lengths. In Rust, `Target::Path` holds this rule, and `store_reference` gives the contig list for BED.
 
 `view` exports one track as bedGraph-like TSV: `chrom`, `start`, `end`, then one value column per track column, with equal-value runs collapsed and rows in genome order. Positions whose values are all missing (NaN fill) are skipped. It subsets rank-2 columns with `--columns` and writes BGZF when the output path ends in `.gz`.
 

@@ -1,8 +1,8 @@
 use ndarray::Array2;
-use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, ExplicitArraySpec, TrackConfig};
+use pbzarr::{Dataset, Reference};
 use serde_json::json;
 use tempfile::TempDir;
 

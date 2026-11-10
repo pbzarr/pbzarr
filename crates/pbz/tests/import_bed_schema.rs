@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use common::{run_pbz, write_bed_bgzip_tabix};
-use pbzarr::dataset::Dataset;
+use pbzarr::Dataset;
 use tempfile::TempDir;
 
 fn write_genome(dir: &Path) -> PathBuf {

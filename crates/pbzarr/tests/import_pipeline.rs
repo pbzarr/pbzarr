@@ -1,7 +1,7 @@
-use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::{Import, PipelineOptions};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, TrackConfig};
+use pbzarr::{Dataset, Reference};
 use tempfile::TempDir;
 
 fn dataset(path: &std::path::Path, genome: &Reference) -> Dataset {

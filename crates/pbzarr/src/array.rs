@@ -29,25 +29,6 @@ pub fn validate_node_name(name: &str) -> Result<()> {
     })
 }
 
-/// Validate a track's non-position dimension and coordinate-array name.
-pub fn validate_column_dimension_name(name: &str) -> Result<()> {
-    validate_node_name(name).map_err(|error| {
-        PbzError::Metadata(format!(
-            "column dimension name {name:?} is invalid: {error}"
-        ))
-    })?;
-    let reserved = matches!(
-        name,
-        "position" | "values" | "offsets" | "contigs" | "zarr.json"
-    );
-    if name.trim() != name || name.contains('\\') || name.chars().any(char::is_control) || reserved
-    {
-        return Err(PbzError::Metadata(format!(
-            "column dimension name {name:?} is invalid; use a non-empty path-safe name distinct from position, values, offsets, and contigs"
-        )));
-    }
-    Ok(())
-}
 /// User-supplied configuration for a new track.
 #[derive(Debug, Clone)]
 pub struct TrackConfig {

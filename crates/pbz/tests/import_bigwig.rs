@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use bigtools::BigWigWrite;
 use bigtools::beddata::BedParserStreamingIterator;
-use pbzarr::dataset::Dataset;
+use pbzarr::Dataset;
 use tempfile::TempDir;
 
 mod common;

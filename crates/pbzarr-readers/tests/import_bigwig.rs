@@ -6,7 +6,7 @@ mod common;
 use std::path::Path;
 
 use ndarray::ArrayD;
-use pbzarr::dataset::Dataset;
+use pbzarr::Dataset;
 use pbzarr::import::{Config, Source};
 use pbzarr_readers::from_bigwig;
 use tempfile::TempDir;

@@ -8,7 +8,7 @@ mod bam_common;
 use std::path::Path;
 
 use ndarray::ArrayD;
-use pbzarr::dataset::Dataset;
+use pbzarr::Dataset;
 use pbzarr::import::{Config, Source};
 use pbzarr_readers::{DepthFilter, ImportMode, from_bam};
 use tempfile::TempDir;

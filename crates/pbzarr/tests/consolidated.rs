@@ -5,9 +5,9 @@ use std::process::Command;
 
 use pbzarr::Contig;
 use pbzarr::TrackConfig;
-use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
+use pbzarr::{Dataset, Reference};
 use serde_json::Value;
 use tempfile::TempDir;
 

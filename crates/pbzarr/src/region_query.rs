@@ -120,14 +120,6 @@ impl fmt::Display for RegionQuery {
     }
 }
 
-/// Parse a region string into a [`Region`].
-///
-/// Convenience wrapper around [`Region::from_str`]. See its documentation for
-/// accepted formats.
-pub fn parse_region_query(region: &str) -> Result<RegionQuery> {
-    region.parse()
-}
-
 fn parse_position(s: &str, label: &str) -> Result<u64> {
     s.parse::<u64>().map_err(|_| PbzError::InvalidRegion {
         message: format!("invalid {label}: {s:?}"),
@@ -137,6 +129,10 @@ fn parse_position(s: &str, label: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_region_query(region: &str) -> Result<RegionQuery> {
+        region.parse()
+    }
 
     #[test]
     fn contig_only() {

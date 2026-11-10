@@ -10,10 +10,10 @@ use pyo3::types::PyDict;
 
 use pbzarr::Contig;
 use pbzarr::ExplicitArraySpec;
-use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::progress::make_sink;
 use pbzarr::import::{Config, Report, Source, store_reference};
 use pbzarr::io::Dtype;
+use pbzarr::{Dataset, Reference};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, ColumnSelector, DepthFilter, ImportMode, InferRows,
     OverlapMode, column_index_by_name, execute_bed_schema_plan, from_bam as rs_from_bam,

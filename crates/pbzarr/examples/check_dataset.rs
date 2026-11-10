@@ -1,8 +1,5 @@
 //! Conformance probe for small draft fixtures; not the production PBZ CLI.
-use pbzarr::{
-    PbzError,
-    dataset::{Dataset, GenomicAxis, ValidationStatus},
-};
+use pbzarr::{Dataset, GenomicAxis, PbzError, ValidationStatus};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, ops::Range};
 use zarrs::array::ElementOwned;

@@ -9,10 +9,10 @@ use noodles_bgzf as bgzf;
 use noodles_core::Position;
 use noodles_csi::{self as csi, binning_index::index::reference_sequence::bin::Chunk};
 use noodles_tabix as tabix;
-use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, TrackConfig};
+use pbzarr::{Dataset, Reference};
 
 fn genome() -> Reference {
     Reference::new(vec![

@@ -1,5 +1,5 @@
-use pbzarr::dataset::{GenomicAxis, Reference};
 use pbzarr::{Contig, RegionQuery};
+use pbzarr::{GenomicAxis, Reference};
 use std::num::NonZeroU64;
 
 fn reference(lengths: &[u64]) -> Reference {

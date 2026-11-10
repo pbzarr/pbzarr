@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use indicatif_log_bridge::LogWrapper;
 use log::{LevelFilter, debug, info};
-use pbzarr::dataset::Dataset;
+use pbzarr::Dataset;
 use pbzarr::import::Config;
 use pbzarr::import::progress::{self, make_sink};
 use pbzarr::import::{Target, store_reference};

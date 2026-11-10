@@ -1,21 +1,31 @@
+//! Per-base genomic data in a Zarr v3 store, read and written as one root
+//! [`Dataset`].
+//!
+//! [`Dataset`] opens, creates and validates a store. [`Import`] writes
+//! per-base data from [`io::ValueReader`] sources into it. [`stat`] reduces a
+//! [`Measurement`] over regions.
+
 mod array;
-pub mod codec_spec;
+mod codec_spec;
 mod consolidated;
-pub mod dataset;
-pub mod error;
+mod dataset;
+mod error;
 pub mod import;
 pub mod io;
-pub mod measurement;
-pub mod region_query;
+mod measurement;
+mod region_query;
 pub mod stat;
 
-pub use array::{TrackConfig, validate_column_dimension_name, validate_node_name};
+pub use array::{TrackConfig, validate_node_name};
 pub use codec_spec::ExplicitArraySpec;
-pub use dataset::{Contig, ContigId, Reference, Region};
+pub use dataset::{
+    BinInterval, Contig, ContigId, Dataset, FORMAT_VERSION, GenomicAxis, Reference, Region, Role,
+    Support, ValidationIssue, ValidationReport, ValidationStatus, VariableInfo,
+};
 pub use error::{PbzError, Result};
+pub use import::{Import, ImportBuilder};
 pub use measurement::Measurement;
-pub use region_query::{RegionQuery, parse_region_query};
-pub use stat::{HistTable, StatKind, StatOptions, StatOutput, StatResult, StatValue};
+pub use region_query::RegionQuery;
 
 /// The `perbase` convention uuid of a format 0.4 store root, which readers
 /// detect to refuse that format.

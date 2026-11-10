@@ -19,7 +19,7 @@ use pbzarr::import::{Axes, Config, PipelineOptions, Report, Source, Target};
 use pbzarr::io::{
     ColumnSinkMut, Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, ValueReader,
 };
-use pbzarr::{PbzError, Result, TrackConfig, validate_column_dimension_name, validate_node_name};
+use pbzarr::{PbzError, Result, TrackConfig, validate_node_name};
 
 use crate::coords::noodles_query_interval;
 
@@ -338,7 +338,7 @@ fn validate_column_dim(column_dim: Option<&str>) -> Result<()> {
     let Some(name) = column_dim else {
         return Ok(());
     };
-    validate_column_dimension_name(name)
+    validate_node_name(name)
         .map_err(|error| PbzError::Metadata(format!("bed schema import: {error}")))
 }
 

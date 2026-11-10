@@ -3,8 +3,8 @@
 mod bam_common;
 mod common;
 
+use pbzarr::Dataset;
 use pbzarr::TrackConfig;
-use pbzarr::dataset::Dataset;
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, ValueReader};
 use pbzarr_readers::{BamReader, BigWigReader, DepthFilter, ImportMode};
@@ -125,7 +125,7 @@ fn bam_composition_shares_sample_coordinates_across_fields() {
         .unwrap();
     assert_eq!(
         ds.validate().unwrap().status,
-        pbzarr::dataset::ValidationStatus::Valid
+        pbzarr::ValidationStatus::Valid
     );
     assert_eq!(ds.variables()["ins"].dims, ["position", "sample"]);
     assert_eq!(

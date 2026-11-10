@@ -3,7 +3,7 @@
 
 mod common;
 
-use pbzarr::dataset::Dataset;
+use pbzarr::Dataset;
 use pbzarr::import::{Config, Source};
 use pbzarr::{Contig, Reference};
 use pbzarr_readers::{BedImportOptions, from_bed_matrix};

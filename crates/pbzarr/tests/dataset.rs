@@ -1,7 +1,7 @@
 // Each range selects one axis; a single range intentionally describes rank one.
 #![allow(clippy::single_range_in_vec_init)]
 use pbzarr::PbzError;
-use pbzarr::dataset::{Dataset, FORMAT_VERSION, Role, Support};
+use pbzarr::{Dataset, FORMAT_VERSION, Role, Support};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use zarrs::storage::storage_adapter::usage_log::UsageLogStorageAdapter;
@@ -175,7 +175,7 @@ fn readers_ignore_unknown_pbz_attributes() {
     assert!(Dataset::open_with_storage(storage).is_ok());
 }
 
-use pbzarr::dataset::{GenomicAxis, ValidationStatus};
+use pbzarr::{GenomicAxis, ValidationStatus};
 use zarrs::array::{Array, ArraySubset, Element};
 fn values<T: Element>(storage: &ReadableWritableListableStorage, name: &str, data: &[T]) {
     let array = Array::open(storage.clone(), &format!("/{name}")).unwrap();

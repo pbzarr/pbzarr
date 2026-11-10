@@ -11,10 +11,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::{Config, Import, PipelineOptions, Source};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, TrackConfig};
+use pbzarr::{Dataset, Reference};
 use pbzarr_readers::from_d4;
 use tempfile::TempDir;
 

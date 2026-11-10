@@ -1,8 +1,8 @@
 //! Small native-Xarray conformance fixture for the existing Rust import API.
-use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
 use pbzarr::{Contig, ExplicitArraySpec, TrackConfig};
+use pbzarr::{Dataset, Reference};
 
 #[derive(Clone, Copy)]
 enum Value {

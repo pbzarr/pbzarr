@@ -4,10 +4,10 @@
 //!
 //! Usage: cargo run --release -p pbzarr --example import_threads -- <out.pbz> [workers]
 
-use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::{Import, PipelineOptions};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ReaderError, ValueReader};
 use pbzarr::{Contig, ExplicitArraySpec, TrackConfig};
+use pbzarr::{Dataset, Reference};
 
 const SPEC: &str = r#"{
   "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1048576, 8]}},

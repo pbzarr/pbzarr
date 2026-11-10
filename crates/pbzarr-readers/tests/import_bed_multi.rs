@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use ndarray::Ix2;
 use pbzarr::Contig;
 use pbzarr::RegionQuery;
-use pbzarr::dataset::{Dataset, Reference};
 use pbzarr::import::Config;
 use pbzarr::io::Dtype;
+use pbzarr::{Dataset, Reference};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, Source, execute_bed_schema_plan, from_bed_matrix,
     plan_bed_schema,
@@ -543,35 +543,6 @@ fn schema_execution_rejects_a_column_dimension_changed_after_planning() {
     assert!(error.contains("column dimension"), "{error}");
     assert!(error.contains("planning"), "{error}");
     assert!(track_names(&path).is_empty());
-}
-
-#[test]
-fn schema_plan_rejects_invalid_column_dimension_names() {
-    let dir = TempDir::new().unwrap();
-    let bed = write_bed_bgzip_tabix(
-        dir.path(),
-        "one",
-        &["chrom", "start", "end", "cov"],
-        &[("chr1", 0, 8, vec!["4"])],
-    );
-    let sources = [Source::new(bed)];
-    let schema = BedSchema(vec![BedColumnSpec::named("cov", Dtype::U16)]);
-
-    for invalid in ["", "   ", "sample/group", "position", "values"] {
-        let error = plan_bed_schema(
-            &sources,
-            &schema,
-            &Config {
-                column_dim: Some(invalid.into()),
-                ..Config::default()
-            },
-        )
-        .err()
-        .unwrap_or_else(|| panic!("column dimension {invalid:?} must fail"))
-        .to_string();
-        assert!(error.contains("column dimension"), "{error}");
-        assert!(error.contains("invalid"), "{error}");
-    }
 }
 
 #[test]

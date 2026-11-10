@@ -5,9 +5,9 @@
 mod common;
 
 use pbzarr::Contig;
-use pbzarr::dataset::{Dataset, Reference, ValidationStatus};
 use pbzarr::import::{Config, Source, Target};
 use pbzarr::io::ValueReader as _;
+use pbzarr::{Dataset, Reference, ValidationStatus};
 use pbzarr_readers::{BedImportOptions, BigWigReader, from_bed_matrix, from_bigwig};
 use tempfile::TempDir;
 

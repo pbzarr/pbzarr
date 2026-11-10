@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use noodles_bgzf as bgzf;
+use pbzarr::Dataset;
 use pbzarr::Measurement;
-use pbzarr::dataset::Dataset;
 use pbzarr::io::{Dtype, Numeric};
 
 /// Target bytes fetched per batch (full stored width).

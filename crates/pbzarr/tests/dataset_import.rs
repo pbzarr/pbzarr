@@ -1,7 +1,7 @@
 // One range per axis; single-range selections are intentionally rank one.
 #![allow(clippy::single_range_in_vec_init)]
 use pbzarr::Contig;
-use pbzarr::dataset::{Dataset, Reference, Role, ValidationStatus};
+use pbzarr::{Dataset, Reference, Role, ValidationStatus};
 use std::sync::Arc;
 use zarrs::storage::store::MemoryStore;
 use zarrs::storage::{ReadableWritableListableStorage, StoreKey};
@@ -334,6 +334,30 @@ fn invalid_imports_fail_before_any_mutation() {
         }
         assert!(b.run().is_err(), "{case}");
         no_mutations(&trace);
+    }
+}
+#[test]
+fn reserved_track_and_dimension_names_are_refused() {
+    let base = TrackConfig::new(Dtype::U32).chunk_size(4);
+    for (name, cfg) in [
+        ("contig_length", base.clone()),
+        (
+            "depth",
+            base.clone()
+                .columns(vec!["S1".into()])
+                .column_dim("reference"),
+        ),
+    ] {
+        let (mut ds, _, _) = traced_dataset();
+        let columns = cfg.columns.is_some();
+        let mut b = Import::from_readers(vec![ConstReader::new(vec![7])])
+            .unwrap()
+            .into_dataset(&mut ds, vec![(name.into(), cfg)]);
+        if columns {
+            b = b.readers_as_columns();
+        }
+        let error = b.run().err().expect("reserved name").to_string();
+        assert!(error.contains("is a reserved name"), "{error}");
     }
 }
 #[test]
