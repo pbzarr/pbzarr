@@ -1061,8 +1061,19 @@ impl RunCtx<'_> {
     }
 }
 
+/// `WindowSink` fixes the error type, so an engine error crosses the reader
+/// inside `ReaderError::Other`.
 fn to_reader_err(err: PbzError) -> ReaderError {
-    ReaderError::Other(anyhow::anyhow!("{err}"))
+    ReaderError::Other(anyhow::Error::new(err))
+}
+
+fn from_reader_err(err: ReaderError) -> PbzError {
+    match err {
+        ReaderError::Other(boxed) => boxed
+            .downcast::<PbzError>()
+            .unwrap_or_else(|boxed| PbzError::Reader(ReaderError::Other(boxed))),
+        err => PbzError::Reader(err),
+    }
 }
 
 /// Per-piece streaming state: one chunk of scratch per touch entry, merged
@@ -1244,7 +1255,7 @@ fn process_piece<R: ValueReader>(ctx: &RunCtx<'_>, reader: &mut R, piece: Piece)
         }
         reader
             .read_windows(w.name, w.local_lo, w.local_hi, &cuts, &mut sink)
-            .map_err(PbzError::Reader)?;
+            .map_err(from_reader_err)?;
     }
     ctx.timings.decode.record(read_start.elapsed());
 
