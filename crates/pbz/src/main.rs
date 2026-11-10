@@ -1,13 +1,13 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use indicatif_log_bridge::LogWrapper;
 use log::{LevelFilter, debug, info};
 use pbzarr::Dataset;
+use pbzarr::import::Source;
 use pbzarr::import::progress;
 use pbzarr::import::{Config, ConfigBuilder};
 use pbzarr::import::{Target, store_reference};
@@ -414,54 +414,42 @@ impl ImportOptions {
 #[derive(Debug, Args)]
 #[group(multiple = false)]
 struct ImportInputOptions {
-    /// Input files, optionally suffixed with `:LABEL`.
-    #[arg(value_name = "PATH[:LABEL]", required_unless_present = "file_list")]
+    /// Input files, optionally suffixed with `:LABEL`. The default label is the
+    /// file name without its format extension (`s1.bed.gz` gives `s1`).
+    #[arg(
+        value_name = "PATH[:LABEL]",
+        value_parser = parse_source,
+        required_unless_present = "file_list"
+    )]
     input_files: Vec<Source>,
-    /// Tab-delimited source manifest containing PATH or PATH<TAB>LABEL records.
+    /// Tab-delimited source list with PATH or PATH<TAB>LABEL records. Relative
+    /// paths start from the directory of the list file.
     #[arg(short, long, value_name = "PATH")]
     file_list: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Source {
-    path: PathBuf,
-    label: Option<String>,
-}
-
-impl Source {
-    fn validate_labels(sources: &[Self]) -> Result<()> {
-        let has_labels = sources.iter().any(|source| source.label.is_some());
-        let has_unlabeled = sources.iter().any(|source| source.label.is_none());
-        if has_labels && has_unlabeled {
-            bail!("sources must either all provide labels or none do");
-        }
-        Ok(())
+/// Parse `PATH[:LABEL]`. The text after the last `:` is a label only when it
+/// has no path separator, so URLs and Windows paths stay whole.
+fn parse_source(value: &str) -> std::result::Result<Source, String> {
+    let (path, label) = match value.rsplit_once(':') {
+        Some((path, label)) if !label.contains(['/', '\\']) => (path, Some(label)),
+        _ => (value, None),
+    };
+    if path.is_empty() {
+        return Err("source path must not be empty".into());
     }
-}
-
-impl FromStr for Source {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        let (path, label) = match value.rsplit_once(':') {
-            Some((path, label)) => (path, Some(label)),
-            None => (value, None),
-        };
-        if path.is_empty() {
-            return Err("source path must not be empty".into());
-        }
-        if label == Some("") {
-            return Err("source label must not be empty".into());
-        }
-        Ok(Self {
-            path: PathBuf::from(path),
-            label: label.map(str::to_owned),
-        })
+    if label == Some("") {
+        return Err("source label must not be empty".into());
     }
+    Ok(Source {
+        path: PathBuf::from(path),
+        column_label: label.map(str::to_owned),
+    })
 }
 
-fn read_source_list(path: &Path) -> Result<Vec<Source>> {
+fn read_source_list(path: &Path, format: &str) -> Result<Vec<Source>> {
     let file = File::open(path).with_context(|| format!("open source list {}", path.display()))?;
+    let base = path.parent().unwrap_or(Path::new(""));
     let reader = BufReader::new(file);
     let mut sources = Vec::new();
 
@@ -479,37 +467,48 @@ fn read_source_list(path: &Path) -> Result<Vec<Source>> {
                 index + 1
             );
         }
-        let label = fields.get(1).map(|label| label.to_string());
-        if label.as_deref() == Some("") {
+        let column_label = fields.get(1).map(|label| label.to_string());
+        if column_label.as_deref() == Some("") {
             bail!(
                 "source list {} line {} has an empty label",
                 path.display(),
                 index + 1
             );
         }
+        let source_path = if fields[0].contains("://") {
+            PathBuf::from(fields[0])
+        } else {
+            base.join(fields[0])
+        };
         sources.push(Source {
-            path: PathBuf::from(fields[0]),
-            label,
+            path: source_path,
+            column_label,
         });
     }
 
     if sources.is_empty() {
-        bail!("source list {} contains no BED sources", path.display());
+        bail!(
+            "source list {} contains no {format} sources",
+            path.display()
+        );
     }
-    Source::validate_labels(&sources)?;
     Ok(sources)
 }
 
 impl ImportInputOptions {
-    fn resolve_input(&self) -> Result<Vec<Source>> {
+    /// The sources in column order, from the command line or the source list.
+    fn resolve_input(&self, format: &str) -> Result<Vec<Source>> {
         let sources = match &self.file_list {
-            Some(path) => read_source_list(path)?,
+            Some(path) => read_source_list(path, format)?,
             None => self.input_files.clone(),
         };
         if sources.is_empty() {
             bail!("at least one input source is required");
         }
-        Source::validate_labels(&sources)?;
+        let labeled = sources.iter().filter(|s| s.column_label.is_some()).count();
+        if labeled != 0 && labeled != sources.len() {
+            bail!("sources must either all provide labels or none do");
+        }
         Ok(sources)
     }
 }
@@ -764,16 +763,7 @@ fn import_bed(args: BedArgs, quiet: bool) -> Result<()> {
         return emit_schema(bed, infer_rows);
     }
 
-    let sources: Vec<pbzarr::import::Source> = args
-        .bed
-        .input
-        .resolve_input()?
-        .into_iter()
-        .map(|source| pbzarr::import::Source {
-            path: source.path,
-            column_label: source.label,
-        })
-        .collect();
+    let sources = args.bed.input.resolve_input("BED")?;
     debug!(
         "resolved {} BED source(s), infer rows {infer_rows:?}",
         sources.len()
@@ -827,16 +817,7 @@ fn import_bed(args: BedArgs, quiet: bool) -> Result<()> {
 }
 
 fn import_bam(args: BamArgs, quiet: bool) -> Result<()> {
-    let sources: Vec<pbzarr::import::Source> = args
-        .bam
-        .input
-        .resolve_input()?
-        .into_iter()
-        .map(|source| pbzarr::import::Source {
-            path: source.path,
-            column_label: source.label,
-        })
-        .collect();
+    let sources = args.bam.input.resolve_input("BAM/CRAM")?;
     let n_sources = sources.len();
     debug!("resolved {n_sources} alignment source(s)");
 
@@ -877,16 +858,7 @@ fn import_bam(args: BamArgs, quiet: bool) -> Result<()> {
 }
 
 fn import_d4(args: D4Args, quiet: bool) -> Result<()> {
-    let sources: Vec<pbzarr::import::Source> = args
-        .d4
-        .input
-        .resolve_input()?
-        .into_iter()
-        .map(|source| pbzarr::import::Source {
-            path: source.path,
-            column_label: source.label,
-        })
-        .collect();
+    let sources = args.d4.input.resolve_input("d4")?;
     let n_sources = sources.len();
     debug!("resolved {n_sources} d4 source(s)");
 
@@ -907,16 +879,7 @@ fn import_d4(args: D4Args, quiet: bool) -> Result<()> {
 }
 
 fn import_bigwig(args: BigWigArgs, quiet: bool) -> Result<()> {
-    let sources: Vec<pbzarr::import::Source> = args
-        .bigwig
-        .input
-        .resolve_input()?
-        .into_iter()
-        .map(|source| pbzarr::import::Source {
-            path: source.path,
-            column_label: source.label,
-        })
-        .collect();
+    let sources = args.bigwig.input.resolve_input("bigWig")?;
     let n_sources = sources.len();
     debug!("resolved {n_sources} bigWig source(s)");
 
@@ -934,18 +897,6 @@ fn import_bigwig(args: BigWigArgs, quiet: bool) -> Result<()> {
         print_report("imported", n_sources, &output, &report);
     }
     Ok(())
-}
-
-/// Resolve the sources an append decodes, in column order.
-fn append_sources(input: &ImportInputOptions) -> Result<Vec<pbzarr::import::Source>> {
-    Ok(input
-        .resolve_input()?
-        .into_iter()
-        .map(|source| pbzarr::import::Source {
-            path: source.path,
-            column_label: source.label,
-        })
-        .collect())
 }
 
 /// Open the store an append grows and read the column dimension of `track`.
@@ -994,7 +945,7 @@ fn print_report(verb: &str, sources: usize, path: &Path, report: &pbzarr::import
 }
 
 fn append_d4(args: AppendD4Args, quiet: bool) -> Result<()> {
-    let sources = append_sources(&args.target.input)?;
+    let sources = args.target.input.resolve_input("d4")?;
     let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
     let config = args.append.config(&args.target.track, dim, quiet);
     let report = from_d4(
@@ -1011,7 +962,7 @@ fn append_d4(args: AppendD4Args, quiet: bool) -> Result<()> {
 }
 
 fn append_bigwig(args: AppendBigWigArgs, quiet: bool) -> Result<()> {
-    let sources = append_sources(&args.target.input)?;
+    let sources = args.target.input.resolve_input("bigWig")?;
     let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
     let config = args.append.config(&args.target.track, dim, quiet);
     let report = from_bigwig(
@@ -1028,7 +979,7 @@ fn append_bigwig(args: AppendBigWigArgs, quiet: bool) -> Result<()> {
 }
 
 fn append_bam(args: AppendBamArgs, quiet: bool) -> Result<()> {
-    let sources = append_sources(&args.target.input)?;
+    let sources = args.target.input.resolve_input("BAM/CRAM")?;
     let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
     let config = args.append.config(&args.target.track, dim, quiet);
     let mode = match args.decode.mode {
@@ -1063,7 +1014,7 @@ fn append_bam(args: AppendBamArgs, quiet: bool) -> Result<()> {
 }
 
 fn append_bed(args: AppendBedArgs, quiet: bool) -> Result<()> {
-    let sources = append_sources(&args.target.input)?;
+    let sources = args.target.input.resolve_input("BED")?;
     let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
     let genome = dataset.reference()?.clone();
     let dtype = Dtype::from_str(
@@ -1170,11 +1121,7 @@ fn emit_schema(bed: &Path, infer_rows: InferRows) -> Result<()> {
 
 /// Build a `BedSchema` from a TSV schema file, resolving name selectors against
 /// the first BED header and inferring omitted dtypes across every source.
-fn load_schema(
-    schema_path: &Path,
-    sources: &[pbzarr::import::Source],
-    infer_rows: InferRows,
-) -> Result<BedSchema> {
+fn load_schema(schema_path: &Path, sources: &[Source], infer_rows: InferRows) -> Result<BedSchema> {
     let text = std::fs::read_to_string(schema_path)
         .with_context(|| format!("read schema {}", schema_path.display()))?;
     let rows = read_schema_rows(&text, schema_path)?;
@@ -1308,6 +1255,17 @@ mod tests {
         ])
         .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn sources_keep_urls_and_drop_compound_extensions() {
+        let url = parse_source("https://h/x.bam").unwrap();
+        assert_eq!(url.path, PathBuf::from("https://h/x.bam"));
+        assert!(url.column_label.is_none());
+        let labeled = parse_source("https://h/x.bam:S1").unwrap();
+        assert_eq!(labeled.path, PathBuf::from("https://h/x.bam"));
+        assert_eq!(labeled.label(), "S1");
+        assert_eq!(parse_source("dir/s1.bed.gz").unwrap().label(), "s1");
     }
 
     #[test]

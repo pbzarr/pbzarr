@@ -137,7 +137,7 @@ Import several files as labeled columns:
 pbz import bigwig cohort.pbz brain.bw:brain liver.bw:liver --track signal --dim sample
 ```
 
-All sources must describe the same genome. Without explicit labels, the import uses each file's stem as its column label.
+All sources must describe the same genome. Without explicit labels, the import uses the file name without its format extension as the column label. For example, `s1.bed.gz`, `s1.bw`, and `s1.cram` all give `s1`. The text after the last `:` is a label only when it contains no `/` or `\`. Thus a URL such as `https://host/s1.bam` stays one path.
 
 The command accepts the same import options as `pbz import d4`. These include `--file-list`, `--threads`, chunk and shard sizes, `--codecs`, and `--no-progress`.
 
@@ -155,7 +155,7 @@ Read the sources from a list file:
 pbz import bigwig cohort.pbz --file-list sources.tsv --track signal
 ```
 
-The source list contains one path per line, optionally followed by a tab and a label. If any source has a label, all sources must have labels.
+The source list contains one path per line, optionally followed by a tab and a label. A relative path starts from the directory of the list file. If any source has a label, all sources must have labels.
 
 An import or append writes one summary line to stderr. `-q` hides the summary line and the progress display. `-v` gives more log output. You can put `-q` and `-v` before or after the subcommand.
 

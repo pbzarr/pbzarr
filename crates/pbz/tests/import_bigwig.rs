@@ -175,3 +175,32 @@ fn labeled_cohorts_accept_positional_sources_and_a_manifest() {
         );
     }
 }
+
+#[test]
+fn file_list_paths_start_from_the_list_directory() {
+    let dir = TempDir::new().unwrap();
+    let inputs = dir.path().join("inputs");
+    std::fs::create_dir(&inputs).unwrap();
+    write_bigwig(&inputs, "first", &[(0, 12, 1.0)]);
+    write_bigwig(&inputs, "second", &[(0, 12, 2.0)]);
+    let list = inputs.join("sources.tsv");
+    std::fs::write(&list, "first.bw\nsecond.bw\n").unwrap();
+    let output = dir.path().join("cohort.pbz");
+
+    let elsewhere = TempDir::new().unwrap();
+    let mut args = import_args(&output);
+    args.extend(["--file-list".into(), list.into_os_string()]);
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_pbz"))
+        .args(args)
+        .current_dir(elsewhere.path())
+        .output()
+        .unwrap();
+    stdout_of(&run);
+
+    let dataset = Dataset::open(&output).unwrap();
+    let labels = dataset.read_raw::<String>("sample", &[0..2]).unwrap();
+    assert_eq!(
+        labels.iter().cloned().collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+}

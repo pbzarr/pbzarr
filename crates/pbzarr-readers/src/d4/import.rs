@@ -13,7 +13,7 @@ use super::reader::D4Reader;
 /// Sizes the column axis from the file list. One source with no configured
 /// column dimension yields a scalar track; otherwise the sources form a 2D
 /// track whose labels come from each source's `column_label` (falling back to
-/// its file stem). All source headers must list the same contigs in the same
+/// its file name without the format extension). All source headers must list the same contigs in the same
 /// order.
 ///
 /// A Dataset keeps its own reference, which the sources must match.
