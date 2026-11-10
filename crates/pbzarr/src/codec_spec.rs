@@ -15,7 +15,7 @@ use crate::error::PbzError;
 
 /// Explicit array spec parsed from the CLI `--codecs` flag or the Python
 /// `codecs=` keyword: standard Zarr v3 metadata, stored verbatim and applied
-/// when the track's `values` array is created.
+/// when the track array is created.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExplicitArraySpec {

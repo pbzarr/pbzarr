@@ -39,7 +39,7 @@ pub struct TrackConfig {
     pub column_chunk_size: Option<usize>,
     pub shard_size: Option<usize>,
     pub shard_column_size: Option<usize>,
-    /// Explicit Zarr codec/chunk-grid metadata for the `values` array.
+    /// Explicit Zarr codec/chunk-grid metadata for the track array.
     /// Replaces the default Blosc pipeline; the chunk/shard size fields are
     /// then ignored except as the fallback outer grid when the spec carries
     /// no `chunk_grid`.
@@ -171,7 +171,7 @@ pub(crate) fn apply_explicit_spec(
     if let Some(grid_metadata) = &spec.chunk_grid {
         let grid = ChunkGrid::from_metadata(grid_metadata, array_shape).map_err(|e| {
             PbzError::Metadata(format!(
-                "track {track:?}: chunk_grid for rank-{} values array: {e}",
+                "track {track:?}: chunk_grid for a rank-{} track array: {e}",
                 array_shape.len()
             ))
         })?;

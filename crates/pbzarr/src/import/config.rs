@@ -42,7 +42,7 @@ pub struct Config {
     /// `"strand"`, `"context"`, etc. when the columns are not samples. Ignored
     /// for single-source (scalar) imports.
     pub column_dim: Option<String>,
-    /// Explicit Zarr codec/chunk-grid metadata for created `values` arrays.
+    /// Explicit Zarr codec/chunk-grid metadata for the created track arrays.
     /// Consumed at track creation; replaces the default pipeline and the
     /// chunk/shard sizing above.
     pub codecs: Option<ExplicitArraySpec>,

@@ -344,7 +344,7 @@ struct ImportOptions {
     /// one track).
     #[arg(short = 'c', long, value_name = "NAME")]
     dim: Option<String>,
-    /// Zarr v3 codec metadata for created `values` arrays: a `codecs` JSON
+    /// Zarr v3 codec metadata for the created track arrays: a `codecs` JSON
     /// array, or a `{"chunk_grid": ..., "codecs": [...]}` fragment. Pass
     /// `@path` to read the JSON from a file. Replaces the default
     /// Blosc(zstd-5, byte shuffle) pipeline; express sharding as a

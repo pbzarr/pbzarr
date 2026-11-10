@@ -1317,7 +1317,7 @@ fn target_geometries<'t>(
         let (chunk_len, col_chunk) = if sharded {
             let sub = array.effective_subchunk_shape().ok_or_else(|| {
                 PbzError::Metadata(format!(
-                    "track {:?}: sharded values array with indeterminate subchunk shape",
+                    "track {:?}: sharded array with indeterminate subchunk shape",
                     track.name()
                 ))
             })?;

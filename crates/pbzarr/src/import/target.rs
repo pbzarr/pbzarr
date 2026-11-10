@@ -27,7 +27,8 @@ pub enum Target<'a> {
     /// path, so every format entry point appends without knowing about it.
     Append(&'a mut Dataset),
     /// A store path. When the path does not exist, the import creates a
-    /// format-0.5 store whose reference is the contig list of the sources. When it exists, the import adds new tracks to that store.
+    /// format-0.5 store whose reference is the contig list of the sources.
+    /// When it exists, the import adds new tracks to that store.
     Path(&'a Path),
 }
 

@@ -4,9 +4,9 @@ PBZ is a small Zarr v3 convention for dense, per-base genomic data. The format s
 
 pbzarr reads and writes format 0.5 (one root Dataset) only; see the [format 0.5 specification](../spec/README.md). Earlier contig-major, per-track, and wrapper-oriented designs are historical only.
 
-## Development reader
+## Rust reader
 
-The additive Rust `pbzarr::Dataset` reads the
+The Rust `pbzarr::Dataset` reads the
 [format `0.5` root-Dataset schema](../spec/README.md).
 It catalogs direct root arrays, validates reference and dimension coordinates,
 and reads typed rectangular subsets. `read_raw` preserves physical values and
