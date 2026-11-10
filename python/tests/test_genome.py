@@ -143,3 +143,26 @@ def test_views_align_by_label_within_one_contig(store: Path) -> None:
     np.testing.assert_array_equal(a.sel(position="chr1:3").values, VALUES[3])
     with pytest.raises(xr.AlignmentError):
         a + other
+
+
+MASK_INTERVALS = ["chr1:1-3", "chr1:2-5", "chr2:0-1"]
+MASK = np.array([0, 1, 1, 1, 1, 0, 1, 0, 0, 0], dtype=bool)
+
+
+def test_interval_mask_values(store: Path) -> None:
+    with pbzarr.open(store) as ds:
+        mask = pbzarr.interval_mask(ds, MASK_INTERVALS)
+        assert mask.dims == ("position",)
+        assert mask.chunks == ((4, 4, 2),)
+        assert Reference.from_xarray(mask) == Reference.from_xarray(ds)
+        np.testing.assert_array_equal(mask.values, MASK)
+    with pbzarr.open(store, chunks=None) as ds:
+        plain = pbzarr.interval_mask(ds["depth"], MASK_INTERVALS)
+        np.testing.assert_array_equal(plain.values, MASK)
+
+
+def test_interval_mask_with_where(store: Path) -> None:
+    with pbzarr.open(store) as ds:
+        mask = pbzarr.interval_mask(ds["depth"], MASK_INTERVALS)
+        masked = ds["depth"].where(mask, 0)
+        np.testing.assert_array_equal(masked.values, np.where(MASK[:, None], VALUES, 0))

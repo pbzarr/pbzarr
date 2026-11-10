@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TypeVar
 
+import dask.array as da
 import numpy as np
 import xarray as xr
 
@@ -13,7 +15,7 @@ from ._locus import locus_coords
 from ._native import PbzError
 from ._reference import Reference, bin_width
 from ._region import RegionQuery
-from ._regions import reduce_regions_dataset
+from ._regions import interval_columns, reduce_regions_dataset
 
 T = TypeVar("T", xr.DataArray, xr.Dataset)
 
@@ -84,6 +86,72 @@ def region(
     if "position" in view.dims:
         view = view.assign_coords(locus_coords(locus.contig, locus.start, locus.end))
     return _coord.attach(view, ref)
+
+
+def interval_mask(
+    obj: xr.DataArray | xr.Dataset,
+    intervals,
+    /,
+    *,
+    reference: Reference | None = None,
+) -> xr.DataArray:
+    """A lazy bool DataArray over ``position``: True inside any interval.
+
+    ``obj`` is a whole-genome DataArray or Dataset with a ``position``
+    dimension. ``intervals`` takes the forms of ``reduce_regions``; they are
+    0-based and half-open, and they may overlap. The mask is a Dask array with
+    the ``position`` chunks of ``obj``, and it carries the reference that was
+    used.
+    """
+    if not isinstance(obj, (xr.DataArray, xr.Dataset)):
+        raise TypeError("interval_mask needs an xarray DataArray or Dataset")
+    if "position" not in obj.dims:
+        raise ValueError("interval_mask needs an object with a 'position' dimension")
+    ref = reference if reference is not None else Reference.from_xarray(obj)
+    _check_full(obj, ref)
+
+    contig_ids, starts, ends = interval_columns(ref, intervals)
+    offsets = ref.offsets[contig_ids]
+    starts, ends = _merged(offsets + starts, offsets + ends)
+    chunks = _position_chunks(obj)
+    if chunks is None:
+        chunks = da.core.normalize_chunks("auto", (ref.size(),), dtype=np.bool_)[0]
+    mask = da.map_blocks(
+        partial(_mask_block, starts, ends),
+        chunks=(chunks,),
+        dtype=np.bool_,
+        meta=np.empty(0, dtype=np.bool_),
+    )
+    return _coord.attach(xr.DataArray(mask, dims=("position",)), ref)
+
+
+def _merged(starts: np.ndarray, ends: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Sorted, disjoint, non-adjacent intervals that cover the same rows."""
+    order = np.argsort(starts, kind="stable")
+    starts = starts[order]
+    reach = np.maximum.accumulate(ends[order])
+    first = np.ones(starts.size, dtype=bool)
+    first[1:] = starts[1:] > reach[:-1]
+    last = np.append(np.flatnonzero(first)[1:] - 1, starts.size - 1)
+    return starts[first], reach[last]
+
+
+def _mask_block(starts: np.ndarray, ends: np.ndarray, block_info=None) -> np.ndarray:
+    lo, hi = block_info[None]["array-location"][0]
+    first = np.searchsorted(ends, lo, side="right")
+    last = np.searchsorted(starts, hi, side="left")
+    edges = np.zeros(hi - lo + 1, dtype=np.int8)
+    edges[np.maximum(starts[first:last] - lo, 0)] = 1
+    edges[np.minimum(ends[first:last] - lo, hi - lo)] = -1
+    return np.cumsum(edges[:-1], dtype=np.int8) > 0
+
+
+def _position_chunks(obj: xr.DataArray | xr.Dataset) -> tuple[int, ...] | None:
+    variables = obj.variables.values() if isinstance(obj, xr.Dataset) else [obj.variable]
+    for variable in variables:
+        if "position" in variable.dims and variable.chunks is not None:
+            return variable.chunks[variable.dims.index("position")]
+    return None
 
 
 def _reduce_dataset(

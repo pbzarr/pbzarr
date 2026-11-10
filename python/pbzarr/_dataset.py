@@ -145,13 +145,11 @@ class _Store:
                     f"{where} lies on a genomic dimension; the format stores no "
                     "coordinate over position or bin_N. Drop it before write"
                 )
-            if coord_name in value.dims:
+            if coord_name in value.dims or coord.ndim == 0:
+                # 0-d coordinates are what isel, sel or a reduction leaves behind.
                 continue
             in_store = coord_name in self.catalog or coord_name in stored_dims
             stored = self.catalog.get(coord_name)
-            if coord.ndim == 0 and in_store and (stored is None or stored.dims):
-                # What isel or sel leaves of a stored dimension, such as sample.
-                continue
             if bin_width(coord_name) is not None:
                 raise ValueError(f"{where} has a genomic dimension name")
             if in_store:

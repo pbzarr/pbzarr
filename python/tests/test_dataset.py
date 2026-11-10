@@ -287,10 +287,13 @@ def test_write_refuses_misplaced_coordinates(cohort: Path) -> None:
             pbzarr.write(ds, {"wrong": wrong})
 
 
-def test_write_compares_a_0d_coordinate_with_a_0d_store_array(cohort: Path) -> None:
+def test_write_drops_0d_coordinates(cohort: Path) -> None:
     with pbzarr.open(cohort) as ds:
         depth = ds["depth"].astype("float64")
         pbzarr.write(ds, {"q50": depth.quantile(0.5, "position")}).close()
-        pbzarr.write(ds, {"q50_again": depth.quantile(0.5, "position")}).close()
-        with pytest.raises(ValueError, match="'quantile' differs from the store array"):
-            pbzarr.write(ds, {"q90": depth.quantile(0.9, "position")})
+        pbzarr.write(ds, {"q90": depth.quantile(0.9, "position")}).close()
+    with pbzarr.open(cohort) as ds:
+        assert {"q50", "q90"} <= set(ds.data_vars)
+        assert "quantile" not in ds.variables
+        for name in ds.data_vars:
+            assert "quantile" not in ds[name].coords

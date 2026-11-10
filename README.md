@@ -82,6 +82,15 @@ The result has one mean for each peak and sample. Other reductions include `sum`
 
 Dask keeps reads and calculations lazy until `compute()`. The computed result must still fit in memory.
 
+### Mask positions inside regions
+
+```python
+mask = pbzarr.interval_mask(ds, peaks)
+peak_depth = ds["depth"].where(mask)
+```
+
+`pbzarr.interval_mask` gives a lazy bool array over `position`. A value is True inside a region and False outside it. It takes the same region forms as `reduce_regions`, and the regions can overlap.
+
 ### Write a derived track
 
 ```python
@@ -89,7 +98,7 @@ ds = pbzarr.open("depth.pbz")
 ds = pbzarr.write(ds, {"over_10": (ds["depth"] >= 10).mean("sample")})
 ```
 
-A derived track must cover the whole reference on `position`, or have no genomic dimension. `pbzarr.write` takes a path, a URL, or a Dataset from `pbzarr.open`. It adds the track to the store, with the default Zarr codecs unless `encoding=` says otherwise, and returns the store opened again. It does not change the Dataset that you give it.
+A derived track must cover the whole reference on `position`, or have no genomic dimension. The write drops 0-d coordinates, for example `quantile` after `quantile(0.5)`. `pbzarr.write` takes a path, a URL, or a Dataset from `pbzarr.open`. It adds the track to the store, with the default Zarr codecs unless `encoding=` says otherwise, and returns the store opened again. It does not change the Dataset that you give it.
 
 ### Import other files
 

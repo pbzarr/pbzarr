@@ -1283,6 +1283,29 @@ def _resolve_regions(ds: xr.Dataset, reference, intervals) -> RegionLayout:
         raise PbzError("regions() requires a normal PBZ track Dataset")
     _check_tracks(ds, reference)
 
+    contig_ids, starts, stops = interval_columns(reference, intervals)
+    offsets = reference.offsets
+    input_index = np.arange(contig_ids.size, dtype=np.int64)
+    order = np.lexsort((input_index, starts, contig_ids))
+    contig_ids = contig_ids[order]
+    starts = starts[order]
+    stops = stops[order]
+    input_index = input_index[order]
+    if np.any((contig_ids[1:] == contig_ids[:-1]) & (starts[1:] < stops[:-1])):
+        raise ValueError("regions must not overlap")
+
+    return _build_region_layout(
+        contig_ids,
+        starts,
+        stops,
+        offsets[contig_ids] + starts,
+        offsets[contig_ids] + stops,
+        input_index,
+    )
+
+
+def interval_columns(reference, intervals) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Contig indexes and contig-local starts and ends of ``intervals``, in input order."""
     if isinstance(intervals, (RegionQuery, str)) or (
         isinstance(intervals, tuple)
         and len(intervals) == 3
@@ -1293,17 +1316,11 @@ def _resolve_regions(ds: xr.Dataset, reference, intervals) -> RegionLayout:
             for bound in intervals[1:]
         )
     ):
-        normalized = _normalize_one(intervals)
-        resolved, flat_slice = _resolve_one(reference, normalized)
-        contigs = np.asarray(reference.names, dtype=object)
-        contig_id = np.flatnonzero(contigs == resolved.contig)
-        return _build_region_layout(
-            np.asarray([int(contig_id[0])], dtype=np.int64),
+        resolved, _ = _resolve_one(reference, _normalize_one(intervals))
+        return (
+            np.asarray([reference.names.index(resolved.contig)], dtype=np.int64),
             np.asarray([resolved.start], dtype=np.int64),
             np.asarray([resolved.end], dtype=np.int64),
-            np.asarray([flat_slice.start], dtype=np.int64),
-            np.asarray([flat_slice.stop], dtype=np.int64),
-            np.asarray([0], dtype=np.int64),
         )
 
     columns = _dataframe_columns(intervals)
@@ -1325,24 +1342,7 @@ def _resolve_regions(ds: xr.Dataset, reference, intervals) -> RegionLayout:
         raise ValueError("region must be nonempty with start less than end")
     if np.any(stops > contig_lengths):
         raise ValueError("region end exceeds contig length")
-
-    input_index = np.arange(contig_ids.size, dtype=np.int64)
-    order = np.lexsort((input_index, starts, contig_ids))
-    contig_ids = contig_ids[order]
-    starts = starts[order]
-    stops = stops[order]
-    input_index = input_index[order]
-    if np.any((contig_ids[1:] == contig_ids[:-1]) & (starts[1:] < stops[:-1])):
-        raise ValueError("regions must not overlap")
-
-    return _build_region_layout(
-        contig_ids,
-        starts,
-        stops,
-        offsets[contig_ids] + starts,
-        offsets[contig_ids] + stops,
-        input_index,
-    )
+    return contig_ids, starts, stops
 
 
 def _check_tracks(ds: xr.Dataset, reference) -> None:
