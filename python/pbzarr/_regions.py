@@ -107,43 +107,45 @@ def _plan(
 ) -> list[_Batch]:
     """Batches of regions in position order, bounded by bytes and Dask chunks.
 
-    Overlapping and adjacent regions share one span, so their rows are read
-    once. A batch reads one range when its spans cover at least half of it,
-    and the exact rows of the spans when they do not.
+    The bytes bound counts the rows of each region, so many overlapping
+    regions over few positions also split. In a batch, overlapping and
+    adjacent regions share one span, so their rows are read once. A batch
+    reads one range when its spans cover at least half of it, and the exact
+    rows of the spans when they do not.
     """
     order = np.lexsort((flat_ends, flat_starts))
     starts = flat_starts[order]
     ends = flat_ends[order]
-    reach = np.maximum.accumulate(ends)
-    head = np.ones(order.size, dtype=bool)
-    head[1:] = starts[1:] > reach[:-1]
-    span_of = np.cumsum(head) - 1
-    heads = np.flatnonzero(head)
-    span_lo = starts[heads]
-    span_hi = reach[np.append(heads[1:] - 1, order.size - 1)]
-
-    span_bytes = (span_hi - span_lo) * max(row_bytes, 1)
-    batch = (np.cumsum(span_bytes) - span_bytes) // _BATCH_BYTES
+    keys = [(ends - starts) * max(row_bytes, 1)]
     if boundaries is not None:
-        first_chunk = np.searchsorted(boundaries, span_lo, side="right") - 1
-        last_chunk = np.searchsorted(boundaries, span_hi - 1, side="right") - 1
-        seen = np.concatenate(([-1], last_chunk[:-1]))
+        reach_before = np.concatenate(([0], np.maximum.accumulate(ends)[:-1]))
+        new_from = np.maximum(starts, reach_before)
+        first_chunk = np.searchsorted(boundaries, new_from, side="right") - 1
+        last_chunk = np.searchsorted(boundaries, ends - 1, side="right") - 1
+        seen = np.searchsorted(boundaries, reach_before - 1, side="right") - 1
         new_chunks = np.maximum(last_chunk - np.maximum(first_chunk, seen + 1) + 1, 0)
-        batch = np.maximum(batch, (np.cumsum(new_chunks) - new_chunks) // _BATCH_CHUNKS)
+        keys.append(new_chunks * (_BATCH_BYTES // _BATCH_CHUNKS))
+    change = np.zeros(order.size, dtype=bool)
+    for cost in keys:
+        level = (np.cumsum(cost) - cost) // _BATCH_BYTES
+        change[1:] |= level[1:] != level[:-1]
+    region_edges = np.concatenate(([0], np.flatnonzero(change), [order.size]))
 
-    span_edges = np.concatenate(([0], np.flatnonzero(np.diff(batch)) + 1, [heads.size]))
-    region_edges = np.append(heads, order.size)[span_edges]
     batches = []
-    for index in range(span_edges.size - 1):
-        a, b = int(span_edges[index]), int(span_edges[index + 1])
+    for index in range(region_edges.size - 1):
         r0, r1 = int(region_edges[index]), int(region_edges[index + 1])
-        lo, hi = span_lo[a:b], span_hi[a:b]
         region_starts, region_ends = starts[r0:r1], ends[r0:r1]
+        reach = np.maximum.accumulate(region_ends)
+        head = np.ones(r1 - r0, dtype=bool)
+        head[1:] = region_starts[1:] > reach[:-1]
+        span = np.cumsum(head) - 1
+        heads = np.flatnonzero(head)
+        lo = region_starts[heads]
+        hi = reach[np.append(heads[1:] - 1, r1 - r0 - 1)]
         sliced = 2 * int((hi - lo).sum()) >= int(hi[-1] - lo[0])
         if sliced:
             local = region_starts - lo[0]
         else:
-            span = span_of[r0:r1] - a
             edges = np.cumsum(hi - lo) - (hi - lo)
             local = edges[span] + (region_starts - lo[span])
         batches.append(

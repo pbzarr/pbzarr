@@ -129,6 +129,20 @@ def test_a_region_inside_one_chunk_reads_only_that_chunk(store: Path) -> None:
     assert sorted(reads) == [(4, 0), (4, 1), (4, 2)]
 
 
+def test_many_overlapping_regions_split_into_bounded_tasks(tmp_path: Path) -> None:
+    # 1,700 windows of 20,000 rows over 54,000 positions: about 136 MB of
+    # region rows from 216 kB of data, which one task must not hold.
+    values = np.arange(54_000, dtype=np.float32)
+    path = tmp_path / "windows.pbz"
+    write_pbz_store(path, {"chr1": 54_000}, "v", values, dims=("position",), chunks=(54_000,))
+    starts = np.arange(0, 34_000, 20)
+    windows = (np.full(starts.size, "chr1"), starts, starts + 20_000)
+    with pbzarr.open(path) as ds:
+        result = pbzarr.reduce_regions(ds, windows, "mean")
+        assert result["v"].data.numblocks[0] > 1
+        np.testing.assert_allclose(result["v"].values, starts + 9_999.5, rtol=1e-6)
+
+
 def test_bin_variables_are_left_out_with_a_warning(store: Path) -> None:
     with pbzarr.open(store) as opened:
         ds = opened.assign(binned=("bin_10", np.arange(8)))
