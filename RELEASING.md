@@ -21,7 +21,7 @@ Python wheel (PyPI) and the `pbz` CLI binaries (GitHub release) ship in lockstep
    `.github/workflows/release.yml`:
    - **build-wheels**: `.github/workflows/wheels.yml` builds abi3 wheels for
      linux x86_64 (manylinux_2_28, glibc 2.28 or newer) and a macOS universal2
-     wheel (Intel + Apple Silicon) on the macos-14 Apple Silicon runner. It then
+     wheel (Intel + Apple Silicon) on the macos-15 Apple Silicon runner. It then
      installs each wheel, imports a d4 fixture, opens the store and reads a
      region.
    - **build-binaries**: `.github/workflows/binaries.yml` builds `pbz` for

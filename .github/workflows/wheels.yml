@@ -20,7 +20,7 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64 }
-          - { os: macos-14, target: universal2-apple-darwin }
+          - { os: macos-15, target: universal2-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

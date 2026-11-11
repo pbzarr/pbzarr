@@ -9,6 +9,13 @@ platforms = ["osx-arm64", "osx-64", "linux-64"]
 rust = "1.93.0.*"
 pkg-config = "0.29.2.*"
 
+# The conda rust package links with the conda toolchain, so C code in build
+# scripts must use the conda compilers too: a newer system glibc (for example
+# Ubuntu 26.04 on CI) leaves symbols such as __isoc23_strtol unresolved.
+[target.linux-64.dependencies]
+c-compiler = "2.0.0.*"
+cxx-compiler = "2.0.0.*"
+
 [tasks]
 build = "cargo build --workspace"
 build-release = "cargo build --workspace --release"
