@@ -20,7 +20,7 @@ _PBZ_SOURCE_ATTR = "_pbz_source"
 
 _I64_MAX = 2**63 - 1
 # One task holds at most about this many bytes of rows, unless one region is larger.
-_BATCH_BYTES = 128 * 1024**2
+_BATCH_BYTES = 32 * 1024**2
 # One task touches about this many Dask position chunks at most.
 _BATCH_CHUNKS = 16
 
