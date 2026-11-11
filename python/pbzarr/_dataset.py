@@ -52,6 +52,14 @@ _TIME_UNITS = frozenset(
     {"days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"}
 )
 
+_DEFAULT_CHUNK = 65_536
+_DEFAULT_SHARD = 1_024
+_DEFAULT_SHARD_COLUMNS = 16
+# Encoding keys that replace the default layout of a new position variable.
+_LAYOUT_KEYS = frozenset({"chunks", "shards", "compressors", "serializer", "filters"})
+# Target size of one Dask chunk of a genomic track when the store opens.
+_DASK_CHUNK_BYTES = 128 * 1024**2
+
 
 @dataclass(frozen=True)
 class _Stored:
@@ -217,11 +225,17 @@ def open(
 
     Every array carries the 0-d ``reference`` coordinate. ``tracks=`` limits
     the data variables and keeps the reference and label coordinates. By
-    default each track is a Dask array chunked by its stored shard (or chunk)
-    shape; ``chunks=None`` gives lazy NumPy-backed arrays, and any other value
-    goes to ``xr.open_zarr``. The Dataset is a snapshot: a change in memory
-    does not reach the store. A missing local store raises
-    ``FileNotFoundError``, and an unknown track name raises ``ValueError``.
+    default each track is a Dask array. A track whose first dimension is
+    genomic gets Dask chunks of about 128 MiB: whole inner chunks along
+    positions that do not split a shard, and all columns when they fit
+    (else whole shards of columns). Such tracks that share an inner chunk
+    and shard grid take the smallest of their Dask chunks, so they align.
+    Other arrays are chunked by their stored shard (or chunk) shape.
+    ``chunks=None`` gives lazy NumPy-backed arrays,
+    and any other value goes to ``xr.open_zarr``. The Dataset is a snapshot:
+    a change in memory does not reach the store. A missing local store
+    raises ``FileNotFoundError``, and an unknown track name raises
+    ``ValueError``.
     """
     data = _read(source, storage_options, chunks).data
     if tracks is not None:
@@ -290,6 +304,17 @@ def write(
     existing variable, and the Dataset passed as ``target`` does not change.
     If the write fails, the arrays it created are removed; it is not atomic
     against a crash.
+
+    A new variable whose first dimension is ``position`` and that has 1 or 2
+    dimensions gets the import layout: inner chunks of 65,536 positions (and
+    1 column), shards of 1,024 inner chunks (and up to 16 columns), and
+    Blosc zstd level 5 with shuffle. A shard is capped at the variable
+    length rounded up to whole inner chunks, and at the variable width.
+    When ``encoding=`` for the variable gives ``chunks``, ``shards``,
+    ``compressors``, ``serializer`` or ``filters``, xarray chooses the layout
+    instead. A Dask-backed value
+    with the import layout is rechunked to whole shards, and each write task
+    holds one shard: a shard of 16 ``int32`` columns is 4 GiB.
     """
     source = _target_source(target)
     _zip.refuse(source)
@@ -319,12 +344,24 @@ def write(
     if unknown:
         raise ValueError(f"encoding names variables not being written: {sorted(unknown)}")
 
-    new = xr.Dataset(values, coords=coords, attrs=store.root_attrs)
     var_encoding = {}
     for name in values:
         entry = dict(encoding.get(name, {}))
         entry.setdefault("_FillValue", None)
+        variable = values[name]
+        if not _LAYOUT_KEYS & entry.keys():
+            layout = _default_layout(variable)
+            if layout is not None:
+                chunks, shards = layout
+                entry["chunks"] = chunks
+                entry["shards"] = shards
+                entry["compressors"] = (
+                    zarr.codecs.BloscCodec(cname="zstd", clevel=5, shuffle="shuffle"),
+                )
+                if variable.chunks is not None:
+                    values[name] = variable.chunk(dict(zip(variable.dims, shards)))
         var_encoding[name] = entry
+    new = xr.Dataset(values, coords=coords, attrs=store.root_attrs)
     try:
         new.to_zarr(
             store.source,
@@ -338,6 +375,21 @@ def write(
         raise
     _consolidate(store.source, storage_options)
     return open(store.source, storage_options=storage_options)
+
+
+def _default_layout(variable: xr.Variable) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+    """The inner chunk and shard shapes of the import layout, for a variable
+    with 1 or 2 dimensions whose first dimension is ``position``."""
+    if not variable.ndim or variable.dims[0] != "position" or variable.ndim > 2:
+        return None
+    extent = variable.shape[0]
+    cover = -(-max(extent, 1) // _DEFAULT_CHUNK) * _DEFAULT_CHUNK
+    chunks = (_DEFAULT_CHUNK,)
+    shards = (min(_DEFAULT_CHUNK * _DEFAULT_SHARD, cover),)
+    if variable.ndim == 2:
+        chunks += (1,)
+        shards += (min(_DEFAULT_SHARD_COLUMNS, max(variable.shape[1], 1)),)
+    return chunks, shards
 
 
 def _target_source(target):
@@ -407,9 +459,7 @@ def _read_store(store, source, storage_options, chunks, *, listed: bool) -> _Sto
         _check_genomic_dims(data, reference)
         data = _coord.attach(data, reference)
         if chunks is _STORED_CHUNKS:
-            data = data.assign(
-                {name: _stored_chunks(value) for name, value in data.data_vars.items()}
-            )
+            data = data.assign(_stored_chunks(data.data_vars))
         for name, value in data.data_vars.items():
             _attach_source(value, source, name, catalog[name], storage_options)
     except Exception:
@@ -565,11 +615,61 @@ def _check_genomic_dims(data: xr.Dataset, reference: Reference) -> None:
             )
 
 
-def _stored_chunks(value: xr.DataArray) -> xr.DataArray:
-    shape = value.encoding.get("shards") or value.encoding.get("chunks")
-    if shape is None:
-        return value
-    return value.chunk(dict(zip(value.dims, shape, strict=True)))
+def _stored_chunks(variables) -> dict[str, xr.DataArray]:
+    """Each variable rechunked for Dask.
+
+    Genomic variables that share a dimension and its inner chunk and shard
+    edge take the smallest Dask chunk along it, so that they align and
+    ``Dataset.chunks`` works.
+    """
+    shapes = {}
+    grids = {}
+    for name, value in variables.items():
+        inner = value.encoding.get("chunks")
+        if inner is None:
+            continue
+        shard = value.encoding.get("shards") or inner
+        if value.ndim in (1, 2) and bin_width(value.dims[0]) is not None:
+            shapes[name] = _genomic_dask_chunks(value.shape, inner, shard, value.dtype.itemsize)
+            grids[name] = tuple(zip(value.dims, inner, shard))
+        else:
+            shapes[name] = tuple(shard)
+    smallest = {}
+    for name, grid in grids.items():
+        for key, size in zip(grid, shapes[name]):
+            smallest[key] = min(smallest.get(key, size), size)
+    for name, grid in grids.items():
+        shapes[name] = tuple(smallest[key] for key in grid)
+    return {
+        name: variables[name].chunk(dict(zip(variables[name].dims, shape, strict=True)))
+        for name, shape in shapes.items()
+    }
+
+
+def _genomic_dask_chunks(shape, inner, shard, itemsize: int) -> tuple[int, ...]:
+    """Dask chunks of about ``_DASK_CHUNK_BYTES`` that do not split a shard.
+
+    Each one is whole inner chunks along positions and whole shards along
+    columns, and it holds all columns when one row of inner chunks fits.
+    """
+    row_bytes = itemsize
+    columns = ()
+    if len(shape) == 2:
+        width = shape[1]
+        if inner[0] * width * itemsize <= _DASK_CHUNK_BYTES:
+            columns = (width,)
+        else:
+            fit = _DASK_CHUNK_BYTES // (inner[0] * shard[1] * itemsize)
+            columns = (min(max(fit, 1) * shard[1], width),)
+        row_bytes *= columns[0]
+    count = max(_DASK_CHUNK_BYTES // (inner[0] * row_bytes), 1)
+    per_shard = shard[0] // inner[0]
+    if count < per_shard:
+        count = max(d for d in range(1, count + 1) if per_shard % d == 0)
+        positions = count * inner[0]
+    else:
+        positions = count // per_shard * shard[0]
+    return (min(positions, max(shape[0], 1)), *columns)
 
 
 def _attach_source(

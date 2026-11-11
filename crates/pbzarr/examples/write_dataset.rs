@@ -75,10 +75,9 @@ fn import_columns(ds: &mut Dataset, name: &str, values: [u32; 2]) -> anyhow::Res
     let config = TrackConfig::new(Dtype::U32)
         .columns(vec!["S1".into(), "S2".into()])
         .column_dim("sample")
-        .chunk_size(4)
-        .column_chunk_size(1)
-        .shard_size(8)
-        .shard_column_size(2);
+        .chunk(4)
+        .shard(2)
+        .shard_columns(2);
     Import::from_readers(readers)?
         .into_dataset(ds, vec![(name.into(), config)])
         .readers_as_columns()
@@ -99,7 +98,7 @@ fn main() -> anyhow::Result<()> {
     let mut ds = Dataset::create(path, reference())?;
     import_columns(&mut ds, "depth", [7, 3])?;
     let mut zero = TrackConfig::new(Dtype::U32)
-        .chunk_size(4)
+        .chunk(4)
         .codecs(ExplicitArraySpec::parse(
             r#"[{"name":"bytes","configuration":{"endian":"little"}},
             {"name":"zstd","configuration":{"level":1,"checksum":false}}]"#,
@@ -112,7 +111,10 @@ fn main() -> anyhow::Result<()> {
     Import::from_readers(vec![ConstantReader::new(Value::Mask(false))])?
         .into_dataset(
             &mut ds,
-            vec![("mask".into(), TrackConfig::new(Dtype::Bool).chunk_size(4))],
+            vec![(
+                "mask".into(),
+                TrackConfig::new(Dtype::Bool).chunk(4).unsharded(),
+            )],
         )
         .run()?;
     Ok(())

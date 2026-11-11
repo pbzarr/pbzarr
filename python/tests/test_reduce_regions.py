@@ -138,7 +138,7 @@ def test_unknown_keyword_is_refused(store: Path) -> None:
             pbzarr.reduce_regions(ds, INTERVALS, "prod")
 
 
-def test_a_region_inside_one_chunk_reads_only_that_chunk(store: Path) -> None:
+def test_a_region_inside_one_chunk_reads_only_that_chunk(store: Path, monkeypatch) -> None:
     # Store path: every other chunk of the track is garbage, so a read of it fails.
     chunks = sorted((store / "count" / "c").iterdir(), key=lambda p: int(p.name))
     for chunk in chunks:
@@ -149,6 +149,8 @@ def test_a_region_inside_one_chunk_reads_only_that_chunk(store: Path) -> None:
         assert result["count"].values.tolist() == [COUNT[17:23].sum(), COUNT[16:18].sum()]
 
     # Dask path: count the source blocks that a transformed track computes.
+    # One Dask chunk holds 8 positions of all 3 columns.
+    monkeypatch.setattr("pbzarr._dataset._DASK_CHUNK_BYTES", 8 * 3 * 4)
     reads = []
 
     def count(block, block_info=None):
@@ -158,7 +160,7 @@ def test_a_region_inside_one_chunk_reads_only_that_chunk(store: Path) -> None:
     with pbzarr.open(store, tracks=["depth"]) as ds:
         depth = ds["depth"].copy(data=ds["depth"].data.map_blocks(count, dtype=DEPTH.dtype))
         pbzarr.reduce_regions(depth, [("chr1", 33, 38)], "mean").compute()
-    assert sorted(reads) == [(4, 0), (4, 1), (4, 2)]
+    assert sorted(reads) == [(4, 0)]
 
 
 def test_many_overlapping_regions_split_into_bounded_tasks(tmp_path: Path) -> None:

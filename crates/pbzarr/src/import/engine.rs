@@ -1886,6 +1886,15 @@ mod tests {
         .unwrap()
     }
 
+    /// An unsharded layout of `chunk` positions by two columns per chunk.
+    fn column_pair_chunks(chunk: u64) -> crate::ExplicitArraySpec {
+        crate::ExplicitArraySpec::from_value(serde_json::json!({
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [chunk, 2]}},
+            "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}]
+        }))
+        .unwrap()
+    }
+
     fn dataset(path: &Path, genome: &Reference) -> Dataset {
         Dataset::create(path, genome.clone()).unwrap()
     }
@@ -1983,10 +1992,9 @@ mod tests {
         };
         let sharded = || {
             TrackConfig::new(Dtype::I32)
-                .chunk_size(16)
-                .column_chunk_size(2)
-                .shard_size(48)
-                .shard_column_size(2)
+                .chunk(16)
+                .shard(3)
+                .shard_columns(2)
         };
         let dir = TempDir::new().unwrap();
         let a = run(dir.path(), "a.pbz", sharded(), 3);
@@ -1994,9 +2002,7 @@ mod tests {
         let c = run(
             dir.path(),
             "c.pbz",
-            TrackConfig::new(Dtype::I32)
-                .chunk_size(16)
-                .column_chunk_size(2),
+            TrackConfig::new(Dtype::I32).chunk(16).unsharded(),
             3,
         );
         let read = |ds: &Dataset| -> ndarray::Array2<i32> {
@@ -2018,7 +2024,7 @@ mod tests {
         // Covered: chunk 0 (0..16) and chunk 3 (48..64); chunks 1 and 2 empty.
         let reader =
             SynthReader::new(genome.clone(), Dtype::I32, 0..16, 7).with_extra_cover(48..64);
-        let cfg = TrackConfig::new(Dtype::I32).chunk_size(16);
+        let cfg = TrackConfig::new(Dtype::I32).chunk(16).unsharded();
         let report = import(&mut ds, "v", cfg, vec![reader])
             .config(Config {
                 workers: 1,
@@ -2041,8 +2047,8 @@ mod tests {
         let genome = one_contig(len);
         let mut ds = dataset(&dir.path().join("shard.pbz"), &genome);
         let cfg = TrackConfig::new(Dtype::I32)
-            .chunk_size(16)
-            .shard_size(48)
+            .chunk(16)
+            .shard(3)
             .fill_value(serde_json::json!(-1));
         // Shard row 0 holds chunks 0..3 (0..48); row 1 holds chunks 3..5
         // (48..80). Coverage 0..40 leaves row 1 untouched.
@@ -2093,14 +2099,13 @@ mod tests {
         let genome = one_contig(len);
         let labels: Vec<String> = (0..3).map(|i| format!("s{i}")).collect();
         let cases = [
-            TrackConfig::new(Dtype::I32).chunk_size(16),
-            TrackConfig::new(Dtype::I32).chunk_size(16).shard_size(48),
+            TrackConfig::new(Dtype::I32).chunk(16).unsharded(),
+            TrackConfig::new(Dtype::I32).chunk(16).shard(3),
             TrackConfig::new(Dtype::I32)
                 .columns(labels.clone())
-                .chunk_size(16)
-                .column_chunk_size(2)
-                .shard_size(48)
-                .shard_column_size(2),
+                .chunk(16)
+                .shard(3)
+                .shard_columns(2),
         ];
         let dir = TempDir::new().unwrap();
         for (i, cfg) in cases.into_iter().enumerate() {
@@ -2145,7 +2150,7 @@ mod tests {
         .unwrap();
         let mut ds = dataset(&dir.path().join("split.pbz"), &genome);
         let reader = SynthReader::new(genome, Dtype::I32, 0..22, 100);
-        let cfg = TrackConfig::new(Dtype::I32).chunk_size(8);
+        let cfg = TrackConfig::new(Dtype::I32).chunk(8).unsharded();
         let report = import(&mut ds, "v", cfg, vec![reader])
             .config(Config {
                 workers: 1,
@@ -2180,7 +2185,7 @@ mod tests {
             inner: SynthReader::new(genome, Dtype::I32, 0..400, 0),
             seen: Arc::clone(&seen),
         };
-        let cfg = TrackConfig::new(Dtype::I32).chunk_size(16);
+        let cfg = TrackConfig::new(Dtype::I32).chunk(16).unsharded();
         import(&mut ds, "v", cfg, vec![reader])
             .config(Config {
                 workers: 3,
@@ -2204,7 +2209,7 @@ mod tests {
         let mut ds = dataset(&dir.path().join("fill.pbz"), &genome);
         let reader = SynthReader::new(genome, Dtype::F32, 16..26, 0);
         // F32 tracks default to a NaN fill.
-        let cfg = TrackConfig::new(Dtype::F32).chunk_size(16);
+        let cfg = TrackConfig::new(Dtype::F32).chunk(16).unsharded();
         let report = import(&mut ds, "signal", cfg, vec![reader]).run().unwrap();
         // Chunks 16,16,8: only the middle has coverage.
         assert_eq!(report.chunks_written, 1);
@@ -2289,8 +2294,7 @@ mod tests {
         let mut ds = dataset(&dir.path().join("conc.pbz"), &genome);
         let cfg = TrackConfig::new(Dtype::I32)
             .columns(labels)
-            .chunk_size(16)
-            .column_chunk_size(2);
+            .codecs(column_pair_chunks(16));
 
         let gauge = Arc::new((Mutex::new((0usize, 0usize)), Condvar::new()));
         let readers: Vec<ConcurrencyProbe> = (0..2)
@@ -2334,9 +2338,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let plain_cfg = TrackConfig::new(Dtype::I32)
             .columns(labels.clone())
-            .chunk_size(16)
-            .column_chunk_size(2);
-        let sharded_cfg = plain_cfg.clone().shard_size(32).shard_column_size(4);
+            .chunk(16)
+            .unsharded();
+        let sharded_cfg = plain_cfg.clone().shard(2).shard_columns(4);
         let mut plain = dataset(&dir.path().join("plain.pbz"), &genome);
         let mut sharded = dataset(&dir.path().join("sharded.pbz"), &genome);
 
@@ -2394,9 +2398,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let plain_cfg = TrackConfig::new(Dtype::I32)
             .columns(labels.clone())
-            .chunk_size(16)
-            .column_chunk_size(1);
-        let sharded_cfg = plain_cfg.clone().shard_size(32).shard_column_size(2);
+            .chunk(16)
+            .unsharded();
+        let sharded_cfg = plain_cfg.clone().shard(2).shard_columns(2);
         let mut plain = dataset(&dir.path().join("plain.pbz"), &genome);
         let mut sharded = dataset(&dir.path().join("sharded.pbz"), &genome);
 
@@ -2494,7 +2498,7 @@ mod tests {
             live: Arc::clone(&live),
             peak: Arc::clone(&peak),
         };
-        let cfg = TrackConfig::new(Dtype::I32).chunk_size(4);
+        let cfg = TrackConfig::new(Dtype::I32).chunk(4).unsharded();
         let report = import(&mut ds, "v", cfg, vec![reader])
             .config(Config {
                 workers: 8,
@@ -2519,7 +2523,10 @@ mod tests {
         let genome = one_contig(32);
         let labels = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let mut ds = dataset(&dir.path().join("floor.pbz"), &genome);
-        let cfg = TrackConfig::new(Dtype::I32).columns(labels).chunk_size(8);
+        let cfg = TrackConfig::new(Dtype::I32)
+            .columns(labels)
+            .chunk(8)
+            .unsharded();
 
         let readers: Vec<SynthReader> = (0..3)
             .map(|i| SynthReader::new(genome.clone(), Dtype::I32, 0..32, (i + 1) * 100))
@@ -2589,7 +2596,7 @@ mod tests {
                 schema: OutputSchema::single("value", Dtype::I32),
                 panic_at: 32,
             };
-            let cfg = TrackConfig::new(Dtype::I32).chunk_size(4);
+            let cfg = TrackConfig::new(Dtype::I32).chunk(4).unsharded();
             let result = import(&mut ds, "v", cfg, vec![reader])
                 .config(Config {
                     workers: 4,
@@ -2660,7 +2667,7 @@ mod tests {
             cancel: Arc::clone(&cancel),
             reads: Arc::clone(&reads),
         };
-        let cfg = TrackConfig::new(Dtype::I32).chunk_size(4);
+        let cfg = TrackConfig::new(Dtype::I32).chunk(4).unsharded();
         let result = import(&mut ds, "v", cfg, vec![reader])
             .config(Config {
                 workers: 2,

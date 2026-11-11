@@ -154,7 +154,10 @@ pub fn build_store(dir: &Path) -> PathBuf {
         .unwrap()
         .into_dataset(
             &mut dataset,
-            vec![("depth".into(), TrackConfig::new(Dtype::I32).chunk_size(4))],
+            vec![(
+                "depth".into(),
+                TrackConfig::new(Dtype::I32).chunk(4).unsharded(),
+            )],
         )
         .run()
         .unwrap();
@@ -169,10 +172,9 @@ pub fn build_store(dir: &Path) -> PathBuf {
     let mut af = TrackConfig::new(Dtype::F32)
         .columns(vec!["s1".into(), "s2".into()])
         .column_dim("sample")
-        .chunk_size(4)
-        .column_chunk_size(1)
-        .shard_size(8)
-        .shard_column_size(1);
+        .chunk(4)
+        .shard(2)
+        .shard_columns(1);
     af.extra.insert("_FillValue".into(), "AAAAAAAA+H8=".into());
     Import::from_readers(vec![ColumnReader::new(s1), ColumnReader::new(s2)])
         .unwrap()
@@ -194,7 +196,8 @@ pub fn build_null_store(dir: &Path) -> PathBuf {
     let score = TrackConfig::new(Dtype::I32)
         .columns(vec!["s1".into(), "s2".into()])
         .column_dim("sample")
-        .chunk_size(4)
+        .chunk(4)
+        .unsharded()
         .fill(Fill::Na);
     Import::from_readers(vec![ColumnReader::new(s1), ColumnReader::new(s2)])
         .unwrap()

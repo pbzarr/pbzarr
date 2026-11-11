@@ -2,7 +2,7 @@
 //!   cargo build --release --example profile_import
 //!   ./target/release/examples/profile_import \
 //!       --contigs 4 --length 50000000 --cols 8 \
-//!       --chunk-size 1000000 --workers 4
+//!       --chunk 65536 --shard 1024 --workers 4
 //!
 //! Profile with samply:
 //!   pixi global install samply  (or: cargo install samply)
@@ -23,9 +23,10 @@ struct Args {
     contigs: usize,
     length: u64,
     cols: usize,
-    chunk_size: usize,
-    column_chunk_size: usize,
-    shard_size: Option<usize>,
+    chunk: usize,
+    /// `None` (from `--unsharded`) writes one object per inner chunk.
+    shard: Option<usize>,
+    shard_columns: usize,
     workers: usize,
     keep: bool,
     out: Option<PathBuf>,
@@ -40,9 +41,9 @@ impl Args {
             contigs: 4,
             length: 50_000_000,
             cols: 8,
-            chunk_size: 1_000_000,
-            column_chunk_size: 16,
-            shard_size: None,
+            chunk: pbzarr::DEFAULT_CHUNK,
+            shard: Some(pbzarr::DEFAULT_SHARD),
+            shard_columns: pbzarr::DEFAULT_SHARD_COLUMNS,
             workers: 4,
             keep: false,
             out: None,
@@ -54,9 +55,10 @@ impl Args {
                 "--contigs" => a.contigs = it.next().unwrap().parse().unwrap(),
                 "--length" => a.length = it.next().unwrap().parse().unwrap(),
                 "--cols" => a.cols = it.next().unwrap().parse().unwrap(),
-                "--chunk-size" => a.chunk_size = it.next().unwrap().parse().unwrap(),
-                "--column-chunk-size" => a.column_chunk_size = it.next().unwrap().parse().unwrap(),
-                "--shard-size" => a.shard_size = Some(it.next().unwrap().parse().unwrap()),
+                "--chunk" => a.chunk = it.next().unwrap().parse().unwrap(),
+                "--shard" => a.shard = Some(it.next().unwrap().parse().unwrap()),
+                "--shard-columns" => a.shard_columns = it.next().unwrap().parse().unwrap(),
+                "--unsharded" => a.shard = None,
                 "--workers" => a.workers = it.next().unwrap().parse().unwrap(),
                 "--keep" => a.keep = true,
                 "--out" => a.out = Some(PathBuf::from(it.next().unwrap())),
@@ -64,7 +66,7 @@ impl Args {
                 "-h" | "--help" => {
                     eprintln!(
                         "usage: profile_import [--contigs N] [--length L] [--cols C] \
-                         [--chunk-size N] [--column-chunk-size N] [--shard-size N] \
+                         [--chunk N] [--shard N] [--shard-columns N] [--unsharded] \
                          [--workers W] [--keep] [--out PATH]"
                     );
                     std::process::exit(0);
@@ -168,9 +170,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let import_cfg = Config {
         workers: args.workers,
-        chunk_size: Some(args.chunk_size),
-        column_chunk_size: Some(args.column_chunk_size),
-        shard_size: args.shard_size,
+        chunk: args.chunk,
+        shard: args.shard,
+        shard_columns: args.shard_columns,
         ..Config::default()
     };
 
@@ -186,11 +188,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut cfg = TrackConfig::new(Dtype::U32)
             .columns(column_names)
             .column_dim("sample")
-            .chunk_size(args.chunk_size)
-            .column_chunk_size(args.column_chunk_size);
-        if let Some(s) = args.shard_size {
-            cfg = cfg.shard_size(s);
-        }
+            .chunk(args.chunk)
+            .shard_columns(args.shard_columns);
+        cfg.shard = args.shard;
         let readers: Vec<SynthReader> = (0..args.cols)
             .map(|i| SynthReader::new(genome.clone(), 0x9E3779B9u32.wrapping_mul(i as u32 + 1)))
             .collect();

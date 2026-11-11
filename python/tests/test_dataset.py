@@ -32,10 +32,9 @@ def cohort(tmp_path: Path, cohort_fixtures: list[Path]) -> Path:
         "depth",
         [(cohort_fixtures[0], "s0"), (cohort_fixtures[1], "s1")],
         dim="sample",
-        chunk_size=1000,
-        column_chunk_size=1,
-        shard_size=4000,
-        shard_column_size=1,
+        chunk=1000,
+        shard=4,
+        shard_columns=1,
     )
     return path
 
@@ -49,8 +48,8 @@ def test_open_selects_a_region_through_reference_rows(cohort: Path) -> None:
         assert rows == slice(100, 110)
         view = ds["depth"].isel(position=rows).sel(sample="s1")
         np.testing.assert_array_equal(view.values, _expected(1, np.arange(100, 110)))
-        # Default chunks follow the stored shard, not the inner chunk.
-        assert ds["depth"].chunks[0][0] == 4000
+        # The whole track fits in one default Dask chunk.
+        assert ds["depth"].chunks == ((LENGTH,), (2,))
 
 
 def test_reference_maps_binned_rows_and_intervals() -> None:
@@ -313,3 +312,54 @@ def test_numeric_float_fill_value_is_refused_by_name(tmp_path: Path) -> None:
     zarr.open_array(path / "x", mode="r+").attrs["_FillValue"] = -1.0
     with pytest.raises(PbzError, match="x: floating _FillValue -1.0 is a JSON number"):
         pbzarr.open(path)
+
+
+def test_open_dask_chunks_split_a_wide_track_inside_its_shards(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "wide.pbz"
+    wide = np.arange(1000 * 100, dtype=np.int32).reshape(1000, 100)
+    samples = [f"s{i}" for i in range(100)]
+    write_pbz_store(
+        path, {"chr1": 600, "chr2": 400}, "wide", wide, dims=("position", "sample"),
+        chunks=(10, 1), shards=(60, 8), labels={"sample": samples},
+    )
+    group = zarr.open_group(path, mode="r+")
+    group.create_array(
+        "depth", data=np.arange(1000, dtype=np.int32), chunks=(10,), shards=(60,),
+        dimension_names=("position",),
+    )
+    group.create_array(
+        "long", data=np.arange(1000, dtype=np.int32), chunks=(20,), shards=(120,),
+        dimension_names=("position",),
+    )
+    # One row of all columns (4,000 bytes) does not fit, so the columns split
+    # into whole shards of 8, and one inner chunk of rows fits.
+    monkeypatch.setattr("pbzarr._dataset._DASK_CHUNK_BYTES", 3000)
+    with pbzarr.open(path) as ds:
+        assert ds["wide"].chunks[0][0] == 10
+        assert ds["wide"].chunks[1][0] == 72
+        # "depth" has the grid of "wide", so it takes the smaller chunk.
+        assert ds[["wide", "depth"]].chunks["position"][0] == 10
+        # 37 inner chunks fit: round down to whole shards of 6.
+        assert ds["long"].chunks[0][0] == 720
+        intervals = [("chr1", 5, 75), ("chr2", 30, 31)]
+        result = pbzarr.reduce_regions(ds["wide"], intervals, "sum")
+        expected = [wide[5:75].sum(axis=0), wide[630:631].sum(axis=0)]
+        np.testing.assert_array_equal(result.values, expected)
+        np.testing.assert_array_equal(ds["wide"].isel(position=slice(15, 133)).values, wide[15:133])
+    # 4 inner chunks fit: the largest divisor of 6 that fits is 3.
+    monkeypatch.setattr("pbzarr._dataset._DASK_CHUNK_BYTES", 320)
+    with pbzarr.open(path) as ds:
+        assert ds["long"].chunks[0][0] == 60
+
+
+def test_pcodec_track_opens(tmp_path: Path) -> None:
+    path = tmp_path / "pcodec.pbz"
+    values = np.arange(100, dtype=np.int32) % 7
+    write_pbz_store(path, {"chr1": 100}, "first", values, dims=("position",), chunks=(50,))
+    group = zarr.open_group(path, mode="r+")
+    group.create_array(
+        "depth", data=values, chunks=(50,), dimension_names=("position",),
+        serializer=zarr.codecs.numcodecs.PCodec(level=8), compressors=None,
+    )
+    with pbzarr.open(path) as ds:
+        np.testing.assert_array_equal(ds["depth"].values, values)

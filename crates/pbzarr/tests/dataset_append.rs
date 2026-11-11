@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use pbzarr::import::{Axes, Config, Import, Target};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, TrackConfig};
+use pbzarr::{Contig, ExplicitArraySpec, TrackConfig};
 use pbzarr::{Dataset, Reference};
 use zarrs::storage::store::MemoryStore;
 use zarrs::storage::{
@@ -65,12 +65,17 @@ impl ValueReader for ConstReader {
     }
 }
 
+/// An unsharded cohort track of 4 positions by `column_chunk` columns per chunk.
 fn cohort(labels: &[&str], column_chunk: usize) -> TrackConfig {
+    let layout = ExplicitArraySpec::from_value(serde_json::json!({
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4, column_chunk]}},
+        "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}]
+    }))
+    .unwrap();
     TrackConfig::new(Dtype::U32)
         .columns(labels.iter().map(|l| (*l).to_owned()).collect())
         .column_dim("sample")
-        .column_chunk_size(column_chunk)
-        .chunk_size(4)
+        .codecs(layout)
 }
 
 fn import(dataset: &mut Dataset, track: &str, labels: &[&str], column_chunk: usize, base: u32) {

@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import subprocess
 
+import dask.array as da
 import numpy as np
 import pytest
 import xarray as xr
+import zarr
 
 import pbzarr
 from _helpers import bed_fixture, pbz_binary, write_sizes
@@ -294,7 +296,7 @@ def test_import_d4_codecs_override_controls_zarr_metadata(tmp_path, d4_fixture):
             destination,
             "depth2",
             d4_fixture,
-            chunk_size=100,
+            chunk=100,
             codecs=[{"name": "zstd", "configuration": {"level": 3, "checksum": False}}],
         )
 
@@ -328,3 +330,48 @@ def test_cli_reads_64_bit_integer_tracks_from_write(tmp_path):
     assert pbz("stat", destination, "--track", "unsigned", "-s", "max") == (
         f"#chrom\tstart\tend\tmax\nchr1\t0\t10\t{big}\n"
     )
+
+
+def _blosc(array):
+    (codec,) = array.compressors
+    return codec.cname.value, codec.clevel, codec.shuffle.value
+
+
+def test_import_d4_default_layout_and_layout_keywords(tmp_path, cohort_fixtures):
+    sources = [(cohort_fixtures[0], "s0"), (cohort_fixtures[1], "s1")]
+    default = tmp_path / "default.pbz"
+    pbzarr.import_d4(default, "depth", sources, dim="sample")
+    array = zarr.open_array(default / "depth", mode="r")
+    assert array.chunks == (65_536, 1)
+    assert array.shards == (65_536, 2)
+    assert _blosc(array) == ("zstd", 5, "shuffle")
+
+    custom = tmp_path / "custom.pbz"
+    pbzarr.import_d4(custom, "depth", sources, dim="sample", chunk=100, shard=4, shard_columns=1)
+    array = zarr.open_array(custom / "depth", mode="r")
+    assert array.chunks == (100, 1)
+    assert array.shards == (400, 1)
+
+
+def test_write_gives_a_position_variable_the_import_layout(tmp_path):
+    destination = tmp_path / "layout.pbz"
+    _create(destination, reference={"chr1": 100_000, "chr2": 50_000})
+    samples = [f"s{i}" for i in range(20)]
+    values = da.arange(150_000 * 20, dtype=np.int32, chunks=7_000).reshape(150_000, 20)
+    value = xr.DataArray(values, dims=("position", "sample"), coords={"sample": samples})
+    pbzarr.write(
+        destination,
+        {"default": value, "chosen": value.chunk({"position": 50_000, "sample": 20})},
+        encoding={"chosen": {"chunks": (50_000, 20)}},
+    ).close()
+
+    array = zarr.open_array(destination / "default", mode="r")
+    assert array.chunks == (65_536, 1)
+    assert array.shards == (3 * 65_536, 16)
+    assert _blosc(array) == ("zstd", 5, "shuffle")
+    chosen = zarr.open_array(destination / "chosen", mode="r")
+    assert chosen.chunks == (50_000, 20)
+    assert chosen.shards is None
+    with pbzarr.open(destination) as dataset:
+        np.testing.assert_array_equal(dataset["default"].values, values.compute())
+        np.testing.assert_array_equal(dataset["chosen"].values, values.compute())

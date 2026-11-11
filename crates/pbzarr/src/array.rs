@@ -84,20 +84,33 @@ impl std::fmt::Display for Fill {
     }
 }
 
+/// Default positions per inner chunk of a new track.
+pub const DEFAULT_CHUNK: usize = 65_536;
+/// Default inner chunks per shard along positions.
+pub const DEFAULT_SHARD: usize = 1_024;
+/// Default columns per shard of a 2D track.
+pub const DEFAULT_SHARD_COLUMNS: usize = 16;
+
 /// User-supplied configuration for a new track.
+///
+/// The inner chunk of a 2D track is always one column wide.
 #[derive(Debug, Clone)]
 pub struct TrackConfig {
     pub dtype: Dtype,
-    pub chunk_size: usize,
+    /// Positions per inner chunk. Default: [`DEFAULT_CHUNK`] (65,536).
+    pub chunk: usize,
     pub column_dim: Option<String>,
     pub columns: Option<Vec<String>>,
-    pub column_chunk_size: Option<usize>,
-    pub shard_size: Option<usize>,
-    pub shard_column_size: Option<usize>,
+    /// Inner chunks per shard along positions; `None` leaves the track
+    /// unsharded. Default: `Some(`[`DEFAULT_SHARD`]`)` (1,024).
+    pub shard: Option<usize>,
+    /// Columns per shard of a 2D track. Default: [`DEFAULT_SHARD_COLUMNS`]
+    /// (16).
+    pub shard_columns: usize,
     /// Explicit Zarr codec/chunk-grid metadata for the track array.
-    /// Replaces the default Blosc pipeline; the chunk/shard size fields are
-    /// then ignored except as the fallback outer grid when the spec carries
-    /// no `chunk_grid`.
+    /// Replaces the default Blosc pipeline and the shard layout. When the
+    /// spec carries no `chunk_grid`, the outer grid is `chunk` positions by
+    /// `shard_columns` columns, capped at the track width.
     pub codecs: Option<ExplicitArraySpec>,
     /// `None` gives the dtype default: 0 for integers, NaN for floats, false
     /// for bool, with no `_FillValue`.
@@ -108,17 +121,16 @@ pub struct TrackConfig {
 }
 
 impl TrackConfig {
-    /// Create a 1D track configuration with default chunk size (1M positions).
+    /// Create a 1D track configuration with the default layout.
     /// Call `.columns(...)` to make it 2D.
     pub fn new(dtype: Dtype) -> Self {
         Self {
             dtype,
-            chunk_size: 1_000_000,
+            chunk: DEFAULT_CHUNK,
             column_dim: None,
             columns: None,
-            column_chunk_size: None,
-            shard_size: None,
-            shard_column_size: None,
+            shard: Some(DEFAULT_SHARD),
+            shard_columns: DEFAULT_SHARD_COLUMNS,
             codecs: None,
             fill: None,
             description: None,
@@ -129,14 +141,11 @@ impl TrackConfig {
 
     /// Add a column axis to this track. The track becomes 2D with shape
     /// `(position, column)`. `column_dim` defaults to `"column"`; override
-    /// with `.column_dim(...)`. `column_chunk_size` defaults to 16.
+    /// with `.column_dim(...)`.
     pub fn columns(mut self, columns: Vec<String>) -> Self {
         self.columns = Some(columns);
         if self.column_dim.is_none() {
             self.column_dim = Some("column".into());
-        }
-        if self.column_chunk_size.is_none() {
-            self.column_chunk_size = Some(16);
         }
         self
     }
@@ -148,23 +157,24 @@ impl TrackConfig {
         self
     }
 
-    pub fn chunk_size(mut self, n: usize) -> Self {
-        self.chunk_size = n;
+    pub fn chunk(mut self, n: usize) -> Self {
+        self.chunk = n;
         self
     }
 
-    pub fn column_chunk_size(mut self, n: usize) -> Self {
-        self.column_chunk_size = Some(n);
+    pub fn shard(mut self, n: usize) -> Self {
+        self.shard = Some(n);
         self
     }
 
-    pub fn shard_size(mut self, n: usize) -> Self {
-        self.shard_size = Some(n);
+    /// Store each inner chunk as its own object.
+    pub fn unsharded(mut self) -> Self {
+        self.shard = None;
         self
     }
 
-    pub fn shard_column_size(mut self, n: usize) -> Self {
-        self.shard_column_size = Some(n);
+    pub fn shard_columns(mut self, n: usize) -> Self {
+        self.shard_columns = n;
         self
     }
 

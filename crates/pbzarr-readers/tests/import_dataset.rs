@@ -48,7 +48,8 @@ fn bigwig_cohort_imports_into_a_dataset() {
         ],
         None,
         Config {
-            chunk_size: Some(8),
+            chunk: 8,
+            shard: None,
             column_dim: Some("sample".to_owned()),
             ..Config::default()
         },

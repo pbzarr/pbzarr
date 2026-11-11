@@ -39,7 +39,8 @@ fn sharded_cohort_import_matches_unsharded() {
         "depth",
         &sources,
         Config {
-            chunk_size: Some(1_000),
+            chunk: 1_000,
+            shard: None,
             ..Config::default()
         },
     )
@@ -52,8 +53,8 @@ fn sharded_cohort_import_matches_unsharded() {
         &sources,
         Config {
             workers: 4,
-            chunk_size: Some(1_000),
-            shard_size: Some(4_000),
+            chunk: 1_000,
+            shard: Some(4),
             ..Config::default()
         },
     )

@@ -99,6 +99,8 @@ fn append_d4_widens_a_cohort_track() {
         "--track".into(),
         "depth".into(),
         "--no-progress".into(),
+        "--shard-columns".into(),
+        "1".into(),
         labeled(&d4, "s1"),
         labeled(&d4, "s2"),
     ]);

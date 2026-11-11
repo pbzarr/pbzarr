@@ -25,10 +25,11 @@ def _check_copy(path: Path) -> None:
 
 def test_cli_import_and_append_write_the_copy(tmp_path, d4_fixture):
     store = tmp_path / "cohort.pbz"
-    for command, labels in (("import", ["s1", "s2"]), ("append", ["s3", "s4"])):
+    steps = (("import", ["s1", "s2"], ["--shard-columns", "1"]), ("append", ["s3", "s4"], []))
+    for command, labels, layout in steps:
         subprocess.run(
             [pbz_binary(), command, "d4", store, "--track", "depth", "--no-progress",
-             *(f"{d4_fixture}:{label}" for label in labels)],
+             *layout, *(f"{d4_fixture}:{label}" for label in labels)],
             check=True, capture_output=True,
         )
         _check_copy(store)

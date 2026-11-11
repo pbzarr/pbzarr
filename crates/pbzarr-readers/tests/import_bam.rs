@@ -63,7 +63,8 @@ fn depth_single_source_scalar_roundtrip() {
         &[Source::new(&fx.bam)],
         ImportMode::Depth,
         Config {
-            chunk_size: Some(100),
+            chunk: 100,
+            shard: None,
             ..Config::default()
         },
     );
@@ -79,7 +80,7 @@ fn depth_single_source_scalar_roundtrip() {
     assert!(read(&store, "depth", "ref2").iter().all(|&v| v == 0));
 
     // ref1 occupies flat chunk 0 ([0,100)), ref2 occupies flat chunk 1
-    // ([100,160)); with chunk_size=100 they land in separate physical
+    // ([100,160)); with chunk=100 they land in separate physical
     // chunks, so ref2's all-zero chunk should never be written.
     assert_eq!(count_chunk_files(&store.join("depth")), 1);
 }
@@ -223,7 +224,8 @@ fn chunk_boundary_read() {
         &[Source::new(&fx.bam)],
         ImportMode::Depth,
         Config {
-            chunk_size: Some(16),
+            chunk: 16,
+            shard: None,
             ..Config::default()
         },
     );
@@ -242,11 +244,11 @@ fn chunk_boundary_read() {
 /// anchored at `ref_pos` would land one past the span and vanish whenever the
 /// chunk grid cuts right after the read.
 #[test]
-fn insertion_anchor_is_chunk_size_independent() {
+fn insertion_anchor_is_chunk_independent() {
     let bam = bam_common::ins_anchor_bam();
     let dir = TempDir::new().unwrap();
 
-    let ins = |name: &str, chunk_size: usize| {
+    let ins = |name: &str, chunk: usize| {
         let store = dir.path().join(name);
         import(
             &store,
@@ -254,7 +256,8 @@ fn insertion_anchor_is_chunk_size_independent() {
             &[Source::new(&bam)],
             ImportMode::Composition,
             Config {
-                chunk_size: Some(chunk_size),
+                chunk,
+                shard: None,
                 ..Config::default()
             },
         );

@@ -199,7 +199,9 @@ struct AppendArgs {
                   {track}_{field} tracks. In the other variables, the new columns read \
                   as the fill value. A variable without that dimension, such as a \
                   reduction across columns, keeps its shape and becomes stale. pbz does \
-                  not detect or mark it."
+                  not detect or mark it. Append cannot yet grow a track whose shard holds \
+                  more than one column, which is the import default (--shard-columns 16). \
+                  To append later, import with --shard-columns 1."
 )]
 enum AppendCommand {
     /// Append columns decoded from tabix-indexed BED files.
@@ -416,18 +418,23 @@ fn init_logging(global: &GlobalOptions) {
 struct ImportOptions {
     #[command(flatten)]
     run: RunOptions,
-    /// Position chunk size.
-    #[arg(long)]
-    chunk_size: Option<usize>,
-    /// Column chunk size for multi-source imports.
-    #[arg(long)]
-    column_chunk_size: Option<usize>,
-    /// Position shard size.
-    #[arg(long)]
-    shard_size: Option<usize>,
-    /// Column shard size for multi-source imports.
-    #[arg(long)]
-    shard_column_size: Option<usize>,
+    /// Positions per inner chunk. A 2D track has one column per inner
+    /// chunk. Default: 65,536.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    chunk: Option<u64>,
+    /// Inner chunks per shard along positions, so a shard holds chunk x N
+    /// positions. A shard is capped at the genome length, rounded up to whole
+    /// chunks. Default: 1,024.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    shard: Option<u64>,
+    /// Columns per shard of a 2D track. A shard is capped at the track
+    /// width. Default: 16. Give 1 to make a track that pbz append can grow.
+    #[arg(
+        long = "shard-columns",
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    shard_columns: Option<u64>,
     /// Name of the second dimension of a 2D track. A single source with
     /// --dim still makes a 2D track. Default: `sample` for several d4,
     /// bigWig or BAM sources. BED import has no default: it needs --dim
@@ -438,18 +445,18 @@ struct ImportOptions {
     /// Zarr v3 codec metadata for the created track arrays: a `codecs` JSON
     /// array, or a `{"chunk_grid": ..., "codecs": [...]}` fragment. Pass
     /// `@path` to read the JSON from a file. Replaces the default
-    /// Blosc(zstd-5, byte shuffle) pipeline; express sharding as a
-    /// `sharding_indexed` codec and the outer grid as `chunk_grid`.
+    /// Blosc(zstd-5, byte shuffle) pipeline and the whole chunk and shard
+    /// layout; express sharding as a `sharding_indexed` codec and the outer
+    /// grid as `chunk_grid`. Without `chunk_grid`, the outer grid is 65,536
+    /// positions by 16 columns, capped at the track width.
     #[arg(
         long,
         value_name = "JSON|@FILE",
-        conflicts_with_all = ["chunk_size", "column_chunk_size", "shard_size", "shard_column_size"]
+        conflicts_with_all = ["chunk", "shard", "shard_columns"]
     )]
     codecs: Option<String>,
     /// Write a new single-file zip store. A STORE path that ends in
-    /// `.zip` also does this. The path must not exist. Without a
-    /// shard flag or --codecs, each shard holds 64 position chunks and all
-    /// columns.
+    /// `.zip` also does this. The path must not exist.
     #[arg(long)]
     zip: bool,
 }
@@ -478,10 +485,9 @@ impl ImportOptions {
 
     fn config(&self, label: &str, quiet: bool) -> Result<Config> {
         Ok(ConfigBuilder {
-            chunk_size: self.chunk_size,
-            column_chunk_size: self.column_chunk_size,
-            shard_size: self.shard_size,
-            shard_column_size: self.shard_column_size,
+            chunk: self.chunk.map(|n| n as usize),
+            shard: self.shard.map(|n| n as usize),
+            shard_columns: self.shard_columns.map(|n| n as usize),
             column_dim: self.dim.clone(),
             codecs: self.parse_codecs()?,
             ..self.run.builder(label, quiet)
@@ -1459,7 +1465,7 @@ mod tests {
             "depth",
             "--codecs",
             "[]",
-            "--chunk-size",
+            "--chunk",
             "100",
             "in.bed.gz",
         ])
@@ -1481,6 +1487,10 @@ mod tests {
             &["--in-flight", "8"][..],
             &["--scales", "16"],
             &["--progress"],
+            &["--chunk-size", "4"],
+            &["--column-chunk-size", "1"],
+            &["--shard-size", "8"],
+            &["--shard-column-size", "2"],
         ] {
             let err = import(flag).unwrap_err();
             assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);

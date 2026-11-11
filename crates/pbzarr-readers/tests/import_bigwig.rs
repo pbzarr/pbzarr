@@ -78,7 +78,8 @@ fn sharded_scalar_import_matches_unsharded() {
         &src(),
         None,
         Config {
-            chunk_size: Some(1_000),
+            chunk: 1_000,
+            shard: None,
             ..Config::default()
         },
     )
@@ -92,8 +93,8 @@ fn sharded_scalar_import_matches_unsharded() {
         None,
         Config {
             workers: 4,
-            chunk_size: Some(1_000),
-            shard_size: Some(4_000),
+            chunk: 1_000,
+            shard: Some(4),
             ..Config::default()
         },
     )
@@ -122,7 +123,8 @@ fn import_gapped(
         &[Source::new(bw)],
         fill,
         Config {
-            chunk_size: Some(100),
+            chunk: 100,
+            shard: None,
             ..Config::default()
         },
     )

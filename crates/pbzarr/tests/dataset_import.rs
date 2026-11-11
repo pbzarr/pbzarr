@@ -159,7 +159,7 @@ fn singleton_import_uses_root_arrays() {
     let cfg = TrackConfig::new(Dtype::U32)
         .columns(vec!["S1".into()])
         .column_dim("sample")
-        .chunk_size(4);
+        .chunk(4);
     let builder = Import::from_readers(vec![ConstReader::new(vec![7])])
         .unwrap()
         .into_dataset(&mut ds, vec![("depth".into(), cfg)])
@@ -187,15 +187,15 @@ fn singleton_import_uses_root_arrays() {
 }
 #[test]
 fn multifield_cohorts_preserve_shards_and_reuse_shared_labels() {
-    for shard in [None, Some(8), Some(4)] {
+    for shard in [None, Some(2), Some(1)] {
         let (mut ds, storage, trace) = traced_dataset();
         let mut cfg = TrackConfig::new(Dtype::U32)
-            .chunk_size(4)
+            .chunk(4)
             .columns(vec!["S1".into(), "S2".into(), "S3".into()])
             .column_dim("sample")
-            .column_chunk_size(2);
-        if let Some(size) = shard {
-            cfg = cfg.shard_size(size).shard_column_size(2);
+            .unsharded();
+        if let Some(n) = shard {
+            cfg = cfg.shard(n).shard_columns(2);
         }
         let readers = vec![
             ConstReader::new(vec![7, 11]),
@@ -254,7 +254,7 @@ fn one_dimensional_import_elides_fill_chunks() {
     for value in [0, 19] {
         let (mut ds, storage, _) = traced_dataset();
         let cfg = TrackConfig::new(Dtype::U32)
-            .chunk_size(4)
+            .chunk(4)
             .fill_value(serde_json::json!(0));
         Import::from_readers(vec![ConstReader::new(vec![value])])
             .unwrap()
@@ -295,12 +295,12 @@ fn invalid_imports_fail_before_any_mutation() {
     ] {
         let (mut ds, storage, trace) = traced_dataset();
         let mut reader = ConstReader::new(vec![7]);
-        let mut cfg = TrackConfig::new(Dtype::U32).chunk_size(4);
+        let mut cfg = TrackConfig::new(Dtype::U32).chunk(4);
         let mut name = "depth".to_string();
         match case {
             "reference" => { let mut contigs = reference().contigs().to_vec(); contigs.reverse(); reader.genome = Reference::new(contigs).unwrap(); }
             "dtype" => cfg.dtype = Dtype::I32,
-            "shard-shape" => cfg = cfg.shard_size(6).columns(vec!["S1".into()]).column_dim("sample"),
+            "shard-shape" => cfg = cfg.shard(0).columns(vec!["S1".into()]).column_dim("sample"),
             "duplicate-label" => cfg = cfg.columns(vec!["S1".into(), "S1".into()]),
             "reserved-dim" => cfg = cfg.columns(vec!["S1".into()]).column_dim("bin_4"),
             "name-collision" => name = "contig".into(),
@@ -317,7 +317,7 @@ fn invalid_imports_fail_before_any_mutation() {
             reader = ConstReader::new(vec![7, 8]);
         }
         if case == "shared-grid" {
-            tracks.push(("other".into(), cfg.clone().chunk_size(3)));
+            tracks.push(("other".into(), cfg.clone().chunk(3)));
             reader = ConstReader::new(vec![7, 8]);
         }
         trace.lock().unwrap().clear();
@@ -338,7 +338,7 @@ fn invalid_imports_fail_before_any_mutation() {
 }
 #[test]
 fn reserved_track_and_dimension_names_are_refused() {
-    let base = TrackConfig::new(Dtype::U32).chunk_size(4);
+    let base = TrackConfig::new(Dtype::U32).chunk(4);
     for (name, cfg) in [
         ("contig_length", base.clone()),
         (
@@ -396,8 +396,8 @@ fn explicit_codecs_and_notes_survive_root_import() {
     )
     .unwrap();
     let mut cfg = TrackConfig::new(Dtype::U32)
-        .chunk_size(1)
-        .shard_size(3)
+        .chunk(1)
+        .shard(3)
         .columns(vec!["S1".into()])
         .column_dim("sample")
         .description("Depth")
@@ -458,15 +458,14 @@ fn unsupported_neighbor_does_not_block_supported_import() {
 }
 
 #[test]
-fn a_sharded_cohort_shards_one_column_chunk_at_any_width() {
+fn a_sharded_cohort_caps_the_column_shard_at_the_width() {
     let (mut ds, _, _) = traced_dataset();
     let labels: Vec<String> = (0..5).map(|i| format!("S{i}")).collect();
     let cfg = TrackConfig::new(Dtype::U32)
         .columns(labels.clone())
         .column_dim("sample")
-        .chunk_size(4)
-        .column_chunk_size(2)
-        .shard_size(8);
+        .chunk(4)
+        .shard(2);
     let readers: Vec<ConstReader> = (0..5).map(|_| ConstReader::new(vec![7])).collect();
     Import::from_readers(readers)
         .unwrap()
@@ -476,10 +475,15 @@ fn a_sharded_cohort_shards_one_column_chunk_at_any_width() {
         .run()
         .unwrap();
     assert_eq!(ds.variables()["depth"].shape, [12, 5]);
-    let shard = &ds.variables()["depth"].metadata["chunk_grid"]["configuration"]["chunk_shape"];
-    // The column shard is one column chunk wide, so widening the column axis
-    // later appends whole shards. A width of 5 is not a multiple of 2.
-    assert_eq!(shard[1], 2);
+    let meta = &ds.variables()["depth"].metadata;
+    assert_eq!(
+        meta["chunk_grid"]["configuration"]["chunk_shape"],
+        serde_json::json!([8, 5])
+    );
+    assert_eq!(
+        meta["codecs"][0]["configuration"]["chunk_shape"],
+        serde_json::json!([4, 1])
+    );
     assert_eq!(
         ds.read_raw::<u32>("depth", &[0..12, 0..5]).unwrap(),
         ndarray::ArrayD::from_elem(ndarray::IxDyn(&[12, 5]), 7)
@@ -533,7 +537,7 @@ fn read_region_selects_contig_rows_at_full_width() {
     let cfg = TrackConfig::new(Dtype::U32)
         .columns(vec!["S1".into(), "S2".into()])
         .column_dim("sample")
-        .chunk_size(4);
+        .chunk(4);
     Import::from_readers(readers)
         .unwrap()
         .into_dataset(&mut ds, vec![("depth".into(), cfg)])

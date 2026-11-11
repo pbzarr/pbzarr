@@ -17,7 +17,9 @@ mod region_query;
 pub mod stat;
 mod zip_store;
 
-pub use array::{Fill, TrackConfig, validate_node_name};
+pub use array::{
+    DEFAULT_CHUNK, DEFAULT_SHARD, DEFAULT_SHARD_COLUMNS, Fill, TrackConfig, validate_node_name,
+};
 pub use codec_spec::ExplicitArraySpec;
 pub use dataset::{
     BinInterval, Contig, ContigId, Dataset, FORMAT_VERSION, GenomicAxis, Reference, Region, Role,

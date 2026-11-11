@@ -31,7 +31,8 @@ fn bigwig_imports_to_root_with_singleton_sample_and_gap_fill() {
             vec![(
                 "signal".into(),
                 TrackConfig::new(Dtype::F32)
-                    .chunk_size(4)
+                    .chunk(4)
+                    .unsharded()
                     .columns(vec!["S1".into()])
                     .column_dim("sample"),
             )],
@@ -65,7 +66,10 @@ fn bam_depth_imports_to_root_with_uncovered_contig_fill() {
         .unwrap()
         .into_dataset(
             &mut ds,
-            vec![("depth".into(), TrackConfig::new(Dtype::I32).chunk_size(100))],
+            vec![(
+                "depth".into(),
+                TrackConfig::new(Dtype::I32).chunk(100).unsharded(),
+            )],
         )
         .run()
         .unwrap();
@@ -108,7 +112,8 @@ fn bam_composition_shares_sample_coordinates_across_fields() {
             (
                 field.name.clone().unwrap(),
                 TrackConfig::new(field.dtype)
-                    .chunk_size(20)
+                    .chunk(20)
+                    .unsharded()
                     .columns(vec!["S1".into(), "S2".into()])
                     .column_dim("sample"),
             )

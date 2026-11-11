@@ -36,9 +36,8 @@ pub enum Target<'a> {
     Path(&'a Path),
     /// A new single-file zip store at a path that must not exist. The import
     /// writes a temporary file beside the path and moves it there at the end,
-    /// so a failed import leaves no file. A track with no shard size and no
-    /// codecs gets shards of 64 position chunks and all its columns. A track
-    /// whose codecs have no sharding codec is refused.
+    /// so a failed import leaves no file. An unsharded track, or a track
+    /// whose codecs have no sharding codec, is refused.
     Zip(&'a Path),
 }
 
@@ -156,9 +155,6 @@ fn import_at<R: ValueReader>(
     report
 }
 
-/// Position chunks in one shard of a zip store track that names no shard.
-const ZIP_SHARD_CHUNKS: u64 = 64;
-
 fn import_zip<R: ValueReader>(
     path: &Path,
     specs: Vec<(String, TrackConfig)>,
@@ -171,7 +167,7 @@ fn import_zip<R: ValueReader>(
         .ok_or_else(|| PbzError::Metadata("import: no sources".into()))?
         .contigs()
         .clone();
-    let specs = zip_layout(specs, &reference)?;
+    check_zip_layout(&specs)?;
     debug!("creating zip store {}", path.display());
     let mut dataset = Dataset::create_zip(path, reference)?;
     let report = Target::Dataset(&mut dataset).import(specs, readers, axes, config)?;
@@ -179,41 +175,21 @@ fn import_zip<R: ValueReader>(
     Ok(report)
 }
 
-/// Give every track of a zip store a sharded layout, so that the archive
-/// holds few entries.
-fn zip_layout(
-    specs: Vec<(String, TrackConfig)>,
-    reference: &Reference,
-) -> Result<Vec<(String, TrackConfig)>> {
-    let total: u64 = reference.contigs().iter().map(|c| c.length).sum();
-    specs
-        .into_iter()
-        .map(|(name, mut track)| {
-            match &track.codecs {
-                Some(spec) => {
-                    if !spec.codecs.iter().any(|c| c.name() == "sharding_indexed") {
-                        return Err(PbzError::UnsupportedEncoding(format!(
-                            "track {name:?}: a zip store needs sharded arrays, \
-                             but the codecs have no sharding_indexed codec"
-                        )));
-                    }
-                }
-                None if track.shard_size.is_none() => {
-                    let chunk = (track.chunk_size as u64).min(total.max(1)).max(1);
-                    track.shard_size = Some((chunk * ZIP_SHARD_CHUNKS) as usize);
-                    if track.shard_column_size.is_none()
-                        && let Some(columns) = &track.columns
-                    {
-                        let width = columns.len().max(1);
-                        let column_chunk = track.column_chunk_size.unwrap_or(width).clamp(1, width);
-                        track.shard_column_size = Some(width.div_ceil(column_chunk) * column_chunk);
-                    }
-                }
-                None => {}
+/// A zip store holds few entries only when every track is sharded.
+fn check_zip_layout(specs: &[(String, TrackConfig)]) -> Result<()> {
+    for (name, track) in specs {
+        let missing = match &track.codecs {
+            Some(spec) if !spec.codecs.iter().any(|c| c.name() == "sharding_indexed") => {
+                "the codecs have no sharding_indexed codec"
             }
-            Ok((name, track))
-        })
-        .collect()
+            None if track.shard.is_none() => "the track has no shard",
+            _ => continue,
+        };
+        return Err(PbzError::UnsupportedEncoding(format!(
+            "track {name:?}: a zip store needs sharded arrays, but {missing}"
+        )));
+    }
+    Ok(())
 }
 
 /// A zip store is written once, so no import adds tracks to it.

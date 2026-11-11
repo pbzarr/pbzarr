@@ -149,7 +149,9 @@ MASK_INTERVALS = ["chr1:1-3", "chr1:2-5", "chr2:0-1"]
 MASK = np.array([0, 1, 1, 1, 1, 0, 1, 0, 0, 0], dtype=bool)
 
 
-def test_interval_mask_values(store: Path) -> None:
+def test_interval_mask_values(store: Path, monkeypatch) -> None:
+    # One Dask chunk per inner chunk of the track.
+    monkeypatch.setattr("pbzarr._dataset._DASK_CHUNK_BYTES", 4 * 2 * 4)
     with pbzarr.open(store) as ds:
         mask = pbzarr.interval_mask(ds, MASK_INTERVALS)
         assert mask.dims == ("position",)

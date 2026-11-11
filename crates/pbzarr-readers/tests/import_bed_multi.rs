@@ -635,10 +635,9 @@ fn multi_source_matrix_import_roundtrip() {
         genome(&[("chr1", 8)]),
         &BedImportOptions::default(),
         Config {
-            chunk_size: Some(4),
-            column_chunk_size: Some(1),
-            shard_size: Some(4),
-            shard_column_size: Some(2),
+            chunk: 4,
+            shard: Some(1),
+            shard_columns: 2,
             workers: 2,
             column_dim: Some("sample".into()),
             ..Config::default()

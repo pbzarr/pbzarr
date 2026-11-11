@@ -59,7 +59,7 @@ fn scalar_import_preserves_fractional_values_and_missing_positions() {
     let bw = write_bigwig(dir.path(), "sparse", &[(0, 4, 0.5), (6, 10, -1.5)]);
     let output = dir.path().join("signal.pbz");
     let mut args = import_args(&output);
-    args.extend(["--chunk-size".into(), "4".into(), bw.into_os_string()]);
+    args.extend(["--chunk".into(), "4".into(), bw.into_os_string()]);
     stdout_of(&run_pbz(args));
 
     let dataset = Dataset::open(&output).unwrap();
@@ -130,13 +130,11 @@ fn labeled_cohorts_accept_positional_sources_and_a_manifest() {
                 manifest.as_os_str().to_owned(),
                 "--dim".into(),
                 "context".into(),
-                "--chunk-size".into(),
+                "--chunk".into(),
                 "4".into(),
-                "--shard-size".into(),
-                "8".into(),
-                "--column-chunk-size".into(),
-                "1".into(),
-                "--shard-column-size".into(),
+                "--shard".into(),
+                "2".into(),
+                "--shard-columns".into(),
                 "2".into(),
             ]);
         } else {

@@ -50,12 +50,21 @@ fn py_err(error: RsError) -> PyErr {
 }
 
 /// Build the import `Config` from the keyword arguments every import binding
-/// takes. A `codecs` JSON spec replaces the chunk and shard sizes, so the two
-/// together fail. Progress goes to Python `sys.stderr`.
+/// takes. A `codecs` JSON spec replaces the chunk and shard layout, so the
+/// two together fail. Progress goes to Python `sys.stderr`.
 fn build_config(mut builder: ConfigBuilder, codecs: Option<&str>) -> PyResult<Config> {
     let progress = builder.progress.take();
+    for (name, value) in [
+        ("chunk", builder.chunk),
+        ("shard", builder.shard),
+        ("shard_columns", builder.shard_columns),
+    ] {
+        if value == Some(0) {
+            return Err(PyValueError::new_err(format!("{name} must be at least 1")));
+        }
+    }
     if let Some(raw) = codecs {
-        if let Some(name) = builder.grid_size_set() {
+        if let Some(name) = builder.layout_knob_set() {
             return Err(PyValueError::new_err(format!(
                 "codecs conflicts with {name}; the codecs spec controls chunking and sharding"
             )));
@@ -157,7 +166,7 @@ type SchemaEntry = (String, Option<String>, Option<String>, Option<String>);
 /// exist. The track must not already be in the store. d4 stores depths as
 /// `int32` natively, so import is zero-conversion.
 #[pyfunction]
-#[pyo3(signature = (*, destination, track, sources, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (*, destination, track, sources, dim=None, threads=None, chunk=None, shard=None, shard_columns=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_d4(
     py: Python<'_>,
@@ -166,10 +175,9 @@ fn import_d4(
     sources: Vec<(PathBuf, Option<String>)>,
     dim: Option<String>,
     threads: Option<usize>,
-    chunk_size: Option<usize>,
-    column_chunk_size: Option<usize>,
-    shard_size: Option<usize>,
-    shard_column_size: Option<usize>,
+    chunk: Option<usize>,
+    shard: Option<usize>,
+    shard_columns: Option<usize>,
     progress: bool,
     codecs: Option<String>,
     decode_chunks: Option<usize>,
@@ -179,10 +187,9 @@ fn import_d4(
         ConfigBuilder {
             workers: threads,
             decode_chunks,
-            chunk_size,
-            column_chunk_size,
-            shard_size,
-            shard_column_size,
+            chunk,
+            shard,
+            shard_columns,
             column_dim: dim,
             codecs: None,
             progress: progress.then(|| track.clone()),
@@ -203,7 +210,7 @@ fn import_d4(
 /// bases that no interval covers. `None` gives `na`: such a base reads as
 /// `NaN`.
 #[pyfunction]
-#[pyo3(signature = (*, destination, track, sources, dim=None, fill=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (*, destination, track, sources, dim=None, fill=None, threads=None, chunk=None, shard=None, shard_columns=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bigwig(
     py: Python<'_>,
@@ -213,10 +220,9 @@ fn import_bigwig(
     dim: Option<String>,
     fill: Option<String>,
     threads: Option<usize>,
-    chunk_size: Option<usize>,
-    column_chunk_size: Option<usize>,
-    shard_size: Option<usize>,
-    shard_column_size: Option<usize>,
+    chunk: Option<usize>,
+    shard: Option<usize>,
+    shard_columns: Option<usize>,
     progress: bool,
     codecs: Option<String>,
     decode_chunks: Option<usize>,
@@ -227,10 +233,9 @@ fn import_bigwig(
         ConfigBuilder {
             workers: threads,
             decode_chunks,
-            chunk_size,
-            column_chunk_size,
-            shard_size,
-            shard_column_size,
+            chunk,
+            shard,
+            shard_columns,
             column_dim: dim,
             codecs: None,
             progress: progress.then(|| track.clone()),
@@ -264,7 +269,7 @@ fn import_bigwig(
 /// no interval covers, for value columns. `None` gives `na`, and false for a
 /// bool column. Returns the import report dict.
 #[pyfunction]
-#[pyo3(signature = (*, destination, sources, genome=None, schema=None, track=None, column=None, dtype=None, fill=None, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (*, destination, sources, genome=None, schema=None, track=None, column=None, dtype=None, fill=None, dim=None, threads=None, chunk=None, shard=None, shard_columns=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bed(
     py: Python<'_>,
@@ -278,10 +283,9 @@ fn import_bed(
     fill: Option<String>,
     dim: Option<String>,
     threads: Option<usize>,
-    chunk_size: Option<usize>,
-    column_chunk_size: Option<usize>,
-    shard_size: Option<usize>,
-    shard_column_size: Option<usize>,
+    chunk: Option<usize>,
+    shard: Option<usize>,
+    shard_columns: Option<usize>,
     progress: bool,
     codecs: Option<String>,
     decode_chunks: Option<usize>,
@@ -320,10 +324,9 @@ fn import_bed(
         ConfigBuilder {
             workers: threads,
             decode_chunks,
-            chunk_size,
-            column_chunk_size,
-            shard_size,
-            shard_column_size,
+            chunk,
+            shard,
+            shard_columns,
             column_dim: dim,
             codecs: None,
             progress: progress.then(|| track.as_deref().unwrap_or("bed").to_owned()),
@@ -380,7 +383,7 @@ fn report_to_dict(py: Python<'_>, report: &Report) -> PyResult<Py<PyAny>> {
 /// overlapping mates are deduped), `"all"` (riker/samtools-mpileup-style
 /// unconditional dedup), or `"none"` (dedup disabled).
 #[pyfunction]
-#[pyo3(signature = (*, destination, track, sources, mode="depth".to_string(), fasta=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (*, destination, track, sources, mode="depth".to_string(), fasta=None, min_mapq=0, exclude_flags=1796, min_bq=0, overlap="proper".to_string(), count_deletions=false, dim=None, threads=None, chunk=None, shard=None, shard_columns=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bam(
     py: Python<'_>,
@@ -396,10 +399,9 @@ fn import_bam(
     count_deletions: bool,
     dim: Option<String>,
     threads: Option<usize>,
-    chunk_size: Option<usize>,
-    column_chunk_size: Option<usize>,
-    shard_size: Option<usize>,
-    shard_column_size: Option<usize>,
+    chunk: Option<usize>,
+    shard: Option<usize>,
+    shard_columns: Option<usize>,
     progress: bool,
     codecs: Option<String>,
     decode_chunks: Option<usize>,
@@ -435,10 +437,9 @@ fn import_bam(
         ConfigBuilder {
             workers: threads,
             decode_chunks,
-            chunk_size,
-            column_chunk_size,
-            shard_size,
-            shard_column_size,
+            chunk,
+            shard,
+            shard_columns,
             column_dim: dim,
             codecs: None,
             progress: progress.then(|| track.clone()),

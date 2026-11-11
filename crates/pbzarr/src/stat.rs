@@ -1398,10 +1398,9 @@ mod tests {
             TrackConfig::new(Dtype::I32)
                 .columns((1..=5).map(|i| format!("s{i}")).collect())
                 .column_dim("sample")
-                .chunk_size(10)
-                .column_chunk_size(2)
-                .shard_size(40)
-                .shard_column_size(2),
+                .chunk(10)
+                .shard(4)
+                .shard_columns(2),
             columns,
         );
         ds
@@ -1413,8 +1412,8 @@ mod tests {
         let ds = sharded(dir.path());
         let cov = Measurement::root(&ds, "cov").unwrap();
         assert_eq!(cov.chunk_size().unwrap(), 40);
-        assert_eq!(cov.inner_chunk_shape().unwrap(), (10, 2));
-        // Unsharded: the chunk itself (clipped to the 16-position track).
+        assert_eq!(cov.inner_chunk_shape().unwrap(), (10, 1));
+        // A shard capped at one inner chunk: the inner chunk is the shard.
         let ds = fixture(dir.path());
         let depth = Measurement::root(&ds, "depth").unwrap();
         assert_eq!(

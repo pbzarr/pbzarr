@@ -30,6 +30,7 @@ dependencies = [
     "numpy>=2.4.5,<3",
     "dask>=2026.8.0",
     "pandas>=3.0.3",
+    "pcodec>=1.1.0,<2",
 ]
 
 [project.urls]

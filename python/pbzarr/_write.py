@@ -115,10 +115,9 @@ def import_d4(
     dim: str | None = None,
     threads: int | None = None,
     decode_chunks: int | None = None,
-    chunk_size: int | None = None,
-    column_chunk_size: int | None = None,
-    shard_size: int | None = None,
-    shard_column_size: int | None = None,
+    chunk: int | None = None,
+    shard: int | None = None,
+    shard_columns: int | None = None,
     progress: bool = False,
     codecs: Codecs | None = None,
 ) -> dict[str, int | float]:
@@ -133,6 +132,17 @@ def import_d4(
     raises `FileNotFoundError`, and a bad argument raises `ValueError`.
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
+
+    The layout keywords apply to each new track. `chunk=` is the positions
+    per inner chunk (default 65,536). `shard=` is the inner chunks per shard
+    along positions (default 1,024, so a shard holds 67,108,864 positions).
+    `shard_columns=` is the columns per shard of a 2D track (default 16).
+    The inner chunk of a 2D track is always 1 column wide. A shard is capped
+    at the track length rounded up to whole inner chunks, and at the track
+    width. `codecs=` replaces the whole chunk and shard layout, so it
+    conflicts with the three layout keywords. Without a `chunk_grid`, its
+    outer grid is 65,536 positions by up to 16 columns. A value of 0 raises
+    `ValueError`.
     """
     destination_path = _destination(destination)
 
@@ -143,10 +153,9 @@ def import_d4(
         sources=normalized_sources,
         dim=dim,
         threads=threads,
-        chunk_size=chunk_size,
-        column_chunk_size=column_chunk_size,
-        shard_size=shard_size,
-        shard_column_size=shard_column_size,
+        chunk=chunk,
+        shard=shard,
+        shard_columns=shard_columns,
         progress=progress,
         codecs=_codecs_json(codecs),
         decode_chunks=decode_chunks,
@@ -162,10 +171,9 @@ def import_bigwig(
     fill: Fill | None = None,
     threads: int | None = None,
     decode_chunks: int | None = None,
-    chunk_size: int | None = None,
-    column_chunk_size: int | None = None,
-    shard_size: int | None = None,
-    shard_column_size: int | None = None,
+    chunk: int | None = None,
+    shard: int | None = None,
+    shard_columns: int | None = None,
     progress: bool = False,
     codecs: Codecs | None = None,
 ) -> dict[str, int | float]:
@@ -185,6 +193,17 @@ def import_bigwig(
     raises `FileNotFoundError`, and a bad argument raises `ValueError`.
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
+
+    The layout keywords apply to each new track. `chunk=` is the positions
+    per inner chunk (default 65,536). `shard=` is the inner chunks per shard
+    along positions (default 1,024, so a shard holds 67,108,864 positions).
+    `shard_columns=` is the columns per shard of a 2D track (default 16).
+    The inner chunk of a 2D track is always 1 column wide. A shard is capped
+    at the track length rounded up to whole inner chunks, and at the track
+    width. `codecs=` replaces the whole chunk and shard layout, so it
+    conflicts with the three layout keywords. Without a `chunk_grid`, its
+    outer grid is 65,536 positions by up to 16 columns. A value of 0 raises
+    `ValueError`.
     """
     destination_path = _destination(destination)
 
@@ -196,10 +215,9 @@ def import_bigwig(
         dim=dim,
         fill=_fill(fill),
         threads=threads,
-        chunk_size=chunk_size,
-        column_chunk_size=column_chunk_size,
-        shard_size=shard_size,
-        shard_column_size=shard_column_size,
+        chunk=chunk,
+        shard=shard,
+        shard_columns=shard_columns,
         progress=progress,
         codecs=_codecs_json(codecs),
         decode_chunks=decode_chunks,
@@ -253,10 +271,9 @@ def import_bed(
     dtype: str | None = None,
     fill: Fill | None = None,
     dim: str | None = None,
-    chunk_size: int | None = None,
-    column_chunk_size: int | None = None,
-    shard_size: int | None = None,
-    shard_column_size: int | None = None,
+    chunk: int | None = None,
+    shard: int | None = None,
+    shard_columns: int | None = None,
     codecs: Codecs | None = None,
     threads: int | None = None,
     decode_chunks: int | None = None,
@@ -308,6 +325,17 @@ def import_bed(
     raises `FileNotFoundError`, and a bad argument raises `ValueError`.
     `decode_chunks=` sets the position chunks each reader decodes per pass
     (default auto). Returns the import report dict.
+
+    The layout keywords apply to each new track. `chunk=` is the positions
+    per inner chunk (default 65,536). `shard=` is the inner chunks per shard
+    along positions (default 1,024, so a shard holds 67,108,864 positions).
+    `shard_columns=` is the columns per shard of a 2D track (default 16).
+    The inner chunk of a 2D track is always 1 column wide. A shard is capped
+    at the track length rounded up to whole inner chunks, and at the track
+    width. `codecs=` replaces the whole chunk and shard layout, so it
+    conflicts with the three layout keywords. Without a `chunk_grid`, its
+    outer grid is 65,536 positions by up to 16 columns. A value of 0 raises
+    `ValueError`.
     """
     destination_path = _destination(destination)
 
@@ -334,10 +362,9 @@ def import_bed(
         fill=_fill(fill),
         dim=dim,
         threads=threads,
-        chunk_size=chunk_size,
-        column_chunk_size=column_chunk_size,
-        shard_size=shard_size,
-        shard_column_size=shard_column_size,
+        chunk=chunk,
+        shard=shard,
+        shard_columns=shard_columns,
         progress=progress,
         codecs=_codecs_json(codecs),
         decode_chunks=decode_chunks,
@@ -357,10 +384,9 @@ def import_bam(
     overlap: Literal["proper", "all", "none"] = "proper",
     count_deletions: bool = False,
     dim: str | None = None,
-    chunk_size: int | None = None,
-    column_chunk_size: int | None = None,
-    shard_size: int | None = None,
-    shard_column_size: int | None = None,
+    chunk: int | None = None,
+    shard: int | None = None,
+    shard_columns: int | None = None,
     threads: int | None = None,
     decode_chunks: int | None = None,
     progress: bool = False,
@@ -388,6 +414,17 @@ def import_bam(
     labels for all sources or for none; without labels, each column takes
     the file name without its format extension. A missing source file
     raises `FileNotFoundError`, and a bad argument raises `ValueError`.
+
+    The layout keywords apply to each new track. `chunk=` is the positions
+    per inner chunk (default 65,536). `shard=` is the inner chunks per shard
+    along positions (default 1,024, so a shard holds 67,108,864 positions).
+    `shard_columns=` is the columns per shard of a 2D track (default 16).
+    The inner chunk of a 2D track is always 1 column wide. A shard is capped
+    at the track length rounded up to whole inner chunks, and at the track
+    width. `codecs=` replaces the whole chunk and shard layout, so it
+    conflicts with the three layout keywords. Without a `chunk_grid`, its
+    outer grid is 65,536 positions by up to 16 columns. A value of 0 raises
+    `ValueError`.
     """
     destination_path = _destination(destination)
 
@@ -408,10 +445,9 @@ def import_bam(
         count_deletions=count_deletions,
         dim=dim,
         threads=threads,
-        chunk_size=chunk_size,
-        column_chunk_size=column_chunk_size,
-        shard_size=shard_size,
-        shard_column_size=shard_column_size,
+        chunk=chunk,
+        shard=shard,
+        shard_columns=shard_columns,
         progress=progress,
         codecs=_codecs_json(codecs),
         decode_chunks=decode_chunks,

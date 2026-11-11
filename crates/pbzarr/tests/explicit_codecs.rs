@@ -107,7 +107,7 @@ fn explicit_codecs_array_transpose_zstd_roundtrip() {
     .unwrap();
     let cfg = TrackConfig::new(Dtype::I32)
         .columns(vec!["a".into(), "b".into()])
-        .chunk_size(4)
+        .chunk(4)
         .codecs(spec);
     let ds = import(&path, 8, cfg).unwrap();
 
@@ -117,6 +117,11 @@ fn explicit_codecs_array_transpose_zstd_roundtrip() {
     let meta = array_meta(&path, "depth");
     assert_eq!(codec_names(&meta), ["transpose", "bytes", "zstd"]);
     assert_eq!(meta["codecs"][0]["configuration"]["order"], json!([1, 0]));
+    // Without a chunk_grid, a chunk holds all columns up to 16.
+    assert_eq!(
+        meta["chunk_grid"]["configuration"]["chunk_shape"],
+        json!([4, 2])
+    );
 }
 
 #[test]
@@ -124,13 +129,14 @@ fn explicit_codecs_transpose_pcodec_roundtrip() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("p.pbz");
     let spec = ExplicitArraySpec::parse(
-        r#"[{"name":"transpose","configuration":{"order":[1,0]}},
-            {"name":"numcodecs.pcodec","configuration":{"level":8}}]"#,
+        r#"{"chunk_grid":{"name":"regular","configuration":{"chunk_shape":[4,2]}},
+            "codecs":[{"name":"transpose","configuration":{"order":[1,0]}},
+                      {"name":"numcodecs.pcodec","configuration":{"level":8}}]}"#,
     )
     .unwrap();
     let cfg = TrackConfig::new(Dtype::I32)
         .columns(vec!["a".into(), "b".into()])
-        .chunk_size(4)
+        .chunk(4)
         .codecs(spec);
     let ds = import(&path, 8, cfg).unwrap();
 
@@ -146,6 +152,10 @@ fn explicit_codecs_transpose_pcodec_roundtrip() {
 
     let meta = array_meta(&path, "depth");
     assert_eq!(codec_names(&meta), ["transpose", "numcodecs.pcodec"]);
+    assert_eq!(
+        meta["chunk_grid"]["configuration"]["chunk_shape"],
+        json!([4, 2])
+    );
 }
 
 #[test]

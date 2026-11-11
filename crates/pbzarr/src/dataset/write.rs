@@ -11,17 +11,49 @@ fn storage_error(error: impl std::fmt::Display) -> PbzError {
     PbzError::Store(error.to_string())
 }
 
-/// A shard edge must be a whole number of chunks, or the sharding codec
-/// rejects the array. Reject a request that is not, then cap at the fewest
-/// whole chunks that cover the array extent.
-fn shard_extent(request: u64, chunk: u64, extent: u64, axis: &str) -> Result<u64> {
-    if !request.is_multiple_of(chunk) {
-        return Err(PbzError::Metadata(format!(
-            "import: {axis} shard {request} must be a multiple of the {axis} chunk {chunk}"
-        )));
+/// The inner chunk and outer grid of a new track. A 2D track has one column
+/// per inner chunk. Each shard edge is capped at the fewest whole chunks that
+/// cover the axis extent. Without a shard the outer grid is the inner chunk.
+/// With explicit codecs, the fallback outer grid is `chunk` positions by
+/// `shard_columns` columns, capped at the track width, so that a codec such
+/// as `transpose` sees several columns.
+fn track_layout(name: &str, config: &TrackConfig, total: u64) -> Result<(Vec<u64>, Vec<u64>)> {
+    let zero = |knob: &str| {
+        PbzError::Metadata(format!("import: track {name:?}: {knob} must be at least 1"))
+    };
+    if config.chunk == 0 {
+        return Err(zero("chunk"));
     }
-    let cover = extent.max(1).div_ceil(chunk) * chunk;
-    Ok(request.min(cover).max(chunk))
+    let chunk_pos = config.chunk as u64;
+    let cover = |chunk: u64, extent: u64| extent.max(1).div_ceil(chunk) * chunk;
+    let mut chunk = vec![chunk_pos];
+    let mut outer = vec![chunk_pos];
+    if let Some(shard) = config.shard {
+        if shard == 0 {
+            return Err(zero("shard"));
+        }
+        let request = chunk_pos.checked_mul(shard as u64).ok_or_else(|| {
+            PbzError::Metadata(format!(
+                "import: track {name:?}: chunk {chunk_pos} x shard {shard} overflows"
+            ))
+        })?;
+        outer[0] = request.min(cover(chunk_pos, total));
+    }
+    if let Some(labels) = &config.columns {
+        let width = labels.len() as u64;
+        chunk.push(1);
+        if config.shard.is_none() && config.codecs.is_none() {
+            outer.push(1);
+        } else if config.shard_columns == 0 {
+            return Err(zero("shard_columns"));
+        } else {
+            outer.push((config.shard_columns as u64).min(width.max(1)));
+        }
+    }
+    if config.codecs.is_some() {
+        outer[0] = chunk_pos;
+    }
+    Ok((chunk, outer))
 }
 
 impl Dataset {
@@ -343,57 +375,11 @@ impl Dataset {
             if config.extra.contains_key("coordinates") {
                 return Err(PbzError::Metadata("import: coordinate declarations cannot be attached through track extra attributes".into()));
             }
-            let chunk_pos = (config.chunk_size as u64).min(total.max(1)).max(1);
-            let shard_pos = config
-                .shard_size
-                .map(|n| shard_extent(n as u64, chunk_pos, total, "position"))
-                .transpose()?;
-            let mut chunk = vec![chunk_pos];
-            let mut outer = vec![shard_pos.unwrap_or(chunk_pos)];
-            if let Some(labels) = &config.columns {
-                let width = labels.len() as u64;
-                let col_chunk = config
-                    .column_chunk_size
-                    .map(|n| n as u64)
-                    .unwrap_or(width)
-                    .min(width)
-                    .max(1);
-                // One column chunk per shard by default, so widening the column
-                // axis later appends whole shards instead of rewriting one.
-                let shard_col = shard_extent(
-                    config
-                        .shard_column_size
-                        .map(|n| n as u64)
-                        .unwrap_or(col_chunk),
-                    col_chunk,
-                    width,
-                    "column",
-                )?;
-                if self.zip.is_none() && !width.is_multiple_of(col_chunk) {
-                    log::warn!(
-                        "import: track {name:?} is {width} column(s) wide, which is not a \
-                         multiple of its column chunk {col_chunk}; this store cannot be \
-                         grown later with pbz append"
-                    );
-                }
-                chunk.push(col_chunk);
-                outer.push(if shard_pos.is_some() {
-                    shard_col
-                } else {
-                    col_chunk
-                });
-            }
+            let (chunk, outer) = track_layout(name, config, total)?;
+            let sharded = config.shard.is_some();
             let (fill, null) = resolve_fill(config.dtype, config.fill.as_ref())?;
-            let mut builder = ArrayBuilder::new(
-                shape.clone(),
-                if config.codecs.is_some() {
-                    chunk.clone()
-                } else {
-                    outer
-                },
-                dtype_to_zarrs(config.dtype),
-                fill,
-            );
+            let mut builder =
+                ArrayBuilder::new(shape.clone(), outer, dtype_to_zarrs(config.dtype), fill);
             builder.dimension_names(Some(dims.clone()));
             builder.attributes(config.extra.clone());
             if let Some(null) = null {
@@ -413,7 +399,7 @@ impl Dataset {
                 apply_explicit_spec(&mut builder, name, spec, &shape)?;
             } else {
                 builder.bytes_to_bytes_codecs(default_data_codecs(config.dtype)?);
-                if shard_pos.is_some() {
+                if sharded {
                     builder.subchunk_shape(Some(chunk));
                 }
             }

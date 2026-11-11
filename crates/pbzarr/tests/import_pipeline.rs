@@ -110,8 +110,8 @@ fn cohort_pipeline_tiles_columns_with_multiple_workers() {
     let mut ds = dataset(&path, &genome);
     let cfg = TrackConfig::new(Dtype::U32)
         .columns(vec!["a".into(), "b".into(), "c".into(), "d".into()])
-        .chunk_size(4)
-        .column_chunk_size(2);
+        .chunk(4)
+        .unsharded();
 
     let readers = [7, 8, 9, 10]
         .into_iter()
@@ -128,7 +128,7 @@ fn cohort_pipeline_tiles_columns_with_multiple_workers() {
         .run()
         .unwrap();
 
-    assert_eq!(report.chunks_written, 4);
+    assert_eq!(report.chunks_written, 8);
     let values = ds
         .read_region::<u32>("depth", &"chr1".parse().unwrap())
         .unwrap()
@@ -238,9 +238,9 @@ fn pipeline_span_straddling_contig_boundary_maps_local_coords() {
     .unwrap();
 
     let mut ds = dataset(&path, &genome);
-    // chunk_size 700 → chunks at 0,700,1400,2100,2800; [1400,2100) straddles
+    // chunk 700 → chunks at 0,700,1400,2100,2800; [1400,2100) straddles
     // the chr1/chr2 boundary at flat 2000.
-    let cfg = TrackConfig::new(Dtype::U32).chunk_size(700);
+    let cfg = TrackConfig::new(Dtype::U32).chunk(700).unsharded();
     Import::from_readers(vec![RampReader::new(genome.clone())])
         .unwrap()
         .into_dataset(&mut ds, vec![("depth".into(), cfg)])

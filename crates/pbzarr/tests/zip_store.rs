@@ -89,13 +89,13 @@ fn write_zip(path: &Path) {
         TrackConfig::new(Dtype::F32)
             .columns(vec!["s1".into(), "s2".into()])
             .column_dim("sample")
-            .chunk_size(4)
-            .shard_size(8),
+            .chunk(4)
+            .shard(2),
     );
     import(
         &mut ds,
         "depth",
-        TrackConfig::new(Dtype::I32).chunk_size(4).shard_size(8),
+        TrackConfig::new(Dtype::I32).chunk(4).shard(2),
     );
     assert!(!path.exists(), "the archive appears only at close");
     ds.close().unwrap();

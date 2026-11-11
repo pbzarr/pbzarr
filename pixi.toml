@@ -49,6 +49,7 @@ zarr = ">=3.2.1,<4"
 numpy = ">=2.4.5,<3"
 dask-core = ">=2026.8.0"
 pandas = ">=3.0.3"
+pcodec = ">=1.1.0,<2"
 
 [feature.validate.tasks]
 validate-roundtrip = "python scripts/validate_xarray_read.py"

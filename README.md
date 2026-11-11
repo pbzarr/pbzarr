@@ -168,14 +168,14 @@ d4 and BAM/CRAM imports fill gaps with 0, because these sources give a value at 
 Import several files as labeled columns:
 
 ```sh
-pbz import bigwig cohort.pbz brain.bw:brain liver.bw:liver --track signal --dim sample
+pbz import bigwig cohort.pbz brain.bw:brain liver.bw:liver --track signal --dim sample --shard-columns 1
 ```
 
 All sources must describe the same genome. Without explicit labels, the import uses the file name without its format extension as the column label. For example, `s1.bed.gz`, `s1.bw`, and `s1.cram` all give `s1`. The text after the last `:` is a label only when it contains no `/` or `\`. Thus a URL such as `https://host/s1.bam` stays one path.
 
 The command accepts the same import options as `pbz import d4`. These include `--file-list`, `--threads`, chunk and shard sizes, `--codecs`, and `--no-progress`.
 
-Add samples to an existing cohort track:
+Add samples to an existing cohort track. Append can grow only a track whose shard holds one column, so import with `--shard-columns 1` if you plan to append:
 
 ```sh
 pbz append bigwig cohort.pbz heart.bw:heart --track signal
@@ -239,7 +239,7 @@ pbz import d4 cohort.pbz.zip s1.d4 s2.d4 --track depth --zip
 
 A store path that ends in `.zip` (in any case) also writes a zip store, so `--zip` is optional here. The store path must not exist. The import writes a temporary file beside the store path and renames it at the end, so a failed import leaves no file.
 
-A zip store is written once. `pbz import` cannot add tracks to it, and `pbz append` refuses it. Without a shard flag or `--codecs`, each shard holds 64 position chunks and all columns. An import refuses `--codecs` without a `sharding_indexed` codec. `pbz view`, `pbz stat`, `pbz info`, and `pbz validate` read zip stores.
+A zip store is written once. `pbz import` cannot add tracks to it, and `pbz append` refuses it. A zip store uses the same chunk and shard defaults as a directory store. An import refuses `--codecs` without a `sharding_indexed` codec. `pbz view`, `pbz stat`, `pbz info`, and `pbz validate` read zip stores.
 
 Open a zip store in Python:
 
