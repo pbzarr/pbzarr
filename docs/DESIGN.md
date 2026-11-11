@@ -94,7 +94,7 @@ The format-agnostic import engine drives any `ValueReader`. A reader exposes an 
 
 ## Interoperability
 
-PBZ uses standard Zarr v3 groups, arrays, codecs, and variable-length UTF-8 strings. Released xarray opens a format 0.5 store directly through `xr.open_zarr`. A float `_FillValue` must be base64 of a little-endian double, as xarray writes it. `xr.open_zarr` fails for the whole store when a float array has a numeric `_FillValue`, so no pbzarr writer writes one. The Rust reader marks such an array as an unsupported encoding, and `pbz validate` reports it. The consolidated copy in the root `zarr.json` lets `consolidated=True` find every array, also for a reader that cannot list the store.
+PBZ uses standard Zarr v3 groups, arrays, codecs, and variable-length UTF-8 strings. Released xarray opens a format 0.5 store directly through `xr.open_zarr`. A float `_FillValue` must be base64 of a little-endian double, as xarray writes it. `xr.open_zarr` fails for the whole store when a float array has a numeric `_FillValue`, so no pbzarr writer writes one. The Rust reader marks such an array as an unsupported encoding, and `pbz validate` reports it. `pbzarr.open` refuses such a store with a `PbzError` that names the array. The consolidated copy in the root `zarr.json` lets `consolidated=True` find every array, also for a reader that cannot list the store.
 
 `pbzarr.open` adds identity and reference checks, Dask chunk defaults, region selection, region operations, and validated writes.
 

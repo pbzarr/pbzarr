@@ -303,3 +303,13 @@ def test_write_drops_0d_coordinates(cohort: Path) -> None:
 def test_version_is_a_string() -> None:
     assert isinstance(pbzarr.__version__, str)
     assert pbzarr.__version__
+
+
+def test_numeric_float_fill_value_is_refused_by_name(tmp_path: Path) -> None:
+    path = tmp_path / "fill.pbz"
+    write_pbz_store(
+        path, {"chr1": 10}, "x", np.zeros(10, np.float32), dims=("position",), chunks=(10,)
+    )
+    zarr.open_array(path / "x", mode="r+").attrs["_FillValue"] = -1.0
+    with pytest.raises(PbzError, match="x: floating _FillValue -1.0 is a JSON number"):
+        pbzarr.open(path)

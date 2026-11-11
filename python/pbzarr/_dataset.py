@@ -487,6 +487,17 @@ def _catalog(group: zarr.Group) -> dict[str, _Stored]:
     catalog = {}
     for name, array in group.arrays():
         metadata = array.metadata.to_dict()
+        fill = metadata.get("attributes", {}).get("_FillValue")
+        if (
+            array.dtype.kind == "f"
+            and isinstance(fill, (int, float))
+            and not isinstance(fill, bool)
+        ):
+            raise PbzError(
+                f"invalid PBZ store: {name}: floating _FillValue {fill} is a JSON number, "
+                "and xarray cannot open a store that holds one; write it as base64 of a "
+                "little-endian double, as xarray does"
+            )
         token = hashlib.sha1(
             json.dumps(metadata, sort_keys=True, default=str).encode()
         ).hexdigest()
@@ -539,7 +550,11 @@ def _reference(data: xr.Dataset) -> Reference:
 
 def _check_genomic_dims(data: xr.Dataset, reference: Reference) -> None:
     for dim, size in data.sizes.items():
-        if bin_width(dim) is None:
+        try:
+            width = bin_width(dim)
+        except ValueError as error:
+            raise PbzError(f"invalid PBZ store: {error}") from error
+        if width is None:
             continue
         if dim in data.variables:
             raise PbzError(f"invalid PBZ store: genomic dimension {dim!r} has a stored coordinate")
