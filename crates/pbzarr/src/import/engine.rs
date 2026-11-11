@@ -10,10 +10,11 @@
 //! chunk per active piece. The worker that finishes a buffer's last piece
 //! writes it.
 //!
-//! A sharded target whose destination columns cover whole shards buffers per
-//! shard: closed buffers park in their shard's group, and the group's last
-//! close encodes the whole shard and stores it with one call, so each shard
-//! file is written exactly once and needs no lock. A sharded target whose
+//! A sharded target whose destination columns cover whole shards encodes
+//! each buffer as one inner chunk when it closes and keeps only the encoded
+//! bytes in its shard's group. The group's last close lays out the shard and
+//! its index and stores it with one call, so each shard file is written
+//! exactly once and needs no lock. A sharded target whose
 //! columns do not cover whole shards falls back to per-chunk rectangles
 //! through the partial encoder, which appends subchunks under a per-shard
 //! mutex because every append rewrites the shard.
@@ -26,6 +27,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::num::NonZeroU64;
 use std::ops::Range;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -36,7 +38,12 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::bounded;
 use log::{debug, info, warn};
 use ndarray::{Array2, ArrayViewMut1, ArrayViewMut2, Axis, s};
-use zarrs::array::{Array, ArrayShardedExt, ArraySubset, CodecOptions, FillValue};
+use zarrs::array::codec::{ShardingCodecConfiguration, ShardingIndexLocation};
+use zarrs::array::data_type::uint64;
+use zarrs::array::{
+    Array, ArrayBytes, ArrayMetadata, ArrayShardedExt, ArraySubset, ArrayToBytesCodecTraits,
+    BytesRepresentation, CodecChain, CodecOptions, DataType, Element, FillValue,
+};
 use zarrs::storage::ReadableWritableListableStorageTraits;
 
 use super::destination::Destination;
@@ -255,23 +262,25 @@ macro_rules! tile_buffer {
                 }
             }
 
-            /// Stores one whole write unit (shard) in one call. The store
-            /// elides an all-fill chunk and fill-only subchunks.
-            fn store_chunk(
-                self,
-                array: &Array<dyn ReadableWritableListableStorageTraits>,
-                track_name: &str,
-                rank: usize,
-                indices: &[u64],
-            ) -> Result<()> {
+            /// Encodes the buffer as one inner chunk of a shard. A clipped
+            /// tail pads with fill. `None` when every value is the fill.
+            fn encode_inner(&self, codec: &ShardCodec, fill: &FillValue) -> Result<Option<Vec<u8>>> {
                 match self {
                     $( TileBuffer::$variant(a) => {
-                        let result = if rank == 1 {
-                            array.store_chunk(&indices[..1], a.remove_axis(Axis(1)).into_dyn())
+                        let shape = (codec.chunk_rows, codec.chunk_cols);
+                        let padded;
+                        let full = if a.dim() == shape && a.is_standard_layout() {
+                            a
                         } else {
-                            array.store_chunk(indices, a.into_dyn())
+                            let mut p = Array2::from_elem(shape, <$ty as FillDecode>::decode(fill)?);
+                            p.slice_mut(s![..a.nrows(), ..a.ncols()]).assign(a);
+                            padded = p;
+                            &padded
                         };
-                        result.map_err(|e| PbzError::Store(format!("write {track_name}: {e}")))
+                        let values = full.as_slice().expect("standard layout");
+                        let bytes = <$ty as Element>::to_array_bytes(&codec.data_type, values)
+                            .map_err(|e| PbzError::Store(format!("encode inner chunk: {e}")))?;
+                        codec.encode(bytes, fill)
                     } )*
                 }
             }
@@ -319,6 +328,146 @@ tile_buffer! {
     Bool => bool,
 }
 
+/// The inner and index codecs of a shard-aligned target, so a worker can
+/// encode each inner chunk as its buffer closes and write the shard as the
+/// sharding codec lays it out.
+struct ShardCodec {
+    inner: CodecChain,
+    index: CodecChain,
+    index_location: ShardingIndexLocation,
+    index_len: usize,
+    data_type: DataType,
+    /// `[rows]` or `[rows, columns]` of one inner chunk.
+    inner_shape: Vec<NonZeroU64>,
+    /// `[chunks along positions, (chunks along columns,) 2]`.
+    index_shape: Vec<NonZeroU64>,
+    chunk_rows: usize,
+    chunk_cols: usize,
+    /// Inner chunks per shard along the column axis; 1 for rank-1 tracks.
+    col_chunks: u64,
+    opts: CodecOptions,
+}
+
+impl ShardCodec {
+    fn new(
+        array: &Array<dyn ReadableWritableListableStorageTraits>,
+        rank: usize,
+        chunk_len: u64,
+        col_chunk: u64,
+        shard_pos: u64,
+        shard_col: u64,
+    ) -> Result<Self> {
+        let err = |e: String| PbzError::Metadata(format!("sharding codec: {e}"));
+        let ArrayMetadata::V3(meta) = array.metadata() else {
+            return Err(err("expected zarr v3 metadata".into()));
+        };
+        let sharding = meta
+            .codecs
+            .iter()
+            .find(|c| c.name() == "sharding_indexed")
+            .ok_or_else(|| err("no sharding_indexed codec".into()))?;
+        let ShardingCodecConfiguration::V1(config) = sharding
+            .to_typed_configuration::<ShardingCodecConfiguration>()
+            .map_err(|e| err(e.to_string()))?
+        else {
+            return Err(err("unsupported configuration version".into()));
+        };
+        let inner = CodecChain::from_metadata(&config.codecs).map_err(|e| err(e.to_string()))?;
+        let index =
+            CodecChain::from_metadata(&config.index_codecs).map_err(|e| err(e.to_string()))?;
+        let nz = |v: u64| NonZeroU64::new(v).ok_or_else(|| err("zero chunk extent".into()));
+        let col_chunks = if rank == 1 { 1 } else { shard_col / col_chunk };
+        let (inner_shape, index_shape) = if rank == 1 {
+            (
+                vec![nz(chunk_len)?],
+                vec![nz(shard_pos / chunk_len)?, nz(2)?],
+            )
+        } else {
+            (
+                vec![nz(chunk_len)?, nz(col_chunk)?],
+                vec![nz(shard_pos / chunk_len)?, nz(col_chunks)?, nz(2)?],
+            )
+        };
+        let index_len = match index
+            .encoded_representation(&index_shape, &uint64(), &FillValue::from(u64::MAX))
+            .map_err(|e| err(e.to_string()))?
+        {
+            BytesRepresentation::FixedSize(n) => n as usize,
+            other => return Err(err(format!("shard index is not fixed size: {other}"))),
+        };
+        Ok(Self {
+            inner,
+            index,
+            index_location: config.index_location,
+            index_len,
+            data_type: array.data_type().clone(),
+            inner_shape,
+            index_shape,
+            chunk_rows: chunk_len as usize,
+            chunk_cols: if rank == 1 { 1 } else { col_chunk as usize },
+            col_chunks,
+            opts: CodecOptions::default().with_concurrent_target(1),
+        })
+    }
+
+    fn encode(&self, bytes: ArrayBytes<'_>, fill: &FillValue) -> Result<Option<Vec<u8>>> {
+        if bytes.is_fill_value(fill) {
+            return Ok(None);
+        }
+        let encoded = self
+            .inner
+            .encode(bytes, &self.inner_shape, &self.data_type, fill, &self.opts)
+            .map_err(|e| PbzError::Store(format!("encode inner chunk: {e}")))?;
+        // The compressor allocates for the uncompressed size; the shard
+        // group keeps this until the shard is stored.
+        let mut encoded = encoded.into_owned();
+        encoded.shrink_to_fit();
+        Ok(Some(encoded))
+    }
+
+    /// Lays out encoded inner chunks in index order plus the shard index,
+    /// the same bytes the sharding codec writes with C write order.
+    fn assemble(&self, mut chunks: Vec<(usize, Vec<u8>)>) -> Result<Vec<u8>> {
+        chunks.sort_unstable_by_key(|(i, _)| *i);
+        let n_index: usize = self.index_shape.iter().map(|d| d.get() as usize).product();
+        let mut index = vec![u64::MAX; n_index];
+        let data_len: usize = chunks.iter().map(|(_, c)| c.len()).sum();
+        let mut out = Vec::with_capacity(data_len + self.index_len);
+        let base = match self.index_location {
+            ShardingIndexLocation::Start => self.index_len,
+            ShardingIndexLocation::End => 0,
+        };
+        if base > 0 {
+            out.resize(base, 0);
+        }
+        for (i, chunk) in &chunks {
+            index[2 * i] = out.len() as u64;
+            index[2 * i + 1] = chunk.len() as u64;
+            out.extend_from_slice(chunk);
+        }
+        drop(chunks);
+        let raw: Vec<u8> = index.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let encoded = self
+            .index
+            .encode(
+                ArrayBytes::from(raw),
+                &self.index_shape,
+                &uint64(),
+                &FillValue::from(u64::MAX),
+                &self.opts,
+            )
+            .map_err(|e| PbzError::Store(format!("encode shard index: {e}")))?;
+        if encoded.len() != self.index_len {
+            return Err(PbzError::Store("shard index size mismatch".into()));
+        }
+        match self.index_location {
+            ShardingIndexLocation::Start => out[..self.index_len].copy_from_slice(&encoded),
+            ShardingIndexLocation::End => out.extend_from_slice(&encoded),
+        }
+        Ok(out)
+    }
+}
+
 /// Resolved write geometry for one target track.
 struct TargetGeom<'t> {
     track: &'t Destination,
@@ -333,12 +482,14 @@ struct TargetGeom<'t> {
     /// Outer write-unit (shard) shape, for the per-shard mutex key.
     shard_pos: u64,
     shard_col: u64,
-    /// Sharded, and the destination columns cover whole shards, so every
-    /// buffer of a shard arrives through this import and the shard can be
-    /// encoded and stored in one call.
+    /// Sharding is the only codec and the destination columns cover whole
+    /// shards, so every buffer of a shard arrives through this import and
+    /// the engine can lay out the shard file itself.
     shard_aligned: bool,
     /// Inner position chunks per shard; meaningful only when `shard_aligned`.
     chunks_per_shard: u64,
+    /// Set when `shard_aligned`.
+    shard_codec: Option<ShardCodec>,
     fill: FillValue,
     /// Destination column range from the routing target.
     columns: Range<u64>,
@@ -515,12 +666,12 @@ struct ChunkGroup {
     remaining: usize,
 }
 
-/// One shard of a shard-aligned target, assembled in place as its buffers
-/// close and stored once when the last one arrives.
+/// One shard of a shard-aligned target. Each closed buffer adds its encoded
+/// inner chunk; the last one assembles and stores the shard.
 struct ShardGroup {
-    /// Allocated lazily on the first covered part; an all-fill shard never
-    /// allocates and elides its file.
-    data: Option<TileBuffer>,
+    /// `(inner chunk index in the shard, encoded bytes)`; an all-fill chunk
+    /// adds nothing.
+    encoded: Vec<(usize, Vec<u8>)>,
     /// `(chunk index, column chunk, covered)`, recorded at flush.
     parts: Vec<(usize, u64, bool)>,
     remaining: usize,
@@ -661,6 +812,8 @@ struct RunTimings {
     shard_wait: StageTimer,
     /// Per store call (encode + write), the shard mutex already held.
     write: StageTimer,
+    /// Per closed shard-aligned buffer: its inner chunk encode.
+    encode: StageTimer,
     /// Per worker thread: its whole time on pieces, pool stalls excluded.
     worker_busy: StageTimer,
     /// Per worker thread: its whole time waiting for a piece.
@@ -685,6 +838,7 @@ impl RunTimings {
              merge  : {}\n\
              shard wait: {}\n\
              write  : {}\n\
+             encode : {}\n\
              worker busy {busy:.0}s / idle {idle:.0}s ({busy_pct:.0}% busy)\n\
              gate wait: {gate_wait:.1}s\n\
              handle wait: {}",
@@ -693,6 +847,7 @@ impl RunTimings {
             self.merge.summary("copies"),
             self.shard_wait.summary("waits"),
             self.write.summary("stores"),
+            self.encode.summary("chunks"),
             self.handle_wait.summary("waits"),
         );
     }
@@ -843,7 +998,7 @@ impl RunCtx<'_> {
                 }
                 self.record_close(geom, chunk, columns, written);
             }
-            (true, true) => self.close_shard_part(t_idx, chunk_idx, chunk, cc, data)?,
+            (true, true) => self.close_shard_part(t_idx, chunk_idx, cc, data)?,
             (true, false) => self.park_in_chunk_group(t_idx, chunk_idx, chunk, cc, data)?,
         }
         if let Some(p) = self.progress {
@@ -971,21 +1126,36 @@ impl RunCtx<'_> {
         Ok(())
     }
 
-    /// Merge one closed buffer into its shard's group; the last part stores
-    /// the shard. The buffer frees here instead of parking until the flush.
+    /// Encode one closed buffer into its shard's group; the last part stores
+    /// the shard.
     fn close_shard_part(
         &self,
         t_idx: usize,
         chunk_idx: usize,
-        chunk: Range<u64>,
         cc: u64,
         data: Option<TileBuffer>,
     ) -> Result<()> {
         let geom = &self.geoms[t_idx];
+        let codec = geom
+            .shard_codec
+            .as_ref()
+            .expect("shard-aligned target has a shard codec");
         let cps = geom.chunks_per_shard.max(1);
         let row = chunk_idx as u64 / cps;
         let cs = geom.col_shard(cc);
         let key = (t_idx, row, cs);
+        let covered = data.is_some();
+        let encoded = match data {
+            Some(buffer) => {
+                let encode_start = Instant::now();
+                let encoded = buffer.encode_inner(codec, &geom.fill)?;
+                self.timings.encode.record(encode_start.elapsed());
+                encoded
+            }
+            None => None,
+        };
+        let inner_idx = ((chunk_idx as u64 - row * cps) * codec.col_chunks
+            + (cc - cs * codec.col_chunks)) as usize;
         let handle = {
             let mut groups = self.shard_groups.lock().expect("shard group map poisoned");
             match groups.entry(key) {
@@ -1000,7 +1170,7 @@ impl RunCtx<'_> {
                     })?;
                     let expected = row_chunks * ccs;
                     Arc::clone(e.insert(Arc::new(Mutex::new(ShardGroup {
-                        data: None,
+                        encoded: Vec::new(),
                         parts: Vec::with_capacity(expected),
                         remaining: expected,
                     }))))
@@ -1009,42 +1179,24 @@ impl RunCtx<'_> {
         };
         let done = {
             let mut group = handle.lock().expect("shard group poisoned");
-            if let Some(buffer) = &data {
-                if group.data.is_none() {
-                    // Full write-unit shape: the tail row and tail column
-                    // shard pad with fill, which the codecs clip on read.
-                    group.data = Some(TileBuffer::filled(
-                        geom.dtype,
-                        geom.shard_pos as usize,
-                        geom.shard_col as usize,
-                        &geom.fill,
-                    )?);
-                }
-                let rows = (chunk.end - chunk.start) as usize;
-                let cols = geom.buffer_columns(cc);
-                let dst_row = (chunk.start - row * geom.shard_pos) as usize;
-                let dst_col = (cols.start - cs * geom.shard_col) as usize;
-                group
-                    .data
-                    .as_mut()
-                    .expect("shard buffer allocated above")
-                    .copy_rows_from(
-                        buffer,
-                        0..rows,
-                        dst_row..dst_row + rows,
-                        dst_col..dst_col + (cols.end - cols.start) as usize,
-                    )?;
+            if let Some(bytes) = encoded {
+                group.encoded.push((inner_idx, bytes));
             }
-            group.parts.push((chunk_idx, cc, data.is_some()));
+            group.parts.push((chunk_idx, cc, covered));
             group.remaining -= 1;
-            (group.remaining == 0).then(|| (group.data.take(), std::mem::take(&mut group.parts)))
+            (group.remaining == 0).then(|| {
+                (
+                    std::mem::take(&mut group.encoded),
+                    std::mem::take(&mut group.parts),
+                )
+            })
         };
-        if let Some((shard, parts)) = done {
+        if let Some((encoded, parts)) = done {
             self.shard_groups
                 .lock()
                 .expect("shard group map poisoned")
                 .remove(&key);
-            self.flush_shard(t_idx, row, cs, shard, parts)?;
+            self.flush_shard(t_idx, row, cs, encoded, parts)?;
         }
         Ok(())
     }
@@ -1054,14 +1206,32 @@ impl RunCtx<'_> {
         t_idx: usize,
         row: u64,
         cs: u64,
-        shard: Option<TileBuffer>,
+        encoded: Vec<(usize, Vec<u8>)>,
         parts: Vec<(usize, u64, bool)>,
     ) -> Result<()> {
         let geom = &self.geoms[t_idx];
-        if let Some(shard) = shard {
-            let write_start = Instant::now();
-            shard.store_chunk(&geom.array, geom.track.name(), geom.rank, &[row, cs])?;
+        let codec = geom
+            .shard_codec
+            .as_ref()
+            .expect("shard-aligned target has a shard codec");
+        let indices: &[u64] = if geom.rank == 1 { &[row] } else { &[row, cs] };
+        let name = geom.track.name();
+        let write_start = Instant::now();
+        if !encoded.is_empty() {
+            let shard = codec.assemble(encoded)?;
+            // SAFETY: `assemble` lays the shard out with this array's own
+            // sharding codecs, which are its only codecs.
+            unsafe {
+                geom.array
+                    .store_encoded_chunk(indices, zarrs::storage::Bytes::from(shard))
+            }
+            .map_err(|e| PbzError::Store(format!("write {name}: {e}")))?;
             self.timings.write.record(write_start.elapsed());
+        } else if parts.iter().any(|&(_, _, covered)| covered) {
+            // Covered but every value is the fill: a store of fill erases.
+            geom.array
+                .erase_chunk(indices)
+                .map_err(|e| PbzError::Store(format!("write {name}: {e}")))?;
         }
         for &(chunk_idx, cc, covered) in &parts {
             let chunk = self.chunk_range(chunk_idx as u64);
@@ -1399,12 +1569,20 @@ fn target_geometries<'t>(
         }
         let shard_pos = write_unit[0] as u64;
         let shard_col = if rank == 2 { write_unit[1] as u64 } else { 1 };
-        let shard_aligned = sharded
+        let shard_aligned = array.is_exclusively_sharded()
             && shard_pos.is_multiple_of(chunk_len)
             && shard_col.is_multiple_of(col_chunk)
             && target.columns.start.is_multiple_of(shard_col)
             && (target.columns.end.is_multiple_of(shard_col) || target.columns.end == width);
+        let shard_codec = if shard_aligned {
+            Some(ShardCodec::new(
+                &array, rank, chunk_len, col_chunk, shard_pos, shard_col,
+            )?)
+        } else {
+            None
+        };
         geoms.push(TargetGeom {
+            shard_codec,
             track,
             fill: array.fill_value().clone(),
             rank,
@@ -1750,6 +1928,9 @@ mod tests {
         schema: OutputSchema,
         covered: Range<u64>,
         extra: Option<Range<u64>>,
+        /// Reported as covered, but no value is written: the window keeps
+        /// the fill.
+        fill_cover: Option<Range<u64>>,
         base: i64,
     }
 
@@ -1760,6 +1941,7 @@ mod tests {
                 schema: OutputSchema::single("value", dtype),
                 covered,
                 extra: None,
+                fill_cover: None,
                 base,
             }
         }
@@ -1767,6 +1949,11 @@ mod tests {
         /// A second covered range, disjoint from the first.
         fn with_extra_cover(mut self, extra: Range<u64>) -> Self {
             self.extra = Some(extra);
+            self
+        }
+
+        fn with_fill_cover(mut self, range: Range<u64>) -> Self {
+            self.fill_cover = Some(range);
             self
         }
 
@@ -1823,7 +2010,10 @@ mod tests {
         ) -> std::result::Result<(), crate::io::ReaderError> {
             let mut lo = start;
             for &hi in cuts.iter().chain(std::iter::once(&end)) {
-                let covered = self.ranges().any(|r| lo < r.end && hi > r.start);
+                let covered = self
+                    .ranges()
+                    .chain(self.fill_cover.iter())
+                    .any(|r| lo < r.end && hi > r.start);
                 if covered {
                     let mut outputs = sink.sinks(lo, hi)?;
                     self.read_into(contig, lo, hi, &mut outputs)?;
@@ -2421,6 +2611,88 @@ mod tests {
         // 3 x 2 shard grid; the uncovered position shard (64..96) elides, so
         // its two shard files are never created.
         assert_eq!(chunk_file_count(&dir.path().join("sharded.pbz/depth")), 4);
+    }
+
+    /// One-column inner chunks in shards that the import encodes chunk by
+    /// chunk: the values and the elided inner chunks match an unsharded
+    /// import. The geometry has a partial tail shard on both axes, a partial
+    /// tail chunk, and a covered chunk that holds only the fill.
+    #[test]
+    fn encoded_shards_match_unsharded_chunks() {
+        let len = 100u64;
+        let genome = one_contig(len);
+        let labels: Vec<String> = (0..3).map(|i| format!("s{i}")).collect();
+        let readers = || -> Vec<SynthReader> {
+            vec![
+                SynthReader::new(genome.clone(), Dtype::I32, 5..60, 1000),
+                SynthReader::new(genome.clone(), Dtype::I32, 20..40, 2000).with_fill_cover(64..80),
+                SynthReader::new(genome.clone(), Dtype::I32, 90..100, 3000),
+            ]
+        };
+        let dir = TempDir::new().unwrap();
+        let plain_cfg = TrackConfig::new(Dtype::I32)
+            .columns(labels.clone())
+            .chunk_size(16)
+            .column_chunk_size(1);
+        let sharded_cfg = plain_cfg.clone().shard_size(32).shard_column_size(2);
+        let mut plain = dataset(&dir.path().join("plain.pbz"), &genome);
+        let mut sharded = dataset(&dir.path().join("sharded.pbz"), &genome);
+        for (ds, cfg) in [(&mut plain, plain_cfg), (&mut sharded, sharded_cfg)] {
+            import(ds, "depth", cfg, readers())
+                .config(Config {
+                    workers: 4,
+                    decode_chunks: 1,
+                    ..Config::default()
+                })
+                .run()
+                .unwrap();
+        }
+        let plain_data = read_contig::<i32>(&plain, "depth", "chr1");
+        assert_eq!(plain_data.shape(), [len as usize, 3]);
+        assert_eq!(plain_data, read_contig::<i32>(&sharded, "depth", "chr1"));
+        assert_eq!(plain_data[[70, 1]], 0);
+        assert_eq!(plain_data[[99, 2]], 3099);
+
+        let storage = Arc::new(
+            zarrs::filesystem::FilesystemStore::new(dir.path().join("sharded.pbz")).unwrap(),
+        );
+        let array = Array::open(storage, "/depth").unwrap();
+        let ArrayMetadata::V3(meta) = array.metadata() else {
+            panic!("expected v3 metadata")
+        };
+        let config = meta.codecs[0]
+            .to_typed_configuration::<ShardingCodecConfiguration>()
+            .unwrap();
+        let codec = zarrs::array::codec::ShardingCodec::new_with_configuration(&config).unwrap();
+        let cps = [NonZeroU64::new(2).unwrap(), NonZeroU64::new(2).unwrap()];
+        let mut stored = 0;
+        for chunk in 0..7u64 {
+            for column in 0..3u64 {
+                let plain_file = dir
+                    .path()
+                    .join(format!("plain.pbz/depth/c/{chunk}/{column}"));
+                let shard_file =
+                    dir.path()
+                        .join(format!("sharded.pbz/depth/c/{}/{}", chunk / 2, column / 2));
+                let in_shard = std::fs::read(&shard_file).is_ok_and(|bytes| {
+                    let index = codec
+                        .decode_index(&bytes, &cps, &CodecOptions::default())
+                        .unwrap();
+                    let i = ((chunk % 2) * 2 + column % 2) as usize;
+                    index[2 * i] != u64::MAX
+                });
+                assert_eq!(
+                    plain_file.exists(),
+                    in_shard,
+                    "chunk {chunk} column {column}"
+                );
+                stored += usize::from(in_shard);
+            }
+        }
+        // Column 0: chunks 0..4; column 1: chunks 1, 2; column 2: chunks 5, 6.
+        assert_eq!(stored, 8);
+        // Shard (2, 0) has only the fill-only chunk, so it has no file.
+        assert!(!dir.path().join("sharded.pbz/depth/c/2/0").exists());
     }
 
     /// Counts live handles of one reader, base included, so a test can assert
