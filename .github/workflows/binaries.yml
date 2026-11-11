@@ -1,0 +1,88 @@
+name: Binaries
+
+# Builds and smoke-tests the pbz CLI. Called by release.yml, which attaches the
+# archives to the GitHub release, and by ci.yml, so a broken build shows up
+# before a release.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to build; empty means the triggering commit."
+        type: string
+        required: false
+        default: ""
+      upload_tag:
+        description: "Release tag to attach the archives to; empty means no upload."
+        type: string
+        required: false
+        default: ""
+
+env:
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    # glibc 2.28, the same baseline as the Linux wheels
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install clang and Rust
+        # hts-sys (rust-htslib) runs bindgen, which needs libclang
+        run: |
+          dnf install -y clang-devel
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - run: cargo build --release --locked -p pbz
+      - name: Smoke-test the binary
+        run: |
+          target/release/pbz --version
+          target/release/pbz import d4 "$RUNNER_TEMP/smoke.pbz" fixtures/d4/banded_1k.d4 --track depth -q
+          target/release/pbz stat "$RUNNER_TEMP/smoke.pbz" -r chr1:100-110
+      - name: Package
+        run: tar czf pbz-x86_64-unknown-linux-gnu.tar.gz -C target/release pbz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pbz-x86_64-unknown-linux-gnu
+          path: pbz-x86_64-unknown-linux-gnu.tar.gz
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked -p pbz
+      - name: Smoke-test the binary
+        run: |
+          target/release/pbz --version
+          target/release/pbz import d4 "$RUNNER_TEMP/smoke.pbz" fixtures/d4/banded_1k.d4 --track depth -q
+          target/release/pbz stat "$RUNNER_TEMP/smoke.pbz" -r chr1:100-110
+      - name: Package
+        run: tar czf pbz-aarch64-apple-darwin.tar.gz -C target/release pbz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pbz-aarch64-apple-darwin
+          path: pbz-aarch64-apple-darwin.tar.gz
+
+  attach:
+    needs: [linux, macos]
+    if: ${{ inputs.upload_tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pbz-*
+          path: dist
+          merge-multiple: true
+      - name: Attach the archives to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.upload_tag }}
+        run: gh release upload "$TAG" dist/*.tar.gz --clobber --repo "$GITHUB_REPOSITORY"

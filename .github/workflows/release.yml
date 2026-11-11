@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git ref (tag) to build and publish wheels for. Republishes wheels to PyPI for an already-released version; the crate is untouched."
+        description: "Git ref (tag) to build and publish wheels and pbz binaries for. Republishes wheels to PyPI and attaches binaries to the release of an already-released version; the crate is untouched."
         required: false
         default: ""
 
@@ -33,6 +33,14 @@ jobs:
     uses: ./.github/workflows/wheels.yml
     with:
       ref: ${{ inputs.ref }}
+
+  build-binaries:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' || github.event_name == 'workflow_dispatch' }}
+    uses: ./.github/workflows/binaries.yml
+    with:
+      ref: ${{ inputs.ref }}
+      upload_tag: ${{ needs.release-please.outputs.tag_name || inputs.ref }}
 
   publish-pypi:
     needs: build-wheels

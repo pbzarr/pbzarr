@@ -42,9 +42,24 @@ jobs:
         with:
           python-version: "3.12"
       - name: Smoke-test the wheel
+        # install outside the checkout so the import uses the wheel, then
+        # import a d4 fixture, open the store and read a region
         run: |
           python -m pip install dist/*.whl
-          python -c "import pbzarr, pbzarr._native; print(pbzarr.__name__, 'imports')"
+          cd "$RUNNER_TEMP"
+          python - "$GITHUB_WORKSPACE/fixtures/d4/banded_1k.d4" <<'EOF'
+          import sys
+
+          import numpy as np
+
+          import pbzarr
+
+          pbzarr.import_d4("smoke.pbz", "depth", sys.argv[1])
+          with pbzarr.open("smoke.pbz") as ds:
+              view = pbzarr.region(ds["depth"], "chr1:100-110")
+              np.testing.assert_array_equal(view.values, np.full(10, 11))
+          print(f"wheel smoke ok: pbzarr {pbzarr.__version__}")
+          EOF
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
