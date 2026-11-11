@@ -178,7 +178,7 @@ pbz view cohort.pbz --track signal -r chr1:0-1000000 -r chr2:500-900
 
 `pbz view` and `pbz stat` write to stdout when you do not give `-o`. When the store has one track, `--track` is optional.
 
-`pbz view` and `pbz stat` read a track only when `position` is its first dimension and it has at most one other dimension. They do not read tracks on a `bin_N` dimension. A track that declares missing values with `_FillValue` must be a float track with a `NaN` fill. Use Python for the other shapes.
+`pbz view` and `pbz stat` read a track only when `position` is its first dimension and it has at most one other dimension. They do not read tracks on a `bin_N` dimension. Use Python for the other shapes. A null marks a missing value. In a float track, the null is `NaN`. In an integer track, the null is the value of the `_FillValue` attribute, when the track has one. A float `_FillValue` must be `NaN`. `pbz view` prints a null as `NaN` and does not write rows where all columns are null. `pbz stat` skips nulls in all statistics.
 
 Show the layout of a store:
 
@@ -187,7 +187,7 @@ pbz info cohort.pbz
 pbz info cohort.pbz --json
 ```
 
-`pbz info` prints the format version, the contigs and their lengths, and the size of each dimension. For each variable, it prints the dtype, dimensions, shape, chunk shape, shard shape, codecs, fill value, stored bytes, and number of stored objects. `--json` prints the same data as one JSON object.
+`pbz info` prints the format version, the contigs and their lengths, and the size of each dimension. For each variable, it prints the dtype, dimensions, shape, chunk shape, shard shape, codecs, fill value, null (`none` when the variable declares no `_FillValue`), stored bytes, and number of stored objects. `--json` prints the same data as one JSON object.
 
 Check a store against the format rules:
 

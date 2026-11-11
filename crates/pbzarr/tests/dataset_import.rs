@@ -553,3 +553,85 @@ fn read_region_selects_contig_rows_at_full_width() {
     assert_eq!(whole.shape(), [5, 2]);
     assert_eq!(whole[[4, 1]], 1004);
 }
+
+/// Writes no values, so every position holds the track fill.
+#[derive(Clone)]
+struct BlankReader {
+    genome: Reference,
+    schema: OutputSchema,
+}
+impl ValueReader for BlankReader {
+    fn contigs(&self) -> &Reference {
+        &self.genome
+    }
+    fn output_schema(&self) -> &OutputSchema {
+        &self.schema
+    }
+    fn fork(&self) -> pbzarr::io::Result<Self> {
+        Ok(self.clone())
+    }
+    fn read_into(
+        &mut self,
+        _: &str,
+        _: u64,
+        _: u64,
+        _: &mut [OutputSinkMut<'_>],
+    ) -> pbzarr::io::Result<()> {
+        Ok(())
+    }
+}
+fn import_blank(ds: &mut Dataset, name: &str, cfg: TrackConfig) -> pbzarr::Result<()> {
+    let reader = BlankReader {
+        genome: reference(),
+        schema: OutputSchema::single("value", cfg.dtype),
+    };
+    Import::from_readers(vec![reader])?
+        .into_dataset(ds, vec![(name.into(), cfg)])
+        .run()
+        .map(drop)
+}
+#[test]
+fn na_fill_stores_the_dtype_null_and_declares_it() {
+    use pbzarr::{Fill, Measurement, Null};
+    use serde_json::json;
+    let (mut ds, storage, _) = traced_dataset();
+    let cases = [
+        ("f32", Dtype::F32, json!("NaN"), json!("AAAAAAAA+H8=")),
+        ("i32", Dtype::I32, json!(i32::MAX), json!(i32::MAX)),
+        ("u8", Dtype::U8, json!(u8::MAX), json!(u8::MAX)),
+    ];
+    for (name, dtype, _, _) in &cases {
+        import_blank(&mut ds, name, TrackConfig::new(*dtype).fill(Fill::Na)).unwrap();
+    }
+    let ds = Dataset::open_with_storage(storage).unwrap();
+    assert_eq!(ds.validate().unwrap().status, ValidationStatus::Valid);
+    for (name, dtype, fill, attribute) in cases {
+        let info = &ds.variables()[name];
+        assert_eq!(info.metadata["fill_value"], fill, "{name}");
+        assert_eq!(
+            info.metadata["attributes"]["_FillValue"], attribute,
+            "{name}"
+        );
+        let track = Measurement::root(&ds, name).unwrap();
+        assert_eq!(track.null(), dtype.null(), "{name}");
+    }
+    let track = Measurement::root(&ds, "i32").unwrap();
+    assert_eq!(track.null(), Some(Null::Int(i32::MAX.into())));
+    assert!(
+        ds.read_raw::<i32>("i32", &[0..12])
+            .unwrap()
+            .iter()
+            .all(|v| Some(*v) == track.null_as::<i32>())
+    );
+
+    let (mut ds, _, _) = traced_dataset();
+    let real = TrackConfig::new(Dtype::I32).fill(Fill::Value(json!(0)));
+    import_blank(&mut ds, "zero", real).unwrap();
+    assert!(
+        ds.variables()["zero"].metadata["attributes"]
+            .get("_FillValue")
+            .is_none()
+    );
+    let mask = TrackConfig::new(Dtype::Bool).fill(Fill::Na);
+    assert!(import_blank(&mut ds, "mask", mask).is_err());
+}

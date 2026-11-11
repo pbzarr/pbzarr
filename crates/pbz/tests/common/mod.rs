@@ -11,7 +11,7 @@ use noodles_csi::{self as csi, binning_index::index::reference_sequence::bin::Ch
 use noodles_tabix as tabix;
 use pbzarr::import::Import;
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, Dataset, Reference, TrackConfig};
+use pbzarr::{Contig, Dataset, Fill, Reference, TrackConfig};
 
 fn genome() -> Reference {
     Reference::new(vec![
@@ -177,6 +177,28 @@ pub fn build_store(dir: &Path) -> PathBuf {
     Import::from_readers(vec![ColumnReader::new(s1), ColumnReader::new(s2)])
         .unwrap()
         .into_dataset(&mut dataset, vec![("af".into(), af)])
+        .readers_as_columns()
+        .run()
+        .unwrap();
+    path
+}
+
+/// A store with a two-sample int32 `score` track whose fill is the null.
+#[allow(dead_code)]
+pub fn build_null_store(dir: &Path) -> PathBuf {
+    let path = dir.join("null.pbz");
+    let mut dataset = Dataset::create(&path, genome()).unwrap();
+    let n = i32::MAX;
+    let s1 = Column::Ints(vec![vec![n, n, 4, 4, n, n, n, n, n, n], vec![n; 6]]);
+    let s2 = Column::Ints(vec![vec![n, n, 2, 2, 6, n, n, n, n, n], vec![n; 6]]);
+    let score = TrackConfig::new(Dtype::I32)
+        .columns(vec!["s1".into(), "s2".into()])
+        .column_dim("sample")
+        .chunk_size(4)
+        .fill(Fill::Na);
+    Import::from_readers(vec![ColumnReader::new(s1), ColumnReader::new(s2)])
+        .unwrap()
+        .into_dataset(&mut dataset, vec![("score".into(), score)])
         .readers_as_columns()
         .run()
         .unwrap();

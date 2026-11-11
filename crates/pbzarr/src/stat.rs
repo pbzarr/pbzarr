@@ -685,7 +685,13 @@ fn dispatch(
                     .map(|per_sample| {
                         per_sample
                             .into_iter()
-                            .map(|acc| StatValue::Int(acc.median()))
+                            .map(|acc| {
+                                if acc.total() == 0 {
+                                    StatValue::Float(f64::NAN)
+                                } else {
+                                    StatValue::Int(acc.median())
+                                }
+                            })
                             .collect()
                     })
                     .collect();
@@ -697,7 +703,7 @@ fn dispatch(
     }
 }
 
-fn float_rows<T: Numeric>(
+fn float_rows<T: Numeric + PartialEq>(
     measurement: &Measurement,
     batches: &[Batch],
     n_regions: usize,
@@ -761,7 +767,7 @@ fn finalize_rows<A: Accumulator<Output = f64>>(
         .collect()
 }
 
-fn count_accs<T: Numeric>(
+fn count_accs<T: Numeric + PartialEq>(
     measurement: &Measurement,
     batches: &[Batch],
     n_regions: usize,
@@ -811,11 +817,16 @@ fn accumulate<T, A, I, C>(
     convert: C,
 ) -> Result<Vec<Vec<A>>>
 where
-    T: Numeric,
+    T: Numeric + PartialEq,
     A: Accumulator,
     I: Fn() -> A + Sync,
     C: Fn(T) -> A::Value + Sync,
 {
+    // The accumulators already skip NaN.
+    let null = match T::DTYPE {
+        Dtype::F32 | Dtype::F64 => None,
+        _ => measurement.null_as::<T>(),
+    };
     let rank1 = measurement.rank() == 1;
     let n_out = if rank1 { 1 } else { selected.len() };
     let tiles = if rank1 {
@@ -858,7 +869,10 @@ where
                     for row in first..first + rows {
                         let base = row * width;
                         for (acc, &(_, col)) in accs.iter_mut().zip(&tile.picks) {
-                            acc.update(convert(raw[base + col - tile.cols.start]));
+                            let value = raw[base + col - tile.cols.start];
+                            if null != Some(value) {
+                                acc.update(convert(value));
+                            }
                         }
                     }
                 }

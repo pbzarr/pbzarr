@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use pbzarr::{Dataset, FORMAT_VERSION, Role, VariableInfo, is_zip_store};
+use pbzarr::{Dataset, FORMAT_VERSION, Null, Role, VariableInfo, is_zip_store};
 use serde_json::{Value, json};
 
 const CONTIGS_SHOWN: usize = 10;
@@ -52,6 +52,7 @@ fn report(path: &Path, store: &Dataset) -> Result<Value> {
                 "shards": shards,
                 "codecs": codecs(info),
                 "fill_value": info.metadata["fill_value"],
+                "null": declared_null(info),
                 "stored_bytes": stored.map(|s| s.bytes),
                 "objects": stored.map(|s| s.objects),
             }),
@@ -83,6 +84,16 @@ fn dtype(info: &VariableInfo) -> &str {
         return "bool";
     }
     info.metadata["data_type"].as_str().unwrap_or("?")
+}
+
+/// The declared null: a JSON integer, "NaN", or JSON null for none. An
+/// unsupported `_FillValue` shows as stored.
+fn declared_null(info: &VariableInfo) -> Value {
+    match info.null() {
+        Ok(Some(Null::Int(_))) | Err(_) => info.metadata["attributes"]["_FillValue"].clone(),
+        Ok(Some(Null::Nan)) => "NaN".into(),
+        Ok(None) => Value::Null,
+    }
 }
 
 fn sharding(info: &VariableInfo) -> Option<&Value> {
@@ -219,8 +230,8 @@ fn write_text(out: &mut impl Write, report: &Value) -> std::io::Result<()> {
     writeln!(out, "\nvariables:")?;
     let mut rows = vec![
         [
-            "name", "role", "dtype", "dims", "shape", "chunk", "shard", "codecs", "fill", "stored",
-            "objects",
+            "name", "role", "dtype", "dims", "shape", "chunk", "shard", "codecs", "fill", "null",
+            "stored", "objects",
         ]
         .map(String::from)
         .to_vec(),
@@ -256,6 +267,11 @@ fn write_text(out: &mut impl Write, report: &Value) -> std::io::Result<()> {
                 codecs.join(",")
             },
             v["fill_value"].to_string(),
+            match &v["null"] {
+                Value::Null => "none".into(),
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            },
             bytes_text(&v["stored_bytes"]),
             v["objects"].as_u64().map_or("-".into(), |n| n.to_string()),
         ]);

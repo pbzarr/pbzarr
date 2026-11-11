@@ -14,7 +14,7 @@ use zarrs::node::NodeName;
 use crate::Result;
 use crate::codec_spec::{ExplicitArraySpec, resolve_codecs};
 use crate::error::PbzError;
-use crate::io::Dtype;
+use crate::io::{Dtype, Null};
 
 /// Validate a non-root PBZ/Zarr hierarchy node name using zarrs' canonical
 /// Zarr v3 rules.
@@ -27,6 +27,16 @@ pub fn validate_node_name(name: &str) -> Result<()> {
     NodeName::new(name.to_owned()).map(|_| ()).map_err(|error| {
         PbzError::Metadata(format!("invalid PBZ/Zarr node name {name:?}: {error}"))
     })
+}
+
+/// The value a track holds at positions that no source covers.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fill {
+    /// A JSON scalar, coerced to the track dtype.
+    Value(Value),
+    /// The null of the track dtype (see [`Dtype::null`]). The track also
+    /// declares the null as its `_FillValue` attribute.
+    Na,
 }
 
 /// User-supplied configuration for a new track.
@@ -44,7 +54,9 @@ pub struct TrackConfig {
     /// then ignored except as the fallback outer grid when the spec carries
     /// no `chunk_grid`.
     pub codecs: Option<ExplicitArraySpec>,
-    pub fill_value: Option<Value>,
+    /// `None` gives the dtype default: 0 for integers, NaN for floats, false
+    /// for bool, with no `_FillValue`.
+    pub fill: Option<Fill>,
     pub description: Option<String>,
     pub source: Option<String>,
     pub extra: Map<String, Value>,
@@ -63,7 +75,7 @@ impl TrackConfig {
             shard_size: None,
             shard_column_size: None,
             codecs: None,
-            fill_value: None,
+            fill: None,
             description: None,
             source: None,
             extra: Map::new(),
@@ -116,9 +128,13 @@ impl TrackConfig {
         self
     }
 
-    pub fn fill_value(mut self, v: serde_json::Value) -> Self {
-        self.fill_value = Some(v);
+    pub fn fill(mut self, fill: Fill) -> Self {
+        self.fill = Some(fill);
         self
+    }
+
+    pub fn fill_value(self, v: serde_json::Value) -> Self {
+        self.fill(Fill::Value(v))
     }
 
     pub fn description(mut self, s: impl Into<String>) -> Self {
@@ -197,8 +213,28 @@ pub(crate) fn dtype_to_zarrs(d: Dtype) -> zarrs::array::DataType {
     }
 }
 
-/// Resolve a track's fill value: use the caller's `TrackConfig::fill_value`
-/// (a JSON scalar) when set, coerced to the track dtype, else the dtype default.
+/// The Zarr fill value of a track, plus the `_FillValue` attribute when the
+/// fill is the null.
+pub(crate) fn resolve_fill(d: Dtype, fill: Option<&Fill>) -> Result<(FillValue, Option<Value>)> {
+    match fill {
+        None => Ok((default_fill_value(d), None)),
+        Some(Fill::Value(v)) => Ok((resolve_fill_value(d, Some(v))?, None)),
+        Some(Fill::Na) => {
+            let null = d.null().ok_or_else(|| {
+                PbzError::Metadata(format!(
+                    "a {d} track has no null; give a fill of true or false"
+                ))
+            })?;
+            let fill = match null {
+                Null::Nan => default_fill_value(d),
+                Null::Int(_) => resolve_fill_value(d, Some(&null.attribute()))?,
+            };
+            Ok((fill, Some(null.attribute())))
+        }
+    }
+}
+
+/// Coerce a JSON scalar fill to the track dtype, or give the dtype default.
 pub(crate) fn resolve_fill_value(d: Dtype, custom: Option<&Value>) -> Result<FillValue> {
     let Some(v) = custom else {
         return Ok(default_fill_value(d));

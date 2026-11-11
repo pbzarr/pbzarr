@@ -34,6 +34,35 @@ impl VariableInfo {
     pub(super) fn attrs(&self) -> &Value {
         &self.metadata["attributes"]
     }
+    /// The null that the `_FillValue` attribute declares, or `None` when the
+    /// variable declares none. A float null must be NaN, and an integer null
+    /// must be a value of the stored dtype.
+    pub fn null(&self) -> Result<Option<crate::Null>> {
+        use crate::io::Dtype;
+        let fill = &self.attrs()["_FillValue"];
+        if fill.is_null() {
+            return Ok(None);
+        }
+        let stored = self.metadata["data_type"].as_str().unwrap_or("");
+        let refuse =
+            |reason: String| PbzError::UnsupportedEncoding(format!("{}: {reason}", self.name));
+        match Dtype::from_str(stored) {
+            Ok(Dtype::F32 | Dtype::F64) => match super::read::float_fill(self)? {
+                Some(v) if v.is_nan() => Ok(Some(crate::Null::Nan)),
+                _ => Err(refuse(
+                    "a float _FillValue other than NaN is unsupported".into(),
+                )),
+            },
+            Ok(dtype) if dtype != Dtype::Bool => fill
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| fill.as_u64().map(i128::from))
+                .filter(|_| crate::array::resolve_fill_value(dtype, Some(fill)).is_ok())
+                .map(|v| Some(crate::Null::Int(v)))
+                .ok_or_else(|| refuse(format!("_FillValue {fill} is not a {dtype} value"))),
+            _ => Err(refuse(format!("a {stored} _FillValue is unsupported"))),
+        }
+    }
     /// A track is a root array whose first dimension is `position` or `bin_N`.
     pub fn is_track(&self) -> bool {
         self.dims

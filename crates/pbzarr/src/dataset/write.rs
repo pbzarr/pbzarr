@@ -153,7 +153,7 @@ impl Dataset {
 
 use super::{GenomicAxis, Role, Support, VariableInfo};
 use crate::array::{
-    TrackConfig, apply_explicit_spec, default_data_codecs, dtype_to_zarrs, resolve_fill_value,
+    TrackConfig, apply_explicit_spec, default_data_codecs, dtype_to_zarrs, resolve_fill,
     validate_node_name,
 };
 use crate::import::destination::Destination;
@@ -342,6 +342,7 @@ impl Dataset {
                     col_chunk
                 });
             }
+            let (fill, null) = resolve_fill(config.dtype, config.fill.as_ref())?;
             let mut builder = ArrayBuilder::new(
                 shape.clone(),
                 if config.codecs.is_some() {
@@ -350,10 +351,13 @@ impl Dataset {
                     outer
                 },
                 dtype_to_zarrs(config.dtype),
-                resolve_fill_value(config.dtype, config.fill_value.as_ref())?,
+                fill,
             );
             builder.dimension_names(Some(dims.clone()));
             builder.attributes(config.extra.clone());
+            if let Some(null) = null {
+                builder.attributes_mut().insert("_FillValue".into(), null);
+            }
             if let Some(value) = &config.description {
                 builder
                     .attributes_mut()

@@ -176,10 +176,11 @@ fn stream<W: Write>(
 }
 
 /// Per-dtype cell behavior: run equality, missing-ness, rounding, rendering.
-trait Cell: Numeric {
+trait Cell: Numeric + PartialEq {
     fn same(self, other: Self) -> bool;
-    fn is_missing(self) -> bool {
-        false
+    /// `null` is the track's declared integer null, if any.
+    fn is_missing(self, null: Option<Self>) -> bool {
+        null == Some(self)
     }
     /// Round to `sig` significant digits before run comparison, so values
     /// that print identically collapse into one row. Identity for non-floats.
@@ -212,7 +213,7 @@ macro_rules! impl_cell_float {
             fn same(self, other: Self) -> bool {
                 self.to_bits() == other.to_bits()
             }
-            fn is_missing(self) -> bool {
+            fn is_missing(self, _null: Option<Self>) -> bool {
                 self.is_nan()
             }
             fn quantize(self, sig: usize) -> Self {
@@ -377,6 +378,7 @@ fn export<T: Cell, W: Write>(
     out: &mut W,
 ) -> Result<()> {
     let plan = Plan::new(measurement, columns)?;
+    let null = measurement.null_as::<T>();
     let offsets = measurement.reference().offsets();
     for named in regions {
         let base = offsets[named.region.contig.as_usize()];
@@ -390,8 +392,8 @@ fn export<T: Cell, W: Write>(
             let rows = batch.first().map_or(0, Vec::len);
             for row in 0..rows {
                 let pos = start + row as u64;
-                if batch.iter().all(|column| column[row].is_missing()) {
-                    flush(out, chrom, &mut run, precision)?;
+                if batch.iter().all(|column| column[row].is_missing(null)) {
+                    flush(out, chrom, &mut run, null, precision)?;
                     continue;
                 }
                 let extends = run.as_ref().is_some_and(|(_, run_end, values)| {
@@ -405,7 +407,7 @@ fn export<T: Cell, W: Write>(
                     run.as_mut().expect("checked above").1 += 1;
                     continue;
                 }
-                flush(out, chrom, &mut run, precision)?;
+                flush(out, chrom, &mut run, null, precision)?;
                 run = Some((
                     pos,
                     pos + 1,
@@ -414,7 +416,7 @@ fn export<T: Cell, W: Write>(
             }
             start = end;
         }
-        flush(out, chrom, &mut run, precision)?;
+        flush(out, chrom, &mut run, null, precision)?;
     }
     Ok(())
 }
@@ -423,6 +425,7 @@ fn flush<T: Cell>(
     out: &mut impl Write,
     contig: &str,
     run: &mut Option<(u64, u64, Vec<T>)>,
+    null: Option<T>,
     precision: usize,
 ) -> io::Result<()> {
     let Some((start, end, values)) = run.take() else {
@@ -431,7 +434,11 @@ fn flush<T: Cell>(
     write!(out, "{contig}\t{start}\t{end}")?;
     for value in values {
         out.write_all(b"\t")?;
-        value.write_to(&mut *out, precision)?;
+        if value.is_missing(null) {
+            out.write_all(b"NaN")?;
+        } else {
+            value.write_to(&mut *out, precision)?;
+        }
     }
     out.write_all(b"\n")
 }

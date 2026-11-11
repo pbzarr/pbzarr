@@ -5,7 +5,7 @@ use noodles_bgzf as bgzf;
 use tempfile::TempDir;
 
 mod common;
-use common::{add_rank_three_variable, build_store, run_pbz, stdout_of};
+use common::{add_rank_three_variable, build_null_store, build_store, run_pbz, stdout_of};
 
 #[test]
 fn integer_track_streams_collapsed_rows_in_genome_order() {
@@ -48,6 +48,30 @@ fn float_track_skips_all_missing_positions() {
         "#chrom\tstart\tend\ts1\ts2\n\
          chr1\t2\t4\t0.5\t1\n\
          chr1\t4\t6\t0.25\t1\n"
+    );
+}
+
+#[test]
+fn integer_null_is_missing_in_view_and_stat() {
+    let dir = TempDir::new().unwrap();
+    let store = build_null_store(dir.path());
+    let view = run_pbz(["view".into(), store.as_os_str().to_owned()]);
+    assert_eq!(
+        stdout_of(&view),
+        "#chrom\tstart\tend\ts1\ts2\n\
+         chr1\t2\t4\t4\t2\n\
+         chr1\t4\t5\tNaN\t6\n"
+    );
+    let stat = run_pbz([
+        "stat".into(),
+        store.into_os_string(),
+        "-r".into(),
+        "chr1".into(),
+    ]);
+    assert_eq!(
+        stdout_of(&stat),
+        "#chrom\tstart\tend\ts1\ts2\n\
+         chr1\t0\t10\t4\t3.33333\n"
     );
 }
 

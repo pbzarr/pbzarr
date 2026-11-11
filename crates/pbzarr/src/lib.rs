@@ -17,7 +17,7 @@ mod region_query;
 pub mod stat;
 mod zip_store;
 
-pub use array::{TrackConfig, validate_node_name};
+pub use array::{Fill, TrackConfig, validate_node_name};
 pub use codec_spec::ExplicitArraySpec;
 pub use dataset::{
     BinInterval, Contig, ContigId, Dataset, FORMAT_VERSION, GenomicAxis, Reference, Region, Role,
@@ -26,6 +26,7 @@ pub use dataset::{
 };
 pub use error::{PbzError, Result};
 pub use import::{Import, ImportBuilder};
+pub use io::Null;
 pub use measurement::Measurement;
 pub use region_query::RegionQuery;
 

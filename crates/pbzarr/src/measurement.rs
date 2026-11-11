@@ -1,7 +1,7 @@
 //! The read handle that `view` and `stat` use for one track.
 
 use crate::dataset::{Dataset, GenomicAxis, Reference, Role, Support, VariableInfo};
-use crate::io::{Dtype, Numeric};
+use crate::io::{Dtype, Null, Numeric};
 use crate::{PbzError, Result};
 use ndarray::ArrayD;
 use std::ops::Range;
@@ -15,6 +15,7 @@ pub struct Measurement<'a> {
     reference: &'a Reference,
     dtype: Dtype,
     columns: u64,
+    null: Option<Null>,
     chunk: usize,
     /// Decode unit as (positions, columns): the subchunk when sharded.
     inner: (u64, u64),
@@ -26,18 +27,6 @@ fn unsupported(info: &VariableInfo, reason: &str) -> PbzError {
         info.name,
         info.dims.join(", ")
     ))
-}
-
-/// A float `_FillValue` of NaN declares the missing values these commands
-/// already skip.
-fn missing_is_nan(info: &VariableInfo) -> bool {
-    matches!(
-        info.metadata["data_type"].as_str(),
-        Some("float32" | "float64")
-    ) && crate::dataset::float_fill(info)
-        .ok()
-        .flatten()
-        .is_some_and(f64::is_nan)
 }
 
 impl<'a> Measurement<'a> {
@@ -69,16 +58,15 @@ impl<'a> Measurement<'a> {
                 "at most one axis beside position is supported",
             ));
         }
-        if !info.metadata["attributes"]["_FillValue"].is_null() && !missing_is_nan(info) {
-            return Err(unsupported(
-                info,
-                "declared missing values other than NaN are unsupported",
-            ));
-        }
         let stored = info.metadata["data_type"].as_str().unwrap_or("");
         let dtype = Dtype::from_str(stored).map_err(|_| PbzError::InvalidDtype {
             dtype: format!("{name} is {stored}, which these commands cannot render"),
         })?;
+        let declared = info.null()?;
+        let null = match dtype {
+            Dtype::F32 | Dtype::F64 => Some(Null::Nan),
+            _ => declared,
+        };
         if info.metadata["chunk_grid"]["name"] != "regular" {
             return Err(unsupported(info, "a regular chunk grid is required"));
         }
@@ -98,6 +86,7 @@ impl<'a> Measurement<'a> {
             reference,
             dtype,
             columns: info.shape.get(1).copied().unwrap_or(1),
+            null,
             chunk,
             inner,
         })
@@ -113,6 +102,17 @@ impl<'a> Measurement<'a> {
 
     pub fn dtype(&self) -> Dtype {
         self.dtype
+    }
+
+    /// The value that means missing: NaN for a float track, the declared
+    /// `_FillValue` for an integer track, else `None`.
+    pub fn null(&self) -> Option<Null> {
+        self.null
+    }
+
+    /// [`Measurement::null`] as a `T`, for comparison with read values.
+    pub fn null_as<T: Numeric>(&self) -> Option<T> {
+        self.null.and_then(T::from_null)
     }
 
     pub fn rank(&self) -> usize {

@@ -83,8 +83,10 @@ struct ValidateArgs {
 macro_rules! track_limits {
     () => {
         "The track must have position as its first dimension and at most one other \
-         dimension. Tracks on a bin_N dimension are not supported. A track that declares \
-         missing values with _FillValue must be a float track with a NaN fill."
+         dimension. Tracks on a bin_N dimension are not supported. A null marks a missing \
+         value: NaN in a float track, and the _FillValue in an integer track. A float \
+         _FillValue must be NaN. view prints a null as NaN and leaves out rows where all \
+         columns are null. stat skips nulls."
     };
 }
 
