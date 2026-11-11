@@ -196,31 +196,26 @@ fn check_append_fill(
     use crate::io::Dtype;
     let (wanted, wanted_null) = resolve_fill(dtype, Some(fill))?;
     let stored_null = info.null()?;
-    let same = match (wanted_null.is_some(), stored_null.is_some()) {
-        (true, true) => true,
-        (false, false) => {
-            let (a, b) = (wanted.as_ne_bytes(), stored.as_ne_bytes());
-            match dtype {
-                Dtype::F32 | Dtype::F64 => {
-                    let float = |bytes: &[u8]| match bytes.len() {
-                        4 => bytes.try_into().map(|b| f32::from_ne_bytes(b) as f64).ok(),
-                        8 => bytes.try_into().map(f64::from_ne_bytes).ok(),
-                        _ => None,
-                    };
-                    match (float(a), float(b)) {
-                        (Some(x), Some(y)) => x == y || (x.is_nan() && y.is_nan()),
-                        _ => a == b,
-                    }
-                }
+    let (a, b) = (wanted.as_ne_bytes(), stored.as_ne_bytes());
+    let same = match dtype {
+        // NaN is the null of a float track with or without `_FillValue`.
+        Dtype::F32 | Dtype::F64 => {
+            let float = |bytes: &[u8]| match bytes.len() {
+                4 => bytes.try_into().map(|b| f32::from_ne_bytes(b) as f64).ok(),
+                8 => bytes.try_into().map(f64::from_ne_bytes).ok(),
+                _ => None,
+            };
+            match (float(a), float(b)) {
+                (Some(x), Some(y)) => x == y || (x.is_nan() && y.is_nan()),
                 _ => a == b,
             }
         }
-        _ => false,
+        _ => wanted_null.is_some() == stored_null.is_some() && a == b,
     };
     if same {
         return Ok(());
     }
-    let shown = if stored_null.is_some() {
+    let shown = if stored_null.is_some() && stored_null == dtype.null() {
         "na".to_owned()
     } else {
         info.metadata["fill_value"].to_string()
