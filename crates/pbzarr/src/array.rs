@@ -39,6 +39,46 @@ pub enum Fill {
     Na,
 }
 
+impl Fill {
+    /// Parse `na`, `true`/`false`, or a finite number. The track dtype
+    /// checks the value when the track is made.
+    pub fn parse(text: &str) -> Result<Self> {
+        let text = text.trim();
+        let bad = || {
+            PbzError::InvalidArgument(format!("fill {text:?} is not a number, true, false or na"))
+        };
+        Ok(match text {
+            "na" | "NA" => Fill::Na,
+            "true" | "True" | "TRUE" => Fill::Value(Value::Bool(true)),
+            "false" | "False" | "FALSE" => Fill::Value(Value::Bool(false)),
+            _ => {
+                if let Ok(v) = text.parse::<i64>() {
+                    Fill::Value(v.into())
+                } else if let Ok(v) = text.parse::<u64>() {
+                    Fill::Value(v.into())
+                } else {
+                    let v = text.parse::<f64>().map_err(|_| bad())?;
+                    if !v.is_finite() {
+                        return Err(PbzError::InvalidArgument(format!(
+                            "fill {text:?} is not finite; use na for a missing value"
+                        )));
+                    }
+                    Fill::Value(serde_json::Number::from_f64(v).ok_or_else(bad)?.into())
+                }
+            }
+        })
+    }
+}
+
+impl std::fmt::Display for Fill {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Fill::Value(v) => write!(f, "{v}"),
+            Fill::Na => f.write_str("na"),
+        }
+    }
+}
+
 /// User-supplied configuration for a new track.
 #[derive(Debug, Clone)]
 pub struct TrackConfig {
@@ -263,7 +303,15 @@ pub(crate) fn resolve_fill_value(d: Dtype, custom: Option<&Value>) -> Result<Fil
         Dtype::I64 => FillValue::from(v.as_i64().ok_or_else(&bad)?),
         Dtype::F32 => FillValue::from(v.as_f64().ok_or_else(&bad)? as f32),
         Dtype::F64 => FillValue::from(v.as_f64().ok_or_else(&bad)?),
-        Dtype::Bool => FillValue::from(v.as_bool().ok_or_else(&bad)?),
+        Dtype::Bool => FillValue::from(
+            v.as_bool()
+                .or(match v.as_u64() {
+                    Some(0) => Some(false),
+                    Some(1) => Some(true),
+                    _ => None,
+                })
+                .ok_or_else(&bad)?,
+        ),
     };
     Ok(fv)
 }

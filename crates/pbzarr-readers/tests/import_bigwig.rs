@@ -41,6 +41,7 @@ fn import_one_bigwig_into_scalar_track() {
         store.as_path(),
         "signal",
         &[Source::new(bw)],
+        None,
         Config::default(),
     )
     .unwrap();
@@ -75,6 +76,7 @@ fn sharded_scalar_import_matches_unsharded() {
         plain.as_path(),
         "signal",
         &src(),
+        None,
         Config {
             chunk_size: Some(1_000),
             ..Config::default()
@@ -87,6 +89,7 @@ fn sharded_scalar_import_matches_unsharded() {
         sharded.as_path(),
         "signal",
         &src(),
+        None,
         Config {
             workers: 4,
             chunk_size: Some(1_000),
@@ -99,4 +102,62 @@ fn sharded_scalar_import_matches_unsharded() {
     let plain_data = read(&plain);
     assert_eq!(plain_data.shape(), [10_000]);
     assert_eq!(plain_data, read(&sharded));
+}
+
+fn import_gapped(
+    dir: &Path,
+    fill: Option<pbzarr::Fill>,
+) -> (ArrayD<f32>, serde_json::Value, usize) {
+    let bw = common::write_bigwig(
+        dir,
+        "gap",
+        &[("chr1", 1000)],
+        &[("chr1", 0, 10, 5.0)],
+        false,
+    );
+    let store = dir.join("gap.pbz");
+    from_bigwig(
+        store.as_path(),
+        "signal",
+        &[Source::new(bw)],
+        fill,
+        Config {
+            chunk_size: Some(100),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    let dataset = Dataset::open(&store).unwrap();
+    let attrs = dataset.variables()["signal"].metadata["attributes"].clone();
+    let stored = walkdir(&store.join("signal/c"));
+    (read(&store), attrs, stored)
+}
+
+fn walkdir(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .map(|path| if path.is_dir() { walkdir(&path) } else { 1 })
+        .sum()
+}
+
+#[test]
+fn bigwig_gaps_default_to_the_null() {
+    let dir = TempDir::new().unwrap();
+    let (arr, attrs, stored) = import_gapped(dir.path(), None);
+    assert!(arr.iter().take(10).all(|&v| v == 5.0));
+    assert!(arr.iter().skip(10).all(|v| v.is_nan()));
+    assert!(attrs["_FillValue"].is_string());
+    assert_eq!(stored, 1, "chunks that hold only the fill are not stored");
+}
+
+#[test]
+fn bigwig_fill_zero_writes_zero_at_gaps() {
+    let dir = TempDir::new().unwrap();
+    let fill = pbzarr::Fill::Value(serde_json::json!(0));
+    let (arr, attrs, stored) = import_gapped(dir.path(), Some(fill));
+    assert!(arr.iter().take(10).all(|&v| v == 5.0));
+    assert!(arr.iter().skip(10).all(|&v| v == 0.0));
+    assert!(attrs["_FillValue"].is_null());
+    assert_eq!(stored, 1, "chunks that hold only the fill are not stored");
 }

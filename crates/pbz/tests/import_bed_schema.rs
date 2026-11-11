@@ -381,9 +381,50 @@ fn schema_help_describes_unique_and_grouped_target_tracks() {
     assert!(help.contains("Unique target"), "{help}");
     assert!(help.contains("single BED-column-axis track"), "{help}");
     assert!(
-        help.contains("BED column, target track, inferred dtype"),
+        help.contains("BED column, target track, inferred dtype, fill"),
         "{help}"
     );
     assert!(help.contains("--dim metric --schema schema.tsv"), "{help}");
     assert!(!help.contains("own scalar track"), "{help}");
+}
+
+#[test]
+fn schema_fill_column_sets_the_fill_of_each_track() {
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "gaps",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[("chr1", 0, 4, &["4", "60"])],
+    );
+    let emitted = common::stdout_of(&run_pbz([
+        "import".into(),
+        "bed".into(),
+        "--emit-schema".into(),
+        bed.clone().into_os_string(),
+    ]));
+    assert!(emitted.contains("cov\tcov\tuint8\tna\n"), "{emitted}");
+
+    let genome = write_genome(dir.path());
+    let schema = dir.path().join("schema.tsv");
+    std::fs::write(&schema, "cov\tcov\tint32\t0\nmapq\n").unwrap();
+    let output = dir.path().join("gaps.pbz");
+    let mut args = import_args(&output, &genome, &schema, "sample", [bed.into_os_string()]);
+    args.retain(|arg| arg != "--dim" && arg != "sample");
+    common::stdout_of(&run_pbz(args));
+
+    let dataset = Dataset::open(&output).unwrap();
+    let cov = dataset.read_raw::<i32>("cov", &[0..8]).unwrap();
+    assert_eq!(
+        cov.iter().copied().collect::<Vec<_>>(),
+        [4, 4, 4, 4, 0, 0, 0, 0]
+    );
+    let attrs = |name: &str| dataset.variables()[name].metadata["attributes"].clone();
+    assert!(attrs("cov")["_FillValue"].is_null());
+    let mapq = dataset.read_raw::<u8>("mapq", &[0..8]).unwrap();
+    assert_eq!(
+        mapq.iter().copied().collect::<Vec<_>>(),
+        [60, 60, 60, 60, 255, 255, 255, 255]
+    );
+    assert_eq!(attrs("mapq")["_FillValue"], 255);
 }

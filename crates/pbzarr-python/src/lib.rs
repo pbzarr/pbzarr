@@ -228,7 +228,7 @@ fn import_bigwig(
         codecs.as_deref(),
     )?;
     let report = run_interruptible(py, config, |config| {
-        rs_from_bigwig(destination.as_path(), &track, &sources, config).map_err(py_err)
+        rs_from_bigwig(destination.as_path(), &track, &sources, None, config).map_err(py_err)
     })?;
     report_to_dict(py, &report)
 }
@@ -288,6 +288,7 @@ fn import_bed(
                         column,
                         track: None,
                         dtype: parse_dtype(dtype.as_deref())?,
+                        fill: None,
                     })
                 })
                 .collect::<PyResult<Vec<_>>>()?,
@@ -296,6 +297,7 @@ fn import_bed(
             column,
             track: track.clone(),
             dtype,
+            fill: None,
         }]),
         (None, None) => None,
     };
@@ -321,8 +323,8 @@ fn import_bed(
             .map_err(py_err)?;
         match requests {
             Some(requests) => {
-                let schema =
-                    build_bed_schema(&sources, &requests, InferRows::default()).map_err(py_err)?;
+                let schema = build_bed_schema(&sources, &requests, None, InferRows::default())
+                    .map_err(py_err)?;
                 let plan = plan_bed_schema(&sources, &schema, &config).map_err(py_err)?;
                 execute_bed_schema_plan(destination.as_path(), plan, genome, config).map_err(py_err)
             }

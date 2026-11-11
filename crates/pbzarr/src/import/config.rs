@@ -90,13 +90,13 @@ impl Config {
     pub fn track_config(
         &self,
         dtype: crate::io::Dtype,
-        fill: Option<serde_json::Value>,
+        fill: Option<crate::Fill>,
         labels: Option<Vec<String>>,
         default_column_dim: &str,
     ) -> crate::TrackConfig {
         let mut cfg = crate::TrackConfig::new(dtype);
         if let Some(fill) = fill {
-            cfg = cfg.fill_value(fill);
+            cfg = cfg.fill(fill);
         }
         if let Some(cs) = self.chunk_size {
             cfg = cfg.chunk_size(cs);

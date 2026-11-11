@@ -46,6 +46,7 @@ fn bigwig_cohort_imports_into_a_dataset() {
             Source::labeled(first, "A".to_owned()),
             Source::labeled(second, "B".to_owned()),
         ],
+        None,
         Config {
             chunk_size: Some(8),
             column_dim: Some("sample".to_owned()),
@@ -191,6 +192,8 @@ fn headered_bed_appends_into_its_track() {
         .unwrap()
         .into_dimensionality::<ndarray::Ix2>()
         .unwrap();
-    assert_eq!(score.column(0).to_vec(), [3, 3, 3, 3, 0, 0, 0, 0]);
-    assert_eq!(score.column(1).to_vec(), [0, 0, 5, 5, 5, 5, 0, 0]);
+    // The append keeps the na fill of the stored track: gaps hold the uint8 null.
+    let na = u8::MAX;
+    assert_eq!(score.column(0).to_vec(), [3, 3, 3, 3, na, na, na, na]);
+    assert_eq!(score.column(1).to_vec(), [na, na, 5, 5, 5, 5, na, na]);
 }

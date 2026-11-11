@@ -146,7 +146,7 @@ pub fn from_bam<'t>(
             let cfg = config
                 .track_config(
                     Dtype::I32,
-                    Some(serde_json::json!(0)),
+                    Some(pbzarr::Fill::Value(serde_json::json!(0))),
                     column_labels.clone(),
                     "sample",
                 )

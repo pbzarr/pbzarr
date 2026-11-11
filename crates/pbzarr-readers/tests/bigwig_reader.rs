@@ -36,7 +36,7 @@ fn open_reports_contigs_and_schema() {
 }
 
 #[test]
-fn read_into_fills_values_and_nan_gaps() {
+fn read_into_fills_values_and_keeps_gaps() {
     let dir = TempDir::new().unwrap();
     // Cover [0, 20) with 7.5; [20, 1000) is left uncovered (a gap).
     let bw = common::write_bigwig(
@@ -49,17 +49,17 @@ fn read_into_fills_values_and_nan_gaps() {
 
     let mut reader = BigWigReader::open(&bw).unwrap();
     let (start, end) = (10u64, 30u64);
-    let mut buf: Array1<f32> = Array1::zeros((end - start) as usize);
+    let mut buf: Array1<f32> = Array1::from_elem((end - start) as usize, -1.0);
     let mut outputs = [OutputSinkMut::F32(buf.view_mut())];
     reader.read_into("chr1", start, end, &mut outputs).unwrap();
 
     assert_eq!(buf.len(), 20);
-    // Positions [10, 20) carry 7.5; [20, 30) are gaps -> NaN.
+    // Positions [10, 20) carry 7.5; [20, 30) are gaps and keep the prefill.
     for i in 0..10 {
         assert_eq!(buf[i], 7.5, "pos {}", start as usize + i);
     }
     for i in 10..20 {
-        assert!(buf[i].is_nan(), "pos {} should be NaN", start as usize + i);
+        assert_eq!(buf[i], -1.0, "pos {}", start as usize + i);
     }
 
     // 0-row view: contract is just "don't crash".

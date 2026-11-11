@@ -1,10 +1,9 @@
 //! bigWig-specific import glue. Wires `BigWigReader` into the import engine.
 
 use log::{debug, info};
-use pbzarr::PbzError;
-use pbzarr::Result;
 use pbzarr::import::{Axes, Config, Report, Source, Target};
 use pbzarr::io::Dtype;
+use pbzarr::{Fill, PbzError, Result};
 
 use super::reader::BigWigReader;
 
@@ -20,12 +19,15 @@ use super::reader::BigWigReader;
 /// A [`Target::Path`] that does not exist becomes a new store whose
 /// reference is the contig list of the sources.
 ///
-/// A bigWig has no value at an uncovered base, so the track takes the `float32`
-/// default fill of `NaN`: gaps read back as missing data, not as zero.
+/// `fill` is the value of bases that no source interval covers. `None` gives
+/// [`Fill::Na`] on a new track: a gap reads as NaN, which marks a missing
+/// value. An append with `None` keeps the fill of the stored track, and an
+/// append with another fill than the stored one is refused.
 pub fn from_bigwig<'t>(
     target: impl Into<Target<'t>>,
     track_name: &str,
     sources: &[Source],
+    fill: Option<Fill>,
     config: Config,
 ) -> Result<Report> {
     if sources.is_empty() {
@@ -49,12 +51,17 @@ pub fn from_bigwig<'t>(
     // single source with neither stays scalar.
     let labels = (sources.len() > 1 || config.column_dim.is_some())
         .then(|| sources.iter().map(Source::label).collect::<Vec<String>>());
-    let track_config = config.track_config(Dtype::F32, None, labels.clone(), "sample");
+    let target = target.into();
+    let fill = match target {
+        Target::Append(_) => fill,
+        _ => Some(fill.unwrap_or(Fill::Na)),
+    };
+    let track_config = config.track_config(Dtype::F32, fill, labels.clone(), "sample");
     let mut axes = Axes::default();
     if let Some(labels) = labels {
         axes = axes.readers_as_columns(labels);
     }
-    target.into().import(
+    target.import(
         vec![(track_name.to_owned(), track_config)],
         readers,
         axes,

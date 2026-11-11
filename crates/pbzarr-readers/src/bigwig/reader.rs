@@ -2,9 +2,8 @@
 //!
 //! Backed by `bigtools::BigWigRead` over a `ReopenableFile`. Each region is read
 //! with `BigWigRead::values`, which returns a per-base `Vec<f32>` with `NaN` for
-//! positions the file does not cover. Those `NaN`s pass through unchanged: a
-//! bigWig holds no value at an uncovered base, so the gap is missing data
-//! rather than zero.
+//! positions the file does not cover. The reader skips those positions, so
+//! they keep the fill of the track.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -76,8 +75,7 @@ impl BigWigReader {
     }
 }
 
-/// `emit` receives each base as an offset from `start`, `NaN` where the file
-/// has no coverage.
+/// `emit` receives each covered base as an offset from `start`.
 fn decode_region(
     shared: &Shared,
     inner: &mut BigWigRead<ReopenableFile>,
@@ -124,7 +122,9 @@ fn decode_region(
     })?;
 
     for (idx, v) in values.into_iter().enumerate() {
-        emit(idx, v);
+        if !v.is_nan() {
+            emit(idx, v);
+        }
     }
 
     Ok(())

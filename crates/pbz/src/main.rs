@@ -13,7 +13,7 @@ use pbzarr::import::{Config, ConfigBuilder};
 use pbzarr::import::{Target, store_reference};
 use pbzarr::io::Dtype;
 use pbzarr::stat::StatKind;
-use pbzarr::{ExplicitArraySpec, Reference};
+use pbzarr::{ExplicitArraySpec, Fill, Reference};
 use pbzarr_readers::{
     BedColumnRequest, BedImportOptions, BedSchema, DepthFilter, ImportMode, InferRows, OverlapMode,
     build_bed_schema, execute_bed_schema_plan, from_bam, from_bed_matrix, from_bigwig, from_d4,
@@ -218,7 +218,7 @@ enum AppendCommand {
         arg_required_else_help = true,
         after_help = "Examples:\n  pbz append bigwig cohort.pbz kidney.bw:kidney --track signal"
     )]
-    BigWig(AppendSignalArgs),
+    BigWig(AppendBigWigArgs),
 }
 
 /// The store, the sources and the track every append names.
@@ -271,13 +271,29 @@ impl RunOptions {
     }
 }
 
-/// The d4 and bigWig appends take no format flags.
+/// The d4 append takes no format flags.
 #[derive(Debug, Args)]
 struct AppendSignalArgs {
     #[command(flatten)]
     run: RunOptions,
     #[command(flatten)]
     target: AppendTarget,
+}
+
+#[derive(Debug, Args)]
+struct AppendBigWigArgs {
+    #[command(flatten)]
+    run: RunOptions,
+    #[command(flatten)]
+    target: AppendTarget,
+    /// Value of bases that no bigWig interval covers: a number, or na.
+    /// Default: the fill of the stored track. A different fill is refused.
+    #[arg(long, value_name = "VALUE|na", value_parser = parse_fill)]
+    fill: Option<Fill>,
+}
+
+fn parse_fill(value: &str) -> std::result::Result<Fill, String> {
+    Fill::parse(value).map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Args)]
@@ -309,6 +325,11 @@ struct AppendBedArgs {
     /// Omit when the header has one BED value column.
     #[arg(long = "field")]
     fields: Vec<String>,
+    /// Value of bases that no interval covers: a number, true or false for a
+    /// bool track, or na. Default: the fill of the stored track. A different
+    /// fill is refused.
+    #[arg(long, value_name = "VALUE|na", value_parser = parse_fill)]
+    fill: Option<Fill>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -323,20 +344,20 @@ enum ImportCommand {
         after_help = "Examples:\n  pbz import d4 cohort.pbz s1.d4 s2.d4:custom_label --track depth"
     )]
     D4(SignalArgs),
-    /// Import per-base float32 signal from bigWig files (uncovered bases are NaN).
+    /// Import per-base float32 signal from bigWig files.
     #[command(
         name = "bigwig",
         arg_required_else_help = true,
-        after_help = "Examples:\n  pbz import bigwig signal.pbz sample.bw --track signal\n  pbz import bigwig cohort.pbz brain.bw:brain liver.bw:liver --track signal --dim sample"
+        after_help = "Examples:\n  pbz import bigwig signal.pbz sample.bw --track signal\n  pbz import bigwig cohort.pbz brain.bw:brain liver.bw:liver --track signal --dim sample\n  pbz import bigwig signal.pbz sample.bw --track signal --fill 0\n\nA bigWig does not say what a base outside its intervals means. By default such a base is missing: it reads as NaN, and the track declares NaN as its _FillValue. Give --fill 0 when the gaps mean 0."
     )]
-    BigWig(SignalArgs),
+    BigWig(BigWigArgs),
 }
 
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
     mut_arg("input_files", |arg| arg.required_unless_present_any(["emit_schema"])),
-    after_help = "Examples:\n  pbz import bed cohort.pbz s1.bed.gz s2.bed.gz --genome genome.fai --track depth --dim sample\n  pbz import bed mask.pbz regions.bed.gz --genome genome.fai --track callable\n  pbz import bed --emit-schema wide.bed.gz > schema.tsv\n  pbz import bed stats.pbz wide.bed.gz --genome genome.fai --dim metric --schema schema.tsv\n\nTracks without --schema (S sources, V selected BED value columns):\n  BED3            one bool track, true where an interval covers the base. Needs --track,\n                  and --dim for several sources.\n  S = 1, V = 1    one track (position). Needs --track when the file has no header.\n  S = 1, V > 1    one track (position, V). The header names are the column labels.\n                  Needs --track and --dim.\n  S > 1, V = 1    one track (position, S). The source labels are the column labels.\n                  Needs --dim, and --track when the files have no header.\n  S > 1, V > 1    one track (position, S) for each value column, with the name of\n                  that column. Needs --dim.\nA file without a `#chrom start end ...` header can have one value column only.\n--dim with one source and one value column also makes a (position, S) track.\nBases that no interval covers read as 0 (false for bool)."
+    after_help = "Examples:\n  pbz import bed cohort.pbz s1.bed.gz s2.bed.gz --genome genome.fai --track depth --dim sample\n  pbz import bed mask.pbz regions.bed.gz --genome genome.fai --track callable\n  pbz import bed --emit-schema wide.bed.gz > schema.tsv\n  pbz import bed stats.pbz wide.bed.gz --genome genome.fai --dim metric --schema schema.tsv\n\nTracks without --schema (S sources, V selected BED value columns):\n  BED3            one bool track, true where an interval covers the base. Needs --track,\n                  and --dim for several sources.\n  S = 1, V = 1    one track (position). Needs --track when the file has no header.\n  S = 1, V > 1    one track (position, V). The header names are the column labels.\n                  Needs --track and --dim.\n  S > 1, V = 1    one track (position, S). The source labels are the column labels.\n                  Needs --dim, and --track when the files have no header.\n  S > 1, V > 1    one track (position, S) for each value column, with the name of\n                  that column. Needs --dim.\nA file without a `#chrom start end ...` header can have one value column only.\n--dim with one source and one value column also makes a (position, S) track.\n\nBases that no interval covers are missing by default: they hold the null of the\ndtype (NaN for a float, the type maximum for an integer), which the track declares\nas its _FillValue. With this fill, inference keeps the type maximum free, and a\nvalue equal to it is an error. A bool column and a BED3 mask hold false there.\nGive --fill 0 when the gaps mean 0, as in a bedGraph that leaves out zero regions.\n\nSchema rows are BED_COLUMN[<TAB>TRACK[<TAB>DTYPE[<TAB>FILL]]]. An empty or absent\nTRACK takes the header name, an empty or absent DTYPE is inferred, and an empty\nor absent FILL takes --fill, else the default."
 )]
 struct BedArgs {
     #[command(flatten)]
@@ -609,20 +630,27 @@ struct BedOptions {
     /// TSV schema mapping BED columns to target tracks. Unique target names
     /// create one track per BED column; repeated one-target rows create a
     /// single BED-column-axis track. A BED column is a header name or 1-based
-    /// column index.
+    /// column index. A row can also give the dtype and the fill of its track.
     #[arg(long, value_name = "PATH")]
     schema: Option<PathBuf>,
     /// Print a schema TSV for this BED file (BED column, target track,
-    /// inferred dtype) to stdout and exit without importing. Edit it and feed
-    /// it back via --schema.
+    /// inferred dtype, fill) to stdout and exit without importing. Edit it
+    /// and feed it back via --schema.
     #[arg(
         long,
         value_name = "BED",
         conflicts_with_all = [
-            "store", "input_files", "file_list", "genome", "schema", "fields", "track", "dtype"
+            "store", "input_files", "file_list", "genome", "schema", "fields", "track", "dtype",
+            "fill"
         ]
     )]
     emit_schema: Option<PathBuf>,
+    /// Value of bases that no interval covers, for BED value columns: a
+    /// number, true or false for a bool column, or na. na is the null of the
+    /// dtype: NaN for a float, the type maximum for an integer.
+    /// Default: na, and false for a bool column. BED3 masks always hold false.
+    #[arg(long, value_name = "VALUE|na", value_parser = parse_fill)]
+    fill: Option<Fill>,
     /// Records sampled for dtype inference (default 1000), or `all`. A sample
     /// infers conservative classes (bool/int32/float32); `all` (or a file
     /// smaller than the sample) scans exhaustively and min-widths (uint8,
@@ -816,13 +844,25 @@ enum OverlapModeArg {
     None,
 }
 
-/// The d4 and bigWig imports take no format flags.
+/// The d4 import takes no format flags.
 #[derive(Debug, Args)]
 struct SignalArgs {
     #[command(flatten)]
     import: ImportOptions,
     #[command(flatten)]
     target: ImportTarget,
+}
+
+#[derive(Debug, Args)]
+struct BigWigArgs {
+    #[command(flatten)]
+    import: ImportOptions,
+    #[command(flatten)]
+    target: ImportTarget,
+    /// Value of bases that no bigWig interval covers: a number, or na. na
+    /// marks a missing value and reads as NaN. Default: na.
+    #[arg(long, value_name = "VALUE|na", value_parser = parse_fill)]
+    fill: Option<Fill>,
 }
 
 impl From<ImportModeArg> for ImportMode {
@@ -997,7 +1037,7 @@ fn import_bed(args: BedArgs, quiet: bool) -> Result<()> {
     let config = args.import.config(&label, quiet)?;
     let report = if let Some(schema_path) = &args.bed.schema {
         info!("loading BED schema {}", schema_path.display());
-        let schema = load_schema(schema_path, &sources, infer_rows)?;
+        let schema = load_schema(schema_path, &sources, args.bed.fill.as_ref(), infer_rows)?;
         let plan = plan_bed_schema(&sources, &schema, &config).context("plan BED schema")?;
         debug!("BED schema planned against {} source(s)", sources.len());
         execute_bed_schema_plan(target, plan, genome, config).context("import BED schema")?
@@ -1007,6 +1047,7 @@ fn import_bed(args: BedArgs, quiet: bool) -> Result<()> {
             track: args.bed.track,
             dtype: args.bed.dtype.map(Dtype::from),
             infer_rows,
+            fill: args.bed.fill,
             ..BedImportOptions::default()
         };
         from_bed_matrix(target, &sources, genome, &options, config).context("import BED columns")?
@@ -1062,7 +1103,7 @@ fn import_d4(args: SignalArgs, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn import_bigwig(args: SignalArgs, quiet: bool) -> Result<()> {
+fn import_bigwig(args: BigWigArgs, quiet: bool) -> Result<()> {
     let sources = args.target.input.resolve_input("bigWig")?;
     let n_sources = sources.len();
     debug!("resolved {n_sources} bigWig source(s)");
@@ -1073,6 +1114,7 @@ fn import_bigwig(args: SignalArgs, quiet: bool) -> Result<()> {
         args.import.target(&output)?,
         &args.target.track,
         &sources,
+        args.fill,
         config,
     )
     .context("import bigWig")?;
@@ -1145,7 +1187,7 @@ fn append_d4(args: AppendSignalArgs, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn append_bigwig(args: AppendSignalArgs, quiet: bool) -> Result<()> {
+fn append_bigwig(args: AppendBigWigArgs, quiet: bool) -> Result<()> {
     let sources = args.target.input.resolve_input("bigWig")?;
     let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
     let config = args.run.append_config(&args.target.track, dim, quiet);
@@ -1153,6 +1195,7 @@ fn append_bigwig(args: AppendSignalArgs, quiet: bool) -> Result<()> {
         Target::Append(&mut dataset),
         &args.target.track,
         &sources,
+        args.fill,
         config,
     )
     .context("append bigWig")?;
@@ -1198,6 +1241,7 @@ fn append_bed(args: AppendBedArgs, quiet: bool) -> Result<()> {
         track: Some(args.target.track.clone()),
         dtype: Some(dtype),
         append: true,
+        fill: args.fill,
         ..BedImportOptions::default()
     };
     let report = from_bed_matrix(
@@ -1222,9 +1266,9 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<BedColumnRequest>> {
             continue;
         }
         let cells = record.split('\t').collect::<Vec<_>>();
-        if cells.len() > 3 || cells[0].is_empty() {
+        if cells.len() > 4 || cells[0].is_empty() {
             bail!(
-                "schema {} line {} must be BED_COLUMN[<TAB>TARGET_TRACK[<TAB>DTYPE]]",
+                "schema {} line {} must be BED_COLUMN[<TAB>TRACK[<TAB>DTYPE[<TAB>FILL]]]",
                 path.display(),
                 index + 1
             );
@@ -1235,6 +1279,12 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<BedColumnRequest>> {
             .map(|dtype| Dtype::from_str(dtype))
             .transpose()
             .with_context(|| format!("schema {} line {}", path.display(), index + 1))?;
+        let fill = cells
+            .get(3)
+            .filter(|fill| !fill.is_empty())
+            .map(|fill| Fill::parse(fill))
+            .transpose()
+            .with_context(|| format!("schema {} line {}", path.display(), index + 1))?;
         rows.push(BedColumnRequest {
             column: cells[0].to_owned(),
             track: cells
@@ -1242,6 +1292,7 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<BedColumnRequest>> {
                 .filter(|t| !t.is_empty())
                 .map(|t| (*t).to_owned()),
             dtype,
+            fill,
         });
     }
     if rows.is_empty() {
@@ -1251,7 +1302,8 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<BedColumnRequest>> {
 }
 
 /// Print a schema TSV scaffold for `bed` to stdout: one row per BED value
-/// column mapped to a target track, with its inferred dtype. Unique target
+/// column mapped to a target track, with its inferred dtype and its default
+/// fill. Unique target
 /// names create per-BED-column tracks; repeating one target creates a single
 /// BED-column-axis track. Headerless files use 1-based column selectors.
 fn emit_schema(bed: &Path, infer_rows: InferRows) -> Result<()> {
@@ -1266,16 +1318,22 @@ fn emit_schema(bed: &Path, infer_rows: InferRows) -> Result<()> {
     let columns: Vec<usize> = (3..layout.n_cols).collect();
     let dtypes = infer_bed_dtypes(bed, &columns, infer_rows)
         .with_context(|| format!("infer dtypes for {}", bed.display()))?;
-    println!("# BED column\ttarget track\tdtype");
+    let fill = |dtype: &Dtype| if *dtype == Dtype::Bool { "false" } else { "na" };
+    println!("# BED column\ttarget track\tdtype\tfill");
     match &layout.header {
         Some(names) => {
             for (name, dtype) in names[3..].iter().zip(&dtypes) {
-                println!("{name}\t{name}\t{}", dtype.as_str());
+                println!("{name}\t{name}\t{}\t{}", dtype.as_str(), fill(dtype));
             }
         }
         None => {
             for (column, dtype) in columns.iter().zip(&dtypes) {
-                println!("{}\tfield{}\t{}", column + 1, column + 1, dtype.as_str());
+                let number = column + 1;
+                println!(
+                    "{number}\tfield{number}\t{}\t{}",
+                    dtype.as_str(),
+                    fill(dtype)
+                );
             }
         }
     }
@@ -1283,11 +1341,16 @@ fn emit_schema(bed: &Path, infer_rows: InferRows) -> Result<()> {
 }
 
 /// Build a `BedSchema` from a TSV schema file.
-fn load_schema(schema_path: &Path, sources: &[Source], infer_rows: InferRows) -> Result<BedSchema> {
+fn load_schema(
+    schema_path: &Path,
+    sources: &[Source],
+    fill: Option<&Fill>,
+    infer_rows: InferRows,
+) -> Result<BedSchema> {
     let text = std::fs::read_to_string(schema_path)
         .with_context(|| format!("read schema {}", schema_path.display()))?;
     let rows = read_schema_rows(&text, schema_path)?;
-    Ok(build_bed_schema(sources, &rows, infer_rows)?)
+    Ok(build_bed_schema(sources, &rows, fill, infer_rows)?)
 }
 
 fn parse_infer_rows(value: &str) -> Result<InferRows> {
@@ -1309,9 +1372,11 @@ mod tests {
 
     #[test]
     fn schema_rows_parse_selectors_tracks_and_dtypes() {
-        let text = "# BED column\ttarget track\tdtype\n4\tdepth\tint32\nmapq\n\ncallable\tcallable_mask\tbool\n";
+        let text = "# BED column\ttarget track\tdtype\tfill\n4\tdepth\tint32\t0\nmapq\n\ncallable\tcallable_mask\tbool\n";
         let rows = read_schema_rows(text, Path::new("schema.tsv")).unwrap();
         assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].fill, Some(Fill::Value(0.into())));
+        assert!(rows[1].fill.is_none());
         assert_eq!(rows[0].column, "4");
         assert_eq!(rows[0].track.as_deref(), Some("depth"));
         assert_eq!(rows[0].dtype, Some(Dtype::I32));
@@ -1324,7 +1389,7 @@ mod tests {
 
     #[test]
     fn schema_rows_reject_wide_and_empty_records() {
-        assert!(read_schema_rows("a\tb\tint32\td\n", Path::new("s.tsv")).is_err());
+        assert!(read_schema_rows("a\tb\tint32\tna\te\n", Path::new("s.tsv")).is_err());
         assert!(read_schema_rows("# only comments\n", Path::new("s.tsv")).is_err());
     }
 

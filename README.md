@@ -131,7 +131,21 @@ Import a bigWig file into a `signal` track:
 pbz import bigwig signal.pbz sample.bw --track signal
 ```
 
-The import reads chromosome lengths from the bigWig header and stores values as `float32`. Uncovered bases contain `NaN`.
+The import reads chromosome lengths from the bigWig header and stores values as `float32`. A bigWig does not say what a base outside its intervals means, so by default such a base is missing: it contains `NaN`. Use `--fill 0` when the gaps mean 0:
+
+```sh
+pbz import bigwig signal.pbz sample.bw --track signal --fill 0
+```
+
+A BED import uses the same rule for its value columns. By default, a base that no interval covers holds the null of the dtype: `NaN` for a float, and the type maximum for an integer. The track declares the null as its `_FillValue`, so xarray reads an integer track with nulls as a float track with `NaN`. If you need nullable values, use a float dtype. A bool column and a BED3 mask hold `false` at a gap. `pbz import bed --fill 0` makes the gaps 0. A schema row can give the fill of one track in a fourth column.
+
+| dtype | null |
+|---|---|
+| float32, float64 | `NaN` |
+| int8 to int64, uint8 to uint64 | the type maximum |
+| bool | none |
+
+d4 and BAM/CRAM imports fill gaps with 0, because these sources give a value at every base.
 
 Import several files as labeled columns:
 

@@ -185,6 +185,52 @@ fn refuse_reserved(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuse an append whose fill differs from the fill of the stored track.
+fn check_append_fill(
+    name: &str,
+    info: &VariableInfo,
+    stored: &zarrs::array::FillValue,
+    dtype: crate::io::Dtype,
+    fill: &crate::Fill,
+) -> Result<()> {
+    use crate::io::Dtype;
+    let (wanted, wanted_null) = resolve_fill(dtype, Some(fill))?;
+    let stored_null = info.null()?;
+    let same = match (wanted_null.is_some(), stored_null.is_some()) {
+        (true, true) => true,
+        (false, false) => {
+            let (a, b) = (wanted.as_ne_bytes(), stored.as_ne_bytes());
+            match dtype {
+                Dtype::F32 | Dtype::F64 => {
+                    let float = |bytes: &[u8]| match bytes.len() {
+                        4 => bytes.try_into().map(|b| f32::from_ne_bytes(b) as f64).ok(),
+                        8 => bytes.try_into().map(f64::from_ne_bytes).ok(),
+                        _ => None,
+                    };
+                    match (float(a), float(b)) {
+                        (Some(x), Some(y)) => x == y || (x.is_nan() && y.is_nan()),
+                        _ => a == b,
+                    }
+                }
+                _ => a == b,
+            }
+        }
+        _ => false,
+    };
+    if same {
+        return Ok(());
+    }
+    let shown = if stored_null.is_some() {
+        "na".to_owned()
+    } else {
+        info.metadata["fill_value"].to_string()
+    };
+    Err(PbzError::Metadata(format!(
+        "append: track {name:?} has fill {shown}, but the append asks for fill {fill}; \
+         give the stored fill or leave the fill out"
+    )))
+}
+
 impl Dataset {
     /// Prepare existing 1D/2D import destinations without writing the store.
     fn prepare_import(&self, specs: &[(String, TrackConfig)]) -> Result<PreparedImport> {
@@ -669,6 +715,9 @@ impl Dataset {
         let mut targets = Vec::with_capacity(specs.len());
         for ((name, config), info) in specs.iter().zip(infos) {
             let mut array = self.open_growable(name)?;
+            if let Some(fill) = &config.fill {
+                check_append_fill(name, info, array.fill_value(), config.dtype, fill)?;
+            }
             let (col_chunk, shard_col) = column_grid(&array, name)?;
             if !width.is_multiple_of(col_chunk) {
                 return Err(PbzError::Metadata(format!(

@@ -13,7 +13,7 @@ use pbzarr::Contig;
 use pbzarr::RegionQuery;
 use pbzarr::import::Config;
 use pbzarr::io::Dtype;
-use pbzarr::{Dataset, Reference};
+use pbzarr::{Dataset, Fill, Reference};
 use pbzarr_readers::{
     BedColumnSpec, BedImportOptions, BedSchema, Source, execute_bed_schema_plan, from_bed_matrix,
     plan_bed_schema,
@@ -709,25 +709,22 @@ fn single_source_with_column_dim_is_one_column_2d() {
     assert!(cov.rows().into_iter().all(|row| row.to_vec() == vec![4]));
 }
 
-#[test]
-fn uncovered_positions_read_back_as_zero() {
-    let dir = TempDir::new().unwrap();
-    // chr1 is length 40 but records cover only [0,10) and [20,30); the gap
-    // [10,20) and the tail [30,40) are never written and must read as zero.
+/// Import `cov` (int32) and `flag` (bool) over a 40-base chr1 whose records
+/// cover only [0,10) and [20,30).
+fn import_gapped(dir: &Path, name: &str, cov_fill: Option<Fill>) -> Dataset {
     let bed = write_bed_bgzip_tabix(
-        dir.path(),
-        "s1",
+        dir,
+        name,
         &["chrom", "start", "end", "cov", "flag"],
         &[
             ("chr1", 0, 10, vec!["5", "1"]),
             ("chr1", 20, 30, vec!["7", "0"]),
         ],
     );
-    let output = dir.path().join("out.pbz");
-    let schema = BedSchema(vec![
-        BedColumnSpec::named("cov", Dtype::I32),
-        BedColumnSpec::named("flag", Dtype::Bool),
-    ]);
+    let output = dir.join(format!("{name}.pbz"));
+    let mut cov = BedColumnSpec::named("cov", Dtype::I32);
+    cov.fill = cov_fill;
+    let schema = BedSchema(vec![cov, BedColumnSpec::named("flag", Dtype::Bool)]);
     let sources = [Source::new(bed)];
     let plan = plan_bed_schema(&sources, &schema, &Config::default()).unwrap();
     execute_bed_schema_plan(
@@ -737,24 +734,62 @@ fn uncovered_positions_read_back_as_zero() {
         Config::default(),
     )
     .unwrap();
+    Dataset::open(&output).unwrap()
+}
 
-    let dataset = Dataset::open(&output).unwrap();
+#[test]
+fn uncovered_positions_read_as_the_null_by_default() {
+    let dir = TempDir::new().unwrap();
+    let dataset = import_gapped(dir.path(), "na", None);
     let cov = dataset.read_region::<i32>("cov", &chr1()).unwrap();
     assert_eq!(cov.shape(), [40]);
     assert!(cov.iter().take(10).all(|&v| v == 5));
-    assert!(
-        cov.iter().skip(10).take(10).all(|&v| v == 0),
-        "gap reads as zero"
-    );
+    assert!(cov.iter().skip(10).take(10).all(|&v| v == i32::MAX));
     assert!(cov.iter().skip(20).take(10).all(|&v| v == 7));
-    assert!(cov.iter().skip(30).all(|&v| v == 0), "tail reads as zero");
+    assert!(cov.iter().skip(30).all(|&v| v == i32::MAX));
+    assert_eq!(
+        dataset.variables()["cov"].metadata["attributes"]["_FillValue"],
+        i32::MAX
+    );
 
     let flag = dataset.read_region::<bool>("flag", &chr1()).unwrap();
     assert!(flag.iter().take(10).all(|&v| v));
-    assert!(
-        flag.iter().skip(10).all(|&v| !v),
-        "uncovered + true-zero both read false"
+    assert!(flag.iter().skip(10).all(|&v| !v));
+    assert!(dataset.variables()["flag"].metadata["attributes"]["_FillValue"].is_null());
+}
+
+#[test]
+fn uncovered_positions_read_as_a_fill_of_zero() {
+    let dir = TempDir::new().unwrap();
+    let fill = Fill::Value(serde_json::json!(0));
+    let dataset = import_gapped(dir.path(), "zero", Some(fill));
+    let cov = dataset.read_region::<i32>("cov", &chr1()).unwrap();
+    assert!(cov.iter().skip(10).take(10).all(|&v| v == 0));
+    assert!(cov.iter().skip(30).all(|&v| v == 0));
+    assert!(dataset.variables()["cov"].metadata["attributes"]["_FillValue"].is_null());
+}
+
+#[test]
+fn a_value_equal_to_the_null_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "max",
+        &["chrom", "start", "end", "cov"],
+        &[("chr1", 0, 10, vec!["255"])],
     );
+    let schema = BedSchema(vec![BedColumnSpec::named("cov", Dtype::U8)]);
+    let sources = [Source::new(bed)];
+    let plan = plan_bed_schema(&sources, &schema, &Config::default()).unwrap();
+    let Err(error) = execute_bed_schema_plan(
+        dir.path().join("max.pbz").as_path(),
+        plan,
+        genome(&[("chr1", 10)]),
+        Config::default(),
+    ) else {
+        panic!("a cell equal to the null must be refused");
+    };
+    assert!(error.to_string().contains("null of uint8"), "{error}");
 }
 
 #[test]

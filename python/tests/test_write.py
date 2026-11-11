@@ -135,7 +135,9 @@ def test_import_bed_single_column_is_scalar(tmp_path):
 
     with pbzarr.open(destination, chunks=None) as dataset:
         assert dataset["depth"].dims == ("position",)
-        assert dataset["depth"].dtype == np.dtype("int32")
+        # An int32 track with a null decodes to float64.
+        assert dataset["depth"].encoding["dtype"] == np.dtype("int32")
+        assert dataset["depth"].dtype == np.dtype("float64")
         assert dataset["depth"].values.tolist() == [7] * 20
 
 
@@ -154,7 +156,7 @@ def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
 
     with pbzarr.open(destination, chunks=None) as dataset:
         assert set(dataset.data_vars) == {"coverage", "score", "is_max"}
-        assert dataset["coverage"].dtype == np.dtype("int32")
+        assert dataset["coverage"].encoding["dtype"] == np.dtype("int32")
         assert dataset["score"].dtype == np.dtype("float32")
         assert dataset["is_max"].dtype == np.dtype("bool")
         assert dataset["score"].values[[0, -1]].tolist() == [1.5, -2.5]
