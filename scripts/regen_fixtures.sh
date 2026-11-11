@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate every committed binary under fixtures/ from the SAM/FASTA
-# sources in fixtures/bam/src and the inline d4 formulas below.
-# Run from the repo root: pixi run -- bash scripts/regen_fixtures.sh
+# sources in fixtures/bam/src and the inline d4, BED and bigWig formulas below.
+# Run from the repo root: pixi run regen-fixtures
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -9,7 +9,9 @@ cd "$(dirname "$0")/.."
 src=fixtures/bam/src
 bam=fixtures/bam
 d4=fixtures/d4
-mkdir -p "$bam" "$d4"
+bed=fixtures/bed
+bw=fixtures/bigwig
+mkdir -p "$bam" "$d4" "$bed" "$bw"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -62,6 +64,35 @@ printf 'chr1\t10\n' > "$tmp/fixed_point.sizes"
 printf 'chr1\t0\t10\t2\n' > "$tmp/fixed_point.bedgraph"
 d4tools create --genome "$tmp/fixed_point.sizes" --denominator 100 "$tmp/fixed_point.bedgraph" "$d4/fixed_point.d4"
 
+# BED: '#'-headed, bgzip-compressed, tabix-indexed, chr1 20bp
+bed_fixture() {
+  local name=$1 header=$2
+  shift 2
+  {
+    printf '#%s\n' "$header"
+    printf '%s\n' "$@"
+  } | tr '|' '\t' | bgzip -c > "$bed/$name.bed.gz"
+  tabix -f -p bed "$bed/$name.bed.gz"
+}
+bed_fixture coverage 'chrom|start|end|coverage' 'chr1|0|20|7'
+bed_fixture mixed 'chrom|start|end|coverage|score|is_max' \
+  'chr1|0|10|4|1.5|true' 'chr1|10|20|9|-2.5|false'
+bed_fixture wide 'chrom|start|end|cov|mapq' 'chr1|0|10|4|60' 'chr1|10|20|9|300'
+bed_fixture sample_a 'chrom|start|end|depth' 'chr1|0|20|1'
+bed_fixture sample_b 'chrom|start|end|depth' 'chr1|0|20|2'
+
+# bigWig first/second: chr1 20bp, bands of 10 with value (i % 50) + 1 + base,
+# base 0 and 10
+python - "$bw" <<'PY'
+import sys
+import pybigtools
+
+for name, base in (("first", 0.0), ("second", 10.0)):
+    out = pybigtools.open(f"{sys.argv[1]}/{name}.bw", "w")
+    out.write({"chr1": 20}, iter([("chr1", i * 10, (i + 1) * 10, i % 50 + 1 + base) for i in range(2)]))
+    out.close()
+PY
+
 # checksums
 if command -v sha256sum >/dev/null 2>&1; then
   sha=(sha256sum)
@@ -80,5 +111,11 @@ fi
     bam/nref.fa bam/nref.fa.fai \
     bam/nref.bam bam/nref.bam.bai bam/nref.cram bam/nref.cram.crai \
     d4/banded_1k.d4 d4/cohort_s0.d4 d4/cohort_s1.d4 d4/cohort_s2.d4 \
-    d4/multi_contig.d4 d4/two_contig_const7.d4 d4/fixed_point.d4
+    d4/multi_contig.d4 d4/two_contig_const7.d4 d4/fixed_point.d4 \
+    bed/coverage.bed.gz bed/coverage.bed.gz.tbi \
+    bed/mixed.bed.gz bed/mixed.bed.gz.tbi \
+    bed/wide.bed.gz bed/wide.bed.gz.tbi \
+    bed/sample_a.bed.gz bed/sample_a.bed.gz.tbi \
+    bed/sample_b.bed.gz bed/sample_b.bed.gz.tbi \
+    bigwig/first.bw bigwig/second.bw
 ) > fixtures/SHA256SUMS

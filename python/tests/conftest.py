@@ -18,19 +18,8 @@ def cohort_fixtures() -> list[Path]:
 
 
 @pytest.fixture
-def write_bigwig(tmp_path: Path):
-    """Build a small .bw file with a known shape. Skip if pybigtools missing."""
-    pybigtools = pytest.importorskip("pybigtools")
-
-    def _make(chrom: str, length: int, sample: str = "A", base: float = 0.0) -> Path:
-        out = tmp_path / f"{sample}.bw"
-        intervals = [
-            (chrom, i * 10, (i + 1) * 10, float((i % 50) + 1) + base)
-            for i in range(length // 10)
-        ]
-        bw = pybigtools.open(str(out), "w")
-        bw.write({chrom: length}, iter(intervals))
-        bw.close()
-        return out
-
-    return _make
+def bigwig_fixtures() -> list[Path]:
+    """Committed .bw files first and second: chr1, length 20, bands of 10,
+    value (i % 50) + 1 + base with base 0 and 10."""
+    bw = Path(__file__).resolve().parents[2] / "fixtures" / "bigwig"
+    return [bw / "first.bw", bw / "second.bw"]

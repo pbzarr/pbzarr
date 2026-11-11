@@ -1,55 +1,29 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
-import pytest
 import xarray as xr
 
 import pbzarr
 
-pysam = pytest.importorskip("pysam")
-
-
-def _write_bam(tmp_path, contig: str, length: int, reads: list[tuple[int, int]]):
-    """Build a coordinate-sorted, indexed BAM with one plain `nM` read per
-    `(start, length)` pair. Returns the sorted BAM path."""
-    header = {
-        "HD": {"VN": "1.6", "SO": "unsorted"},
-        "SQ": [{"SN": contig, "LN": length}],
-    }
-    unsorted = tmp_path / "unsorted.bam"
-    with pysam.AlignmentFile(str(unsorted), "wb", header=header) as fh:
-        for i, (start, read_len) in enumerate(reads):
-            a = pysam.AlignedSegment()
-            a.query_name = f"r{i}"
-            a.query_sequence = "A" * read_len
-            a.flag = 0
-            a.reference_id = 0
-            a.reference_start = start
-            a.mapping_quality = 60
-            a.cigar = [(0, read_len)]  # nM
-            a.query_qualities = pysam.qualitystring_to_array("I" * read_len)
-            fh.write(a)
-
-    sorted_path = tmp_path / "reads.bam"
-    pysam.sort("-o", str(sorted_path), str(unsorted))
-    pysam.index(str(sorted_path))
-    return sorted_path
+READS_BAM = Path(__file__).resolve().parents[2] / "fixtures" / "bam" / "reads.bam"
 
 
 def test_import_bam_depth_single_source_matches_hand_computed_vector(tmp_path):
-    contig, length = "chr1", 50
-    # r0 covers [0,10), r1 covers [5,15), r2 covers [20,30).
-    reads = [(0, 10), (5, 10), (20, 10)]
-    bam = _write_bam(tmp_path, contig, length, reads)
-
-    expected = np.zeros(length, dtype=np.int32)
-    for start, read_len in reads:
-        expected[start : start + read_len] += 1
+    # Spans that count under the default filter, from fixtures/bam/README.md.
+    spans = [
+        (10, 30), (30, 45), (40, 50), (55, 65), (70, 75), (85, 90),
+        (10, 30), (50, 55), (55, 60), (12, 22), (90, 98),
+    ]
+    expected = np.zeros(160, dtype=np.int32)
+    for start, end in spans:
+        expected[start:end] += 1
 
     destination = tmp_path / "depth.pbz"
-    pbzarr.create(destination, reference={contig: length}).close()
+    pbzarr.create(destination, reference={"ref1": 100, "ref2": 60}).close()
 
-    report = pbzarr.import_bam(destination, "depth", bam, mode="depth")
+    report = pbzarr.import_bam(destination, "depth", READS_BAM, mode="depth")
     assert set(report) == {
         "positions",
         "chunks_written",
@@ -57,9 +31,7 @@ def test_import_bam_depth_single_source_matches_hand_computed_vector(tmp_path):
         "bytes_written",
         "wall_seconds",
     }
-    assert report["positions"] == length
-    # length=50 is one chunk under the default 1,000,000-position chunk
-    # size, and the reads give it data, so one chunk is written, none skipped.
+    assert report["positions"] == 160
     assert report["chunks_written"] == 1
     assert report["chunks_skipped"] == 0
     assert report["bytes_written"] > 0

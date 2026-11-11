@@ -24,6 +24,12 @@ doc = "cargo doc --workspace --no-deps --open"
 [feature.fixtures.dependencies]
 d4tools = ">=0.3.11.post0,<0.4"
 samtools = ">=1.24,<1.25"
+python = ">=3.11,<3.13"
+
+# pybigtools writes the .bw fixtures. It has no conda package, so it comes
+# from PyPI.
+[feature.fixtures.pypi-dependencies]
+pybigtools = ">=0.3,<0.4"
 
 [feature.fixtures.tasks]
 regen-fixtures = "bash scripts/regen_fixtures.sh"
@@ -45,13 +51,6 @@ validate-dataset = "python scripts/validate_dataset.py"
 maturin = ">=1.4,<2"
 pip = ">=24"
 pytest = ">=8"
-
-# pybigtools synthesizes .bw fixtures for the bigwig import test (no conda
-# package, so it comes in via PyPI). pysam synthesizes BAM fixtures for the
-# bam import test.
-[feature.wheel.pypi-dependencies]
-pybigtools = ">=0.3,<0.4"
-pysam = ">=0.22,<0.23"
 
 [feature.wheel.tasks]
 build-wheel = "maturin build --release"

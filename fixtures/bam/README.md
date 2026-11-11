@@ -1,8 +1,8 @@
 # BAM/CRAM fixtures
 
-Committed binaries built from the SAM/FASTA sources in `src/`. Regenerate everything (including the d4 files and `fixtures/SHA256SUMS`) with `pixi run -- bash scripts/regen_fixtures.sh` from the repo root.
+Committed binaries built from the SAM/FASTA sources in `src/`. Regenerate everything (including the d4, BED and bigWig files and `fixtures/SHA256SUMS`) with `pixi run regen-fixtures` from the repo root.
 
-Built with samtools 1.24 (htslib 1.24) and d4tools 0.3.11.
+Built with samtools 1.24 (htslib 1.24, which also gives bgzip and tabix), d4tools 0.3.11 and pybigtools 0.3.0.
 
 Base qualities default to Phred 30 (`?`) unless a record notes otherwise.
 

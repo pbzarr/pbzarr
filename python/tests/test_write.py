@@ -8,7 +8,7 @@ import pytest
 import xarray as xr
 
 import pbzarr
-from _helpers import pbz_binary, write_bed_bgzip_tabix, write_sizes
+from _helpers import bed_fixture, pbz_binary, write_sizes
 
 
 def _create(destination, *, reference):
@@ -105,9 +105,8 @@ def test_import_errors_name_a_missing_file_or_a_bad_argument(tmp_path, d4_fixtur
     assert not destination.exists()
 
 
-def test_import_bigwig_path_list_defaults_to_sample_axis(tmp_path, write_bigwig):
-    first = write_bigwig("chr1", 20, "first", base=0.0)
-    second = write_bigwig("chr1", 20, "second", base=10.0)
+def test_import_bigwig_path_list_defaults_to_sample_axis(tmp_path, bigwig_fixtures):
+    first, second = bigwig_fixtures
     destination = tmp_path / "bigwig.pbz"
     _create(destination, reference={"chr1": 20})
 
@@ -121,12 +120,7 @@ def test_import_bigwig_path_list_defaults_to_sample_axis(tmp_path, write_bigwig)
 
 
 def test_import_bed_single_column_is_scalar(tmp_path):
-    bed = write_bed_bgzip_tabix(
-        tmp_path,
-        "single",
-        ["chrom", "start", "end", "coverage"],
-        [("chr1", 0, 20, ["7"])],
-    )
+    bed = bed_fixture("coverage")
     destination = tmp_path / "bed.pbz"
     _create(destination, reference={"chr1": 20})
 
@@ -146,15 +140,7 @@ def test_import_bed_single_column_is_scalar(tmp_path):
 
 
 def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
-    bed = write_bed_bgzip_tabix(
-        tmp_path,
-        "multi",
-        ["chrom", "start", "end", "coverage", "score", "is_max"],
-        [
-            ("chr1", 0, 10, ["4", "1.5", "true"]),
-            ("chr1", 10, 20, ["9", "-2.5", "false"]),
-        ],
-    )
+    bed = bed_fixture("mixed")
     genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
     destination = tmp_path / "multi.pbz"
 
@@ -176,12 +162,7 @@ def test_import_bed_schema_maps_columns_and_infers_missing_dtypes(tmp_path):
 
 
 def test_import_bed_refuses_coordinate_and_unnamed_numbered_columns(tmp_path):
-    bed = write_bed_bgzip_tabix(
-        tmp_path,
-        "numbered",
-        ["chrom", "start", "end", "coverage"],
-        [("chr1", 0, 20, ["7"])],
-    )
+    bed = bed_fixture("coverage")
     genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
     destination = tmp_path / "numbered.pbz"
 
@@ -196,12 +177,7 @@ def test_import_bed_refuses_coordinate_and_unnamed_numbered_columns(tmp_path):
 
 
 def test_import_bed_wide_form_gathers_fields_into_one_track(tmp_path):
-    bed = write_bed_bgzip_tabix(
-        tmp_path,
-        "wide",
-        ["chrom", "start", "end", "cov", "mapq"],
-        [("chr1", 0, 10, ["4", "60"]), ("chr1", 10, 20, ["9", "300"])],
-    )
+    bed = bed_fixture("wide")
     genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
     destination = tmp_path / "wide.pbz"
     _create(destination, reference={"chr1": 20})
@@ -222,18 +198,8 @@ def test_import_bed_wide_form_gathers_fields_into_one_track(tmp_path):
 
 
 def test_import_bed_multi_source_matrix(tmp_path):
-    first = write_bed_bgzip_tabix(
-        tmp_path,
-        "s1",
-        ["chrom", "start", "end", "depth"],
-        [("chr1", 0, 20, ["1"])],
-    )
-    second = write_bed_bgzip_tabix(
-        tmp_path,
-        "s2",
-        ["chrom", "start", "end", "depth"],
-        [("chr1", 0, 20, ["2"])],
-    )
+    first = bed_fixture("sample_a")
+    second = bed_fixture("sample_b")
     genome = write_sizes(tmp_path, "genome", [("chr1", 20)])
     destination = tmp_path / "matrix.pbz"
     _create(destination, reference={"chr1": 20})

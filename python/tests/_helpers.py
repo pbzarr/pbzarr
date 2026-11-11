@@ -60,18 +60,12 @@ def write_pbz_store(store, reference: dict[str, int], name: str, values: np.ndar
     group.attrs.update(attrs)
 
 
-def write_bed_bgzip_tabix(dirp: Path, name: str, header: list[str],
-                          rows: list[tuple[str, int, int, list[str]]]) -> Path:
-    """Write a #-headed BED, bgzip it, tabix-index it. Rows must be sorted."""
-    import pysam
+FIXTURES = _REPO / "fixtures"
 
-    bed = dirp / f"{name}.bed"
-    with bed.open("w") as f:
-        f.write("#" + "\t".join(header) + "\n")
-        for chrom, start, end, cells in rows:
-            f.write("\t".join([chrom, str(start), str(end), *cells]) + "\n")
-    gz = Path(pysam.tabix_index(str(bed), preset="bed", force=True))
-    return gz
+
+def bed_fixture(name: str) -> Path:
+    """A committed '#'-headed, bgzip-compressed, tabix-indexed BED on chr1, 20bp."""
+    return FIXTURES / "bed" / f"{name}.bed.gz"
 
 
 def write_sizes(dirp: Path, name: str, contigs: list[tuple[str, int]]) -> Path:
