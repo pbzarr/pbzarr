@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from functools import cached_property
 import re
+from typing import TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from ._region_query import RegionQuery, as_query
+
+if TYPE_CHECKING:
+    import xarray as xr
+
+    from ._types import RegionLike
 
 _I64_MAX = np.iinfo(np.int64).max
 _BIN_DIM = re.compile(r"bin_([1-9][0-9]*)\Z")
@@ -36,7 +43,7 @@ class Reference(Mapping[str, int]):
     axis restarts at every contig, so a contig's last bin can be short.
     """
 
-    def __init__(self, names, lengths) -> None:
+    def __init__(self, names: Iterable[str], lengths: ArrayLike) -> None:
         names = tuple(names)
         lengths = np.asarray(lengths)
         if lengths.ndim != 1 or lengths.size != len(names):
@@ -60,7 +67,7 @@ class Reference(Mapping[str, int]):
         self._index = {name: i for i, name in enumerate(names)}
 
     @classmethod
-    def from_xarray(cls, obj) -> Reference:
+    def from_xarray(cls, obj: xr.DataArray | xr.Dataset) -> Reference:
         """The reference of a DataArray or Dataset with a ``reference`` coordinate."""
         from ._coord import reference_of
 
@@ -96,7 +103,7 @@ class Reference(Mapping[str, int]):
         """Extent of a genomic dimension: ``position`` or ``bin_N``."""
         return int(self._axis_offsets(dim)[1][-1])
 
-    def resolve(self, query) -> RegionQuery:
+    def resolve(self, query: RegionLike) -> RegionQuery:
         """One region with contig-local ``start`` and ``end`` filled in.
 
         ``query`` takes the forms of ``rows``. An open start is 0 and an open
@@ -114,7 +121,7 @@ class Reference(Mapping[str, int]):
             )
         return RegionQuery(region.contig, start, end)
 
-    def rows(self, query, dim: str = "position") -> slice:
+    def rows(self, query: RegionLike, dim: str = "position") -> slice:
         """Flat rows of ``dim`` covering one region.
 
         ``query`` is ``"chr1"``, ``"chr1:1000"`` (to the contig end),

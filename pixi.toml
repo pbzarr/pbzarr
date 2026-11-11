@@ -24,7 +24,7 @@ doc = "cargo doc --workspace --no-deps --open"
 [feature.fixtures.dependencies]
 d4tools = ">=0.3.11.post0,<0.4"
 samtools = ">=1.24,<1.25"
-python = ">=3.11,<3.13"
+python = ">=3.12,<3.13"
 
 # pybigtools writes the .bw fixtures. It has no conda package, so it comes
 # from PyPI.
@@ -36,11 +36,12 @@ regen-fixtures = "bash scripts/regen_fixtures.sh"
 
 # --- validate feature: cross-language xarray round-trip ---
 [feature.validate.dependencies]
-python = ">=3.11,<3.13"
-xarray = ">=2025.8,<2026"
-zarr = ">=3.0,<4"
-numpy = ">=2.0,<3"
-dask-core = ">=2024.12"
+python = ">=3.12,<3.13"
+xarray = ">=2025.12.0,<2026"
+zarr = ">=3.2.1,<4"
+numpy = ">=2.4.5,<3"
+dask-core = ">=2026.8.0"
+pandas = ">=3.0.3"
 
 [feature.validate.tasks]
 validate-roundtrip = "python scripts/validate_xarray_read.py"
@@ -48,7 +49,7 @@ validate-dataset = "python scripts/validate_dataset.py"
 
 # --- wheel feature: build + install + test the Python wheel ---
 [feature.wheel.dependencies]
-maturin = ">=1.4,<2"
+maturin = ">=1.13,<2"
 pip = ">=24"
 pytest = ">=8"
 
@@ -56,6 +57,7 @@ pytest = ">=8"
 build-wheel = "maturin build --release"
 install-wheel = "maturin develop --release"
 test-py = "pytest python/tests -v"
+wheel-smoke = "bash scripts/wheel_smoke.sh"
 
 # --- example feature: notebooks under python/examples ---
 [feature.example.dependencies]

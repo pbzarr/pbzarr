@@ -5,12 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 import json
 import os
-from typing import TypeAlias
+from typing import Literal
 
 from . import _native, _zip
-
-PathLike: TypeAlias = str | os.PathLike[str]
-Source: TypeAlias = PathLike | tuple[PathLike, str]
+from ._types import Codecs, PathLike, Source
 
 
 def _path(value: object, role: str) -> str:
@@ -67,7 +65,7 @@ def _sources(values: Source | Iterable[Source]) -> list[tuple[str, str | None]]:
     return normalized
 
 
-def _codecs_json(codecs: list | dict | None) -> str | None:
+def _codecs_json(codecs: Codecs | None) -> str | None:
     if codecs is None:
         return None
     if not isinstance(codecs, (list, dict)):
@@ -99,7 +97,7 @@ def import_d4(
     shard_size: int | None = None,
     shard_column_size: int | None = None,
     progress: bool = False,
-    codecs: list | dict | None = None,
+    codecs: Codecs | None = None,
 ) -> dict[str, int | float]:
     """Import one or more D4 sources into a PBZ store.
 
@@ -145,7 +143,7 @@ def import_bigwig(
     shard_size: int | None = None,
     shard_column_size: int | None = None,
     progress: bool = False,
-    codecs: list | dict | None = None,
+    codecs: Codecs | None = None,
 ) -> dict[str, int | float]:
     """Import one or more bigWig sources into a PBZ store.
 
@@ -207,7 +205,7 @@ def import_bed(
     column_chunk_size: int | None = None,
     shard_size: int | None = None,
     shard_column_size: int | None = None,
-    codecs: list | dict | None = None,
+    codecs: Codecs | None = None,
     threads: int | None = None,
     decode_chunks: int | None = None,
     progress: bool = False,
@@ -287,12 +285,12 @@ def import_bam(
     track: str,
     sources: Source | Iterable[Source],
     *,
-    mode: str = "depth",
+    mode: Literal["depth", "composition"] = "depth",
     fasta: PathLike | None = None,
     min_mapq: int = 0,
     exclude_flags: int = 1796,
     min_bq: int = 0,
-    overlap: str = "proper",
+    overlap: Literal["proper", "all", "none"] = "proper",
     count_deletions: bool = False,
     dim: str | None = None,
     chunk_size: int | None = None,
@@ -302,7 +300,7 @@ def import_bam(
     threads: int | None = None,
     decode_chunks: int | None = None,
     progress: bool = False,
-    codecs: list | dict | None = None,
+    codecs: Codecs | None = None,
 ) -> dict[str, int | float]:
     """Import per-base depth or composition counts from BAM/CRAM sources.
 

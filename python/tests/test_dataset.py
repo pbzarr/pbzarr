@@ -298,3 +298,8 @@ def test_write_drops_0d_coordinates(cohort: Path) -> None:
         assert "quantile" not in ds.variables
         for name in ds.data_vars:
             assert "quantile" not in ds[name].coords
+
+
+def test_version_is_a_string() -> None:
+    assert isinstance(pbzarr.__version__, str)
+    assert pbzarr.__version__

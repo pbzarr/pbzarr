@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import enum
 import hashlib
 import json
 import os
+from typing import Any, Literal
 import warnings
 
 import numpy as np
@@ -18,11 +20,19 @@ from . import _coord, _native, _zip
 from ._native import PbzError
 from ._reference import Reference, bin_width
 from ._regions import _PBZ_SOURCE_ATTR
+from ._types import Chunks, PathLike
 
 FORMAT_VERSION = "0.5"
 _PBZ_UUID = "d5bd7bea-0388-4e0a-9844-707c034e9add"
 _LEGACY_UUID = "b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c"
-_STORED_CHUNKS = object()
+
+
+class _Default(enum.Enum):
+    STORED_CHUNKS = enum.auto()
+
+
+_STORED_CHUNKS = _Default.STORED_CHUNKS
+
 # Root arrays that are coordinates by name, whatever the coordinates attribute says.
 _REFERENCE_ARRAYS = ("contig_id", "contig_length", "contig_md5")
 _SUPPORTED_DTYPES = frozenset(
@@ -197,10 +207,10 @@ class _Store:
 
 
 def open(
-    source,
+    source: PathLike,
     *,
-    tracks: Sequence[str] | None = None,
-    chunks=_STORED_CHUNKS,
+    tracks: str | Sequence[str] | None = None,
+    chunks: Chunks | Literal[_Default.STORED_CHUNKS] = _STORED_CHUNKS,
     storage_options: Mapping[str, object] | None = None,
 ) -> xr.Dataset:
     """Open a PBZ store as one ``xr.Dataset``.
@@ -226,7 +236,7 @@ def open(
 
 
 def create(
-    destination,
+    destination: PathLike,
     *,
     reference: Mapping[str, int],
     storage_options: Mapping[str, object] | None = None,
@@ -263,10 +273,10 @@ def create(
 
 
 def write(
-    target,
+    target: PathLike | xr.Dataset,
     variables: Mapping[str, xr.DataArray],
     *,
-    encoding=None,
+    encoding: Mapping[str, Mapping[str, Any]] | None = None,
     storage_options: Mapping[str, object] | None = None,
 ) -> xr.Dataset:
     """Add new variables to a store and return the store reopened.

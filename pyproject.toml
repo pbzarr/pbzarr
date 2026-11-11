@@ -1,21 +1,41 @@
 [build-system]
-requires = ["maturin>=1.4,<2.0"]
+requires = ["maturin>=1.13,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "pbzarr"
 dynamic = ["version"]
-description = "PBZ (Per-Base Zarr) — a Zarr v3 convention for per-base genomic data"
+description = "Per-base genomic data in Zarr v3 stores, read as xarray Datasets"
 readme = "README.md"
-requires-python = ">=3.11"
-license = { text = "MIT" }
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Cade Mirchandani", email = "cademirch@gmail.com" }]
-dependencies = [
-    "zarr>=3.0,<4",
-    "xarray>=2025.8",
-    "numpy>=2.0,<3",
-    "dask>=2024.12",
+keywords = ["genomics", "zarr", "xarray", "coverage", "bioinformatics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Typing :: Typed",
 ]
+dependencies = [
+    "zarr>=3.2.1,<4",
+    "xarray>=2025.12.0",
+    "numpy>=2.4.5,<3",
+    "dask>=2026.8.0",
+    "pandas>=3.0.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/pbzarr/pbzarr"
+Repository = "https://github.com/pbzarr/pbzarr"
+Issues = "https://github.com/pbzarr/pbzarr/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

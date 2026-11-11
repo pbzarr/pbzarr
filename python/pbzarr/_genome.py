@@ -15,8 +15,8 @@ from . import _coord
 from ._coord import _check_full
 from ._locus import locus_coords
 from ._reference import Reference, bin_width
-from ._region_query import RegionQuery
 from ._regions import interval_columns, reduce_regions_dataset, reducer_options
+from ._types import Intervals, Reducer, RegionLike
 
 T = TypeVar("T", xr.DataArray, xr.Dataset)
 
@@ -25,8 +25,8 @@ _UNNAMED = "__pbzarr_values__"
 
 def reduce_regions(
     obj: T,
-    intervals,
-    reducer: str,
+    intervals: Intervals,
+    reducer: Reducer,
     /,
     *,
     reference: Reference | None = None,
@@ -70,7 +70,7 @@ def reduce_regions(
 
 def region(
     obj: T,
-    query: str | RegionQuery | tuple[str, int | None, int | None],
+    query: RegionLike,
     *,
     reference: Reference | None = None,
 ) -> T:
@@ -105,7 +105,7 @@ def region(
 
 def interval_mask(
     obj: xr.DataArray | xr.Dataset,
-    intervals,
+    intervals: Intervals,
     /,
     *,
     reference: Reference | None = None,
