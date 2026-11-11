@@ -33,6 +33,22 @@ A track has at most two dimensions: genomic position and one labeled column axis
 
 The store fixes its reference (contig names and lengths) when it is created. Every track covers that whole reference. See [format](#format) for more details.
 
+## Install
+
+The Python package needs Python 3.12 or newer:
+
+```bash
+pip install pbzarr
+```
+
+The `pbz` command-line tool is on the [releases page](https://github.com/pbzarr/pbzarr/releases). Download `pbz-x86_64-unknown-linux-gnu.tar.gz` or `pbz-aarch64-apple-darwin.tar.gz`, unpack it, and put `pbz` on your `PATH`. You can also build it from source:
+
+```bash
+cargo install --locked --git https://github.com/pbzarr/pbzarr pbz
+```
+
+The prebuilt Linux wheels and binaries need glibc 2.28 or newer (RHEL and Rocky 8+, Ubuntu 20.04+). On older systems, build from source.
+
 ## Python examples
 
 ### Import d4 files
