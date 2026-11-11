@@ -575,18 +575,32 @@ def _stored_chunks(value: xr.DataArray) -> xr.DataArray:
 def _attach_source(
     value: xr.DataArray, source, name: str, stored: _Stored, storage_options
 ) -> None:
-    """Let region tasks reopen the raw array, only when decoding is the identity."""
+    """Let region tasks reopen the raw array when decoding is the identity, or
+    when decoding only turns the null of an integer track into NaN.
+
+    For such an integer track, the tasks read the raw integers and skip the
+    null, so they do not hold the rows as floats.
+    """
     if value.chunks is None or not isinstance(source, str):
         return
     try:
-        if np.dtype(stored.dtype) != value.dtype:
-            return
+        dtype = np.dtype(stored.dtype)
     except TypeError:
         return
     if any(key in value.encoding for key in _DECODED_KEYS):
         return
     fill = value.encoding.get("_FillValue")
-    if fill is not None and not (isinstance(fill, float) and np.isnan(fill)):
+    null = None
+    if (
+        dtype.kind in "iu"
+        and value.dtype.kind == "f"
+        and isinstance(fill, (int, np.integer))
+        and not isinstance(fill, (bool, np.bool_))
+    ):
+        null = int(fill)
+    elif dtype != value.dtype:
+        return
+    elif fill is not None and not (isinstance(fill, float) and np.isnan(fill)):
         return
     location = source if "://" in source else os.path.abspath(source)
     setattr(
@@ -597,6 +611,7 @@ def _attach_source(
             "array_path": name,
             "storage_options": _options(storage_options),
             "token": stored.token,
+            "null": null,
         },
     )
 

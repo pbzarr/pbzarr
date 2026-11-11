@@ -80,6 +80,38 @@ def test_reducers_match_numpy(store: Path, reducer: str, kind: str) -> None:
         np.testing.assert_allclose(result[name].values, expected, rtol=1e-5)
 
 
+@pytest.mark.parametrize("reducer", ["mean", "sum", "count", "min", "max", "median"])
+def test_integer_tracks_with_a_null_match_the_decoded_floats(tmp_path: Path, reducer: str) -> None:
+    wide = DEPTH.astype(np.float64)
+    wide[50:60] = np.nan
+    path = tmp_path / "nulls.pbz"
+    pbzarr.create(path, reference=REFERENCE).close()
+    pbzarr.write(
+        path,
+        {
+            "depth": xr.DataArray(wide, dims=("position", "sample"), coords={"sample": list("abc")}),
+            "flag": xr.DataArray(np.where(COUNT % 3 == 0, np.nan, COUNT % 7), dims=("position",)),
+        },
+        encoding={
+            "depth": {"dtype": "int32", "_FillValue": np.iinfo(np.int32).max, "chunks": (8, 1)},
+            "flag": {"dtype": "uint8", "_FillValue": np.iinfo(np.uint8).max, "chunks": (8,)},
+        },
+    ).close()
+    if reducer == "count":
+        function = lambda rows, axis: np.sum(~np.isnan(rows), axis=axis)  # noqa: E731
+    else:
+        function = getattr(np, f"nan{reducer}")
+    intervals = [*INTERVALS, ("chr2", 0, 10)]
+    with pbzarr.open(path) as ds:
+        result = pbzarr.reduce_regions(ds, intervals, reducer).compute()
+        for name in ("depth", "flag"):
+            decoded = ds[name].values
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                expected = np.stack([function(_rows(decoded, *r), axis=0) for r in intervals])
+            np.testing.assert_allclose(result[name].values, expected, rtol=1e-6)
+
+
 def test_results_follow_input_order_without_internal_fields(store: Path) -> None:
     with pbzarr.open(store) as ds:
         result = pbzarr.reduce_regions(ds, INTERVALS, "mean")

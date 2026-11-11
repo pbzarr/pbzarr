@@ -25,4 +25,5 @@ Intervals: TypeAlias = (
 Reducer: TypeAlias = Literal[
     "sum", "mean", "min", "max", "count", "std", "var", "median", "quantile", "summit"
 ]
+Fill: TypeAlias = float | bool | Literal["na"]
 Chunks: TypeAlias = int | str | Mapping[str, int | str | tuple[int, ...] | None] | None

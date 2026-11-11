@@ -17,7 +17,7 @@ use pbzarr::ExplicitArraySpec;
 use pbzarr::import::progress::line_sink;
 use pbzarr::import::{Config, ConfigBuilder, ProgressSink, Report, Source, store_reference};
 use pbzarr::io::{Dtype, ReaderError};
-use pbzarr::{Dataset, PbzError as RsError, Reference, RegionQuery};
+use pbzarr::{Dataset, Fill, PbzError as RsError, Reference, RegionQuery};
 use pbzarr_readers::{
     BedColumnRequest, BedImportOptions, DepthFilter, ImportMode, InferRows, OverlapMode,
     build_bed_schema, execute_bed_schema_plan, from_bam as rs_from_bam,
@@ -144,6 +144,13 @@ fn parse_dtype(dtype: Option<&str>) -> PyResult<Option<Dtype>> {
     dtype.map(Dtype::from_str).transpose().map_err(py_err)
 }
 
+fn parse_fill(fill: Option<&str>) -> PyResult<Option<Fill>> {
+    fill.map(Fill::parse).transpose().map_err(py_err)
+}
+
+/// One `import_bed` schema entry: column, track, dtype, fill.
+type SchemaEntry = (String, Option<String>, Option<String>, Option<String>);
+
 /// Bulk-import one or more d4 files into a new `int32` track.
 ///
 /// The store is created from the source headers when the path does not
@@ -192,10 +199,11 @@ fn import_d4(
 ///
 /// The store is created from the source headers when the path does not
 /// exist. The track must not already be in the store. bigWig stores values
-/// as `float32` natively. A bigWig holds no value at an uncovered base, so
-/// uncovered positions read back as `NaN` and reductions skip them.
+/// as `float32` natively. `fill` (`na`, or a number as text) is the value of
+/// bases that no interval covers. `None` gives `na`: such a base reads as
+/// `NaN`.
 #[pyfunction]
-#[pyo3(signature = (*, destination, track, sources, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (*, destination, track, sources, dim=None, fill=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bigwig(
     py: Python<'_>,
@@ -203,6 +211,7 @@ fn import_bigwig(
     track: String,
     sources: Vec<(PathBuf, Option<String>)>,
     dim: Option<String>,
+    fill: Option<String>,
     threads: Option<usize>,
     chunk_size: Option<usize>,
     column_chunk_size: Option<usize>,
@@ -213,6 +222,7 @@ fn import_bigwig(
     decode_chunks: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let sources = to_sources(sources)?;
+    let fill = parse_fill(fill.as_deref())?;
     let config = build_config(
         ConfigBuilder {
             workers: threads,
@@ -228,7 +238,7 @@ fn import_bigwig(
         codecs.as_deref(),
     )?;
     let report = run_interruptible(py, config, |config| {
-        rs_from_bigwig(destination.as_path(), &track, &sources, None, config).map_err(py_err)
+        rs_from_bigwig(destination.as_path(), &track, &sources, fill, config).map_err(py_err)
     })?;
     report_to_dict(py, &report)
 }
@@ -241,27 +251,31 @@ fn import_bigwig(
 /// - `column` (a header name, or a 1-based BED column number) imports that
 ///   one BED column into one track. `track` names it, and a numbered column
 ///   needs `track`. `dtype` overrides inference.
-/// - `schema` entries `(column, dtype)` import one track per entry, named by
-///   the column; a `None` dtype is inferred across every source.
+/// - `schema` entries `(column, track, dtype, fill)` import one track per
+///   entry. A `None` track takes the header name, a `None` dtype is inferred
+///   across every source, and a `None` fill takes `fill`.
 /// - Neither: BED3 imports a bool presence track and headerless BED4 one value
 ///   track (both need `track`); headered input imports every value column,
 ///   as one wide track when a single source has `track` set, else as one
 ///   track per column.
 ///
-/// Any 2D output (several sources, or a wide track) requires `dim`.
-/// Returns the import report dict.
+/// Any 2D output (several sources, or a wide track) requires `dim`. `fill`
+/// (`na`, `true`, `false`, or a number as text) is the value of bases that
+/// no interval covers, for value columns. `None` gives `na`, and false for a
+/// bool column. Returns the import report dict.
 #[pyfunction]
-#[pyo3(signature = (*, destination, sources, genome=None, schema=None, track=None, column=None, dtype=None, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
+#[pyo3(signature = (*, destination, sources, genome=None, schema=None, track=None, column=None, dtype=None, fill=None, dim=None, threads=None, chunk_size=None, column_chunk_size=None, shard_size=None, shard_column_size=None, progress=false, codecs=None, decode_chunks=None))]
 #[allow(clippy::too_many_arguments)] // signature mirrors the Python keyword API
 fn import_bed(
     py: Python<'_>,
     destination: PathBuf,
     sources: Vec<(PathBuf, Option<String>)>,
     genome: Option<PathBuf>,
-    schema: Option<Vec<(String, Option<String>)>>,
+    schema: Option<Vec<SchemaEntry>>,
     track: Option<String>,
     column: Option<String>,
     dtype: Option<String>,
+    fill: Option<String>,
     dim: Option<String>,
     threads: Option<usize>,
     chunk_size: Option<usize>,
@@ -274,6 +288,7 @@ fn import_bed(
 ) -> PyResult<Py<PyAny>> {
     let sources = to_sources(sources)?;
     let dtype = parse_dtype(dtype.as_deref())?;
+    let fill = parse_fill(fill.as_deref())?;
     let requests = match (schema, column) {
         (Some(_), column) if column.is_some() || track.is_some() || dtype.is_some() => {
             return Err(PyValueError::new_err(
@@ -283,12 +298,12 @@ fn import_bed(
         (Some(entries), _) => Some(
             entries
                 .into_iter()
-                .map(|(column, dtype)| {
+                .map(|(column, track, dtype, fill)| {
                     Ok(BedColumnRequest {
                         column,
-                        track: None,
+                        track,
                         dtype: parse_dtype(dtype.as_deref())?,
-                        fill: None,
+                        fill: parse_fill(fill.as_deref())?,
                     })
                 })
                 .collect::<PyResult<Vec<_>>>()?,
@@ -323,8 +338,9 @@ fn import_bed(
             .map_err(py_err)?;
         match requests {
             Some(requests) => {
-                let schema = build_bed_schema(&sources, &requests, None, InferRows::default())
-                    .map_err(py_err)?;
+                let schema =
+                    build_bed_schema(&sources, &requests, fill.as_ref(), InferRows::default())
+                        .map_err(py_err)?;
                 let plan = plan_bed_schema(&sources, &schema, &config).map_err(py_err)?;
                 execute_bed_schema_plan(destination.as_path(), plan, genome, config).map_err(py_err)
             }
@@ -332,6 +348,7 @@ fn import_bed(
                 let options = BedImportOptions {
                     track,
                     dtype,
+                    fill,
                     ..BedImportOptions::default()
                 };
                 rs_from_bed_matrix(destination.as_path(), &sources, genome, &options, config)

@@ -119,6 +119,60 @@ def test_import_bigwig_path_list_defaults_to_sample_axis(tmp_path, bigwig_fixtur
         assert dataset["signal"].isel(position=0).values.tolist() == [1.0, 11.0]
 
 
+def test_import_bigwig_fill_zero_declares_no_null(tmp_path, bigwig_fixtures):
+    default = tmp_path / "default.pbz"
+    zero = tmp_path / "zero.pbz"
+    pbzarr.import_bigwig(default, "signal", bigwig_fixtures[0])
+    pbzarr.import_bigwig(zero, "signal", bigwig_fixtures[0], fill=0)
+
+    with pbzarr.open(default, chunks=None) as a, pbzarr.open(zero, chunks=None) as b:
+        assert np.isnan(a["signal"].encoding["_FillValue"])
+        assert "_FillValue" not in b["signal"].encoding
+        assert b["signal"].values.tolist() == a["signal"].values.tolist()
+    with pytest.raises(ValueError, match="fill"):
+        pbzarr.import_bigwig(tmp_path / "bad.pbz", "signal", bigwig_fixtures[0], fill="zero")
+
+
+def test_import_bed_gaps_are_nan_by_default_and_fill_gives_a_value(tmp_path):
+    bed = bed_fixture("coverage")
+    genome = write_sizes(tmp_path, "genome", [("chr1", 30)])
+
+    pbzarr.import_bed(tmp_path / "na.pbz", bed, genome=genome, column="coverage")
+    pbzarr.import_bed(tmp_path / "zero.pbz", bed, genome=genome, column="coverage", fill=0)
+
+    with pbzarr.open(tmp_path / "na.pbz", chunks=None) as dataset:
+        values = dataset["coverage"].values
+        assert dataset["coverage"].encoding["dtype"] == np.dtype("uint8")
+        assert values[:20].tolist() == [7] * 20
+        assert np.isnan(values[20:]).all()
+    with pbzarr.open(tmp_path / "zero.pbz", chunks=None) as dataset:
+        assert dataset["coverage"].dtype == np.dtype("uint8")
+        assert dataset["coverage"].values.tolist() == [7] * 20 + [0] * 10
+
+
+def test_import_bed_schema_entries_give_track_dtype_and_fill(tmp_path):
+    bed = bed_fixture("mixed")
+    genome = write_sizes(tmp_path, "genome", [("chr1", 30)])
+    destination = tmp_path / "schema.pbz"
+
+    pbzarr.import_bed(
+        destination,
+        bed,
+        genome=genome,
+        schema={
+            "coverage": {"track": "depth", "fill": 0},
+            5: {"track": "score", "dtype": "float64"},
+        },
+    )
+
+    with pbzarr.open(destination, chunks=None) as dataset:
+        assert set(dataset.data_vars) == {"depth", "score"}
+        assert dataset["depth"].values[-10:].tolist() == [0] * 10
+        assert dataset["score"].dtype == np.dtype("float64")
+        assert dataset["score"].values[0] == 1.5
+        assert np.isnan(dataset["score"].values[-10:]).all()
+
+
 def test_import_bed_single_column_is_scalar(tmp_path):
     bed = bed_fixture("coverage")
     destination = tmp_path / "bed.pbz"

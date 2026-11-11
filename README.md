@@ -119,6 +119,8 @@ pbzarr.import_bed(
 
 BED does not record chromosome lengths. To create a store, a BED import needs a `.fai` or chromosome-sizes file (`genome=`, or `--genome` in the CLI). An import into an existing store takes the lengths from the store.
 
+`import_bigwig` and `import_bed` take `fill=`: a number, `True` or `False` for a bool column, or `"na"`. By default, gaps are missing, as in the CLI (see below). A `schema=` entry of `import_bed` is a dtype string or a dict with the optional keys `"track"`, `"dtype"`, and `"fill"`. xarray reads an integer track with nulls as a float track: `float32` for 8- and 16-bit integers, and `float64` for 32- and 64-bit integers. `reduce_regions` reads the stored integers and skips the nulls, so it does not hold the rows as floats.
+
 `pbzarr.create(path, reference=...)` makes an empty store for `pbzarr.write`. Imports do not need it.
 
 ## CLI examples

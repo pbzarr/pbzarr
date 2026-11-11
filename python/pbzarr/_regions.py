@@ -215,11 +215,20 @@ def _read(track: xr.DataArray, batch: _Batch, cols: slice | None):
 
 
 def _reduce_batch(inputs, starts, ends, region_starts, reducer, options) -> tuple:
+    """Reduce one batch. A raw integer read with a null gives a mask of the
+    null rows, and the outputs take the dtypes of the decoded computation."""
     arrays = [item.read() if isinstance(item, _StoreRead) else np.asarray(item) for item in inputs]
+    nulls = [item.source.get("null") if isinstance(item, _StoreRead) else None for item in inputs]
     arrays, offsets = _pack(arrays, np.asarray(starts), np.asarray(ends))
+    missing = [None if null is None else array == null for array, null in zip(arrays, nulls)]
     if reducer == "summit":
-        return _summit(arrays, offsets, np.asarray(region_starts), options["ranks"])
-    return (_reduce(reducer, arrays[0], offsets, options),)
+        outputs = _summit(arrays, missing, offsets, np.asarray(region_starts), options["ranks"])
+    else:
+        outputs = (_reduce(reducer, arrays[0], missing[0], offsets, options),)
+    dtypes = options.get("dtypes")
+    if dtypes is None:
+        return outputs
+    return tuple(output.astype(dtype, copy=False) for output, dtype in zip(outputs, dtypes))
 
 
 def _pack(arrays: list[np.ndarray], starts: np.ndarray, ends: np.ndarray):
@@ -241,22 +250,60 @@ def _sum_dtype(dtype: np.dtype) -> np.dtype:
     return dtype
 
 
-def _reduce(reducer: str, values: np.ndarray, offsets: np.ndarray, options: dict) -> np.ndarray:
+def _reduce(
+    reducer: str,
+    values: np.ndarray,
+    nulls: np.ndarray | None,
+    offsets: np.ndarray,
+    options: dict,
+) -> np.ndarray:
+    """``nulls`` marks the null rows of raw integer ``values``. They count as
+    NaN: the result is float, and with ``skipna=False`` a region that holds a
+    null gives NaN."""
+    if nulls is None:
+        return _reduce_values(reducer, values, None, offsets, options)
+    result = _reduce_values(reducer, values, nulls, offsets, options)
+    if reducer == "count" or options["skipna"]:
+        return result
+    held = np.logical_or.reduceat(nulls, offsets[:-1], axis=0)
+    held = held.reshape(held.shape + (1,) * (result.ndim - held.ndim))
+    return np.where(held, np.nan, result)
+
+
+def _reduce_values(
+    reducer: str,
+    values: np.ndarray,
+    nulls: np.ndarray | None,
+    offsets: np.ndarray,
+    options: dict,
+) -> np.ndarray:
     heads = offsets[:-1]
     lengths = np.diff(offsets)
     floating = values.dtype.kind == "f"
-    skip = floating and options["skipna"]
+    skip = nulls is not None or (floating and options["skipna"])
     if reducer in ("median", "quantile"):
         q = 0.5 if reducer == "median" else options["q"]
+        if nulls is not None:
+            return _null_quantiles(values, nulls, offsets, q)
         return _quantiles(values, offsets, q, skip)
     if reducer in ("min", "max"):
+        if nulls is not None:
+            info = np.iinfo(values.dtype)
+            ufunc = np.minimum if reducer == "min" else np.maximum
+            identity = info.max if reducer == "min" else info.min
+            result = ufunc.reduceat(np.where(nulls, identity, values), heads, axis=0)
+            empty = np.logical_and.reduceat(nulls, heads, axis=0)
+            return np.where(empty, np.nan, result.astype(np.float64))
         if skip:
             ufunc = np.fmin if reducer == "min" else np.fmax
         else:
             ufunc = np.minimum if reducer == "min" else np.maximum
         return ufunc.reduceat(values, heads, axis=0)
 
-    missing = np.isnan(values) if skip else None
+    if nulls is not None:
+        missing = nulls
+    else:
+        missing = np.isnan(values) if skip else None
     if missing is None:
         shape = (lengths.size,) + values.shape[1:]
         counts = np.broadcast_to(lengths.reshape((-1,) + (1,) * (values.ndim - 1)), shape)
@@ -267,7 +314,7 @@ def _reduce(reducer: str, values: np.ndarray, offsets: np.ndarray, options: dict
     clean = np.where(missing, 0, values) if skip else values
     total = np.add.reduceat(clean, heads, axis=0, dtype=_sum_dtype(values.dtype))
     if reducer == "sum":
-        return total
+        return total if nulls is None else total.astype(np.float64)
 
     real = values.dtype if floating else np.dtype(np.float64)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -297,10 +344,46 @@ def _quantiles(values: np.ndarray, offsets: np.ndarray, q, skip: bool) -> np.nda
     return np.moveaxis(result, 1, -1) if q.ndim == 1 else result
 
 
-def _summit(arrays: list[np.ndarray], offsets: np.ndarray, region_starts: np.ndarray, ranks):
+def _null_quantiles(values: np.ndarray, nulls: np.ndarray, offsets: np.ndarray, q) -> np.ndarray:
+    """Linear quantiles of raw integer ``values`` without their null rows, as
+    ``np.nanquantile`` gives them on the decoded floats."""
+    q = np.asarray(q, dtype=np.float64)
+    flat = values.ndim == 1
+    if flat:
+        values, nulls = values[:, None], nulls[:, None]
+    top = np.iinfo(values.dtype).max
+    fractions = q.reshape(-1, 1)
+    parts = []
+    for a, b in zip(offsets[:-1].tolist(), offsets[1:].tolist()):
+        # Null rows sort last, so the first k rows of each column are its values.
+        ordered = np.sort(np.where(nulls[a:b], top, values[a:b]), axis=0)
+        k = (b - a) - np.count_nonzero(nulls[a:b], axis=0)
+        last = np.maximum(k - 1, 0)
+        index = fractions * last
+        low = np.floor(index).astype(np.int64)
+        high = np.minimum(low + 1, last)
+        below = np.take_along_axis(ordered, low, axis=0).astype(np.float64)
+        above = np.take_along_axis(ordered, high, axis=0).astype(np.float64)
+        part = below + (above - below) * (index - low)
+        part[:, k == 0] = np.nan
+        parts.append(part)
+    result = np.stack(parts)
+    if flat:
+        result = result[..., 0]
+    return result[:, 0] if q.ndim == 0 else np.moveaxis(result, 1, -1)
+
+
+def _summit(
+    arrays: list[np.ndarray],
+    nulls: list[np.ndarray | None],
+    offsets: np.ndarray,
+    region_starts: np.ndarray,
+    ranks,
+):
     """At each region and column, the values at the row with the highest ``by`` keys.
 
-    Keys compare in order; ties go to the first row. NaN ranks lowest.
+    Keys compare in order; ties go to the first row. NaN and the null rank
+    lowest, and a selected null is NaN.
     """
     heads = offsets[:-1]
     lengths = np.diff(offsets)
@@ -308,6 +391,11 @@ def _summit(arrays: list[np.ndarray], offsets: np.ndarray, region_starts: np.nda
     candidates = np.ones(first.shape, dtype=bool)
     for index in ranks:
         key = arrays[index]
+        missing = nulls[index]
+        if missing is not None:
+            kept = candidates & ~missing
+            any_kept = np.logical_or.reduceat(kept, heads, axis=0)
+            candidates = kept | (candidates & ~np.repeat(any_kept, lengths, axis=0))
         if key.dtype.kind == "f":
             key = np.where(np.isnan(key), -np.inf, key)
             floor = -np.inf
@@ -323,7 +411,12 @@ def _summit(arrays: list[np.ndarray], offsets: np.ndarray, region_starts: np.nda
     row_ids = np.broadcast_to(np.arange(n, dtype=np.int64).reshape((n, *column_shape)), first.shape)
     winners = np.minimum.reduceat(np.where(candidates, row_ids, n), heads, axis=0)
     tail = tuple(np.indices(winners.shape, sparse=False)[1:])
-    selected = tuple(array[(winners, *tail)] for array in arrays)
+    selected = []
+    for array, missing in zip(arrays, nulls):
+        value = array[(winners, *tail)]
+        if missing is not None:
+            value = np.where(missing[(winners, *tail)], np.nan, value.astype(np.float64))
+        selected.append(value)
     shape = (heads.size, *column_shape)
     positions = region_starts.reshape(shape) + winners - heads.reshape(shape)
     return (*selected, positions.astype(np.int64))
@@ -402,6 +495,7 @@ def reduce_regions_dataset(
     results = {}
     for group in groups:
         dtypes = _output_dtypes(group, reducer, options)
+        group_options = {**options, "dtypes": dtypes}
         blocks = _column_blocks(group[0]) if lazy else [None]
         outputs = [[] for _ in dtypes]
         for batch in batches:
@@ -409,7 +503,7 @@ def reduce_regions_dataset(
             pieces = [[] for _ in dtypes]
             for cols in blocks:
                 inputs = [_read(track, batch, cols) for track in group]
-                args = (inputs, batch.starts, batch.ends, region_starts, reducer, options)
+                args = (inputs, batch.starts, batch.ends, region_starts, reducer, group_options)
                 if not lazy:
                     for piece, value in zip(pieces, _reduce_batch(*args)):
                         piece.append(value)

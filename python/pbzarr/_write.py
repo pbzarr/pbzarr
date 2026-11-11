@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 import json
+import math
+import numbers
 import os
 from typing import Literal
 
+import numpy as np
+
 from . import _native, _zip
-from ._types import Codecs, PathLike, Source
+from ._types import Codecs, Fill, PathLike, Source
 
 
 def _path(value: object, role: str) -> str:
@@ -76,6 +80,25 @@ def _codecs_json(codecs: Codecs | None) -> str | None:
     return json.dumps(codecs)
 
 
+def _fill(value: object) -> str | None:
+    """The fill as text for the native import: ``na``, ``true``, ``false``, or a number."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        if value == "na":
+            return value
+    elif isinstance(value, numbers.Integral):
+        return str(int(value))
+    elif isinstance(value, numbers.Real):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"fill {value!r} is not finite; use 'na' for a missing value")
+        return str(int(number)) if number.is_integer() else repr(number)
+    raise ValueError(f"fill must be a number, True, False, or 'na'; got {value!r}")
+
+
 def _destination(value: object) -> str:
     path = _path(value, "destination")
     if "://" in path:
@@ -136,6 +159,7 @@ def import_bigwig(
     sources: Source | Iterable[Source],
     *,
     dim: str | None = None,
+    fill: Fill | None = None,
     threads: int | None = None,
     decode_chunks: int | None = None,
     chunk_size: int | None = None,
@@ -146,6 +170,11 @@ def import_bigwig(
     codecs: Codecs | None = None,
 ) -> dict[str, int | float]:
     """Import one or more bigWig sources into a PBZ store.
+
+    The track is ``float32``. ``fill=`` is the value of bases that no bigWig
+    interval covers: a number, or ``"na"``. ``None`` (the default) gives
+    ``"na"``: such a base is missing and reads as NaN. Give ``fill=0`` when
+    the gaps mean 0. A bad fill raises ``ValueError``.
 
     When the destination does not exist, the import creates it from the
     source headers. When it exists, the import adds the track to it. A
@@ -165,6 +194,7 @@ def import_bigwig(
         track=track,
         sources=normalized_sources,
         dim=dim,
+        fill=_fill(fill),
         threads=threads,
         chunk_size=chunk_size,
         column_chunk_size=column_chunk_size,
@@ -191,15 +221,37 @@ def _bed_selector(value: object) -> str:
     raise TypeError("BED column selectors must be header names or 1-based integers")
 
 
+_SCHEMA_KEYS = frozenset({"track", "dtype", "fill"})
+
+
+def _schema_entry(key: object, value: object) -> tuple[str, str | None, str | None, str | None]:
+    selector = _bed_selector(key)
+    if value is None or isinstance(value, str):
+        return (selector, None, value, None)
+    if not isinstance(value, Mapping):
+        raise TypeError("schema entries must be dtype strings, None, or dicts")
+    unknown = set(value) - _SCHEMA_KEYS
+    if unknown:
+        raise ValueError(
+            f"schema entry {key!r} has unknown keys {sorted(map(str, unknown))}; "
+            "use track, dtype, and fill"
+        )
+    track, dtype = value.get("track"), value.get("dtype")
+    if not all(item is None or isinstance(item, str) for item in (track, dtype)):
+        raise TypeError(f"schema entry {key!r}: track and dtype must be strings or None")
+    return (selector, track, dtype, _fill(value.get("fill")))
+
+
 def import_bed(
     destination: PathLike,
     sources: Source | Iterable[Source],
     *,
     genome: PathLike | None = None,
-    schema: Mapping[str | int, str | None] | None = None,
+    schema: Mapping[str | int, str | Mapping[str, object] | None] | None = None,
     track: str | None = None,
     column: str | int | None = None,
     dtype: str | None = None,
+    fill: Fill | None = None,
     dim: str | None = None,
     chunk_size: int | None = None,
     column_chunk_size: int | None = None,
@@ -218,10 +270,13 @@ def import_bed(
       number of 4 or more) and imports it as one track. `track=` names the
       track; it defaults to the header name, so a numbered column needs
       `track=`. `dtype=` skips inference.
-    - `schema=` maps BED header names to dtype strings and imports one
-      track per entry, named by its header name. A `None` dtype is inferred
-      across every source. `schema=` conflicts with `track=`, `column=`,
-      and `dtype=`.
+    - `schema=` maps BED columns (header names, or 1-based column numbers)
+      to entries and imports one track per entry. An entry is a dtype
+      string, `None`, or a dict with the optional keys `"track"`, `"dtype"`,
+      and `"fill"`. The track takes the header name when the entry gives
+      none, so a numbered column needs `"track"`. A missing dtype is
+      inferred across every source, and a missing fill takes `fill=`.
+      `schema=` conflicts with `track=`, `column=`, and `dtype=`.
     - With none of those, BED3 input imports a bool presence track and
       headerless BED4 one value track (both need `track=`). Headered input
       imports every value column: one wide track when a single source has
@@ -229,6 +284,18 @@ def import_bed(
 
     Output is 2D when there are several sources, or when one track holds
     several BED columns. Every 2D output requires `dim=`.
+
+    `fill=` is the value of bases that no interval covers in a value
+    column: a number, `True` or `False` for a bool column, or `"na"`.
+    `"na"` is the null of the dtype: NaN for a float, the type maximum for
+    an integer. `None` (the default) gives `"na"`, and `False` for a bool
+    column. With `"na"`, dtype inference keeps the type maximum free. Give
+    `fill=0` when the gaps mean 0. A BED3 mask always holds `False` and
+    refuses `fill=`. A bad fill raises `ValueError`.
+
+    xarray decodes an integer track with the null to a float dtype, with
+    NaN at the nulls: `float32` for 8- and 16-bit integers, `float64` for
+    32- and 64-bit integers.
 
     BED files have no contig lengths. When the destination does not exist,
     the import creates it with the lengths in `genome=`, a .fai or
@@ -251,14 +318,10 @@ def import_bed(
         if track is not None or column is not None or dtype is not None:
             raise ValueError("schema= conflicts with track=, column=, and dtype=")
         if not isinstance(schema, Mapping):
-            raise TypeError("schema must be a mapping of BED column selectors to dtypes")
+            raise TypeError("schema must be a mapping of BED column selectors to entries")
         if not schema:
             raise ValueError("schema must not be empty")
-        schema_entries = []
-        for key, value in schema.items():
-            if value is not None and not isinstance(value, str):
-                raise TypeError("schema dtypes must be strings or None")
-            schema_entries.append((_bed_selector(key), value))
+        schema_entries = [_schema_entry(key, value) for key, value in schema.items()]
     normalized_column = _bed_selector(column) if column is not None else None
     return _native.import_bed(
         destination=destination_path,
@@ -268,6 +331,7 @@ def import_bed(
         track=track,
         column=normalized_column,
         dtype=dtype,
+        fill=_fill(fill),
         dim=dim,
         threads=threads,
         chunk_size=chunk_size,
