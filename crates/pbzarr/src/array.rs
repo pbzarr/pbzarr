@@ -63,7 +63,12 @@ impl Fill {
                             "fill {text:?} is not finite; use na for a missing value"
                         )));
                     }
-                    Fill::Value(serde_json::Number::from_f64(v).ok_or_else(bad)?.into())
+                    // A whole number such as 0.0 must also fit an integer track.
+                    if v.fract() == 0.0 && v.abs() < 2f64.powi(53) {
+                        Fill::Value((v as i64).into())
+                    } else {
+                        Fill::Value(serde_json::Number::from_f64(v).ok_or_else(bad)?.into())
+                    }
                 }
             }
         })
