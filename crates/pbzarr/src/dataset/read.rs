@@ -77,8 +77,13 @@ pub(crate) fn float_fill(info: &VariableInfo) -> Result<Option<f64>> {
     if fill.is_null() {
         return Ok(None);
     }
-    if let Some(number) = fill.as_f64() {
-        return Ok(Some(number));
+    if fill.is_number() {
+        return Err(PbzError::UnsupportedEncoding(format!(
+            "{}: floating _FillValue {fill} is a JSON number, and xarray cannot open a \
+             store that holds one; write it as base64 of a little-endian double, as \
+             xarray does",
+            info.name
+        )));
     }
     if let Some(encoded) = fill.as_str() {
         let bytes = base64::engine::general_purpose::STANDARD

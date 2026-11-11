@@ -849,3 +849,32 @@ fn unaddressable_read_and_coordinate_buffers_return_errors_without_payload_reads
             .contains("sample/c")
     );
 }
+#[test]
+fn numeric_float_fill_is_refused_and_base64_fill_reads() {
+    let (s, _) = fixture();
+    let mut m = metadata(&[12], &["position"], "float32");
+    m["attributes"]["_FillValue"] = json!(-1.0);
+    put(&s, "score/zarr.json", m.clone());
+    values(&s, "score", &[1.0_f32; 12]);
+    let ds = Dataset::open_with_storage(s.clone()).unwrap();
+    let err = pbzarr::Measurement::root(&ds, "score").err().unwrap();
+    assert!(matches!(err, PbzError::UnsupportedEncoding(_)), "{err}");
+    assert!(err.to_string().contains("xarray cannot open"), "{err}");
+    let report = ds.validate().unwrap();
+    assert_ne!(report.status, ValidationStatus::Valid);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.array.as_deref() == Some("score") && i.message.contains("xarray")),
+        "{report:?}"
+    );
+    m["attributes"]["_FillValue"] = json!("AAAAAAAA8L8=");
+    put(&s, "score/zarr.json", m);
+    let ds = Dataset::open_with_storage(s).unwrap();
+    assert_eq!(ds.validate().unwrap().status, ValidationStatus::Valid);
+    assert!(matches!(
+        ds.variables()["score"].logical_support,
+        Support::Supported
+    ));
+}
