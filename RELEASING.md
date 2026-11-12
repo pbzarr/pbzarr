@@ -35,8 +35,8 @@ Python wheel (PyPI) and the `pbz` CLI binaries (GitHub release) ship in lockstep
      Publishing (OIDC; no token stored).
 
    CI (`ci.yml`) runs the wheel and binary workflows on every pull request to
-   `main` and on every push to `main` and `0.8-wip`, so a broken build shows up
-   before a release.
+   `main`, which includes the release PR, so a broken build shows up before a
+   release. A push runs only the Rust and Python tests.
 
 ## Crate and wheel stay linked
 
