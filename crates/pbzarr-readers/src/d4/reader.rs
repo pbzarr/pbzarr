@@ -162,11 +162,21 @@ fn decode_region(
         return Ok(());
     }
 
+    // `stab.decode` keeps a forward-only cursor, and a pooled handle can read
+    // pieces in any order. A fresh iterator per read is correct in any order.
+    let mut records = stab.seek_iter(from).peekable();
     let mut codec = ptab.to_codec();
     codec.decode_block(from as usize, (to - from) as usize, |pos, value| {
         let resolved = match value {
             DecodeResult::Definitely(v) => v,
-            DecodeResult::Maybe(v) => stab.decode(pos as u32).unwrap_or(v),
+            DecodeResult::Maybe(v) => {
+                let pos = pos as u32;
+                while records.next_if(|&(_, end, _)| end <= pos).is_some() {}
+                match records.peek() {
+                    Some(&(begin, _, value)) if begin <= pos => value,
+                    _ => v,
+                }
+            }
         };
         emit(pos - start_u32 as usize, resolved);
     });
