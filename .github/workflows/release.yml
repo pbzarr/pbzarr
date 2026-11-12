@@ -45,8 +45,6 @@ jobs:
   publish-pypi:
     needs: build-wheels
     runs-on: ubuntu-latest
-    # Trusted publishing: add a PyPI publisher for repo pbzarr/pbzarr,
-    # workflow release.yml, environment "pypi".
     environment: pypi
     permissions:
       id-token: write
@@ -58,9 +56,6 @@ jobs:
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  # Publishes the core `pbzarr` crate via crates.io Trusted Publishing (OIDC,
-  # no stored token). Configure a trusted publisher on crates.io for repo
-  # pbzarr/pbzarr, workflow release.yml. See RELEASING.md.
   publish-crate:
     needs: release-please
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}

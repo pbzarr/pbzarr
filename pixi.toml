@@ -65,7 +65,7 @@ pytest = ">=8"
 build-wheel = "maturin build --release"
 install-wheel = "maturin develop --release"
 test-py = "pytest python/tests -v"
-wheel-smoke = "bash scripts/wheel_smoke.sh"
+wheel-test = "bash scripts/wheel_test.sh"
 
 # --- example feature: notebooks under python/examples ---
 [feature.example.dependencies]

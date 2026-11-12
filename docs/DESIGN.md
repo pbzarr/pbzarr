@@ -135,7 +135,7 @@ PBZ uses standard Zarr v3 groups, arrays, codecs, and variable-length UTF-8 stri
 
 Cross-language validation (`pixi run validate-roundtrip`) imports d4 fixtures with Rust, opens the stores through released xarray and `pbzarr.open`, compares variables, dimensions, dtypes, root attributes, values, and a contig boundary, then writes a derived track from Python and checks the store with the Rust `check_dataset` example.
 
-The Python package needs Python 3.12 or later. Its dependency floors in `pyproject.toml` are the versions that the pixi lock tests. The public API has type annotations, and the package ships `py.typed`. `pbzarr.__version__` comes from the installed package metadata. `pixi run wheel-smoke` builds the wheel, installs it (not editable) into a temporary venv, imports a d4 fixture, opens the store, and reads a region.
+The Python package needs Python 3.12 or later. Its dependency floors in `pyproject.toml` are the versions that the pixi lock tests. The public API has type annotations, and the package ships `py.typed`. `pbzarr.__version__` comes from the installed package metadata. `pixi run wheel-test` builds the wheel, installs it (not editable) into a temporary venv, imports a d4 fixture, opens the store, and reads a region.
 
 ## CLI
 
