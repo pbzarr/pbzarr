@@ -37,8 +37,12 @@ Python wheel (PyPI) and the `pbz` CLI binaries (GitHub release) ship in lockstep
      Publishing (OIDC; no token stored).
 
    CI (`ci.yml`) runs the wheel and binary workflows on every pull request to
-   `main`, which includes the release PR, so a broken build shows up before a
-   release. A push runs only the Rust and Python tests.
+   `main`, so a broken build shows up before a release. A push runs only the Rust
+   and Python tests. release-please opens and updates the release PR with the
+   default `GITHUB_TOKEN`, so GitHub holds those CI runs until someone approves
+   them. Before you merge the release PR, click **Approve workflows to run** in
+   its merge box and wait for CI to pass. release-please pushes to the PR each
+   time `main` changes, and each push needs a new approval.
 4. **Replace the release notes (optional).** release-please uses the generated
    changelog entry as the text of the GitHub release. To use curated notes,
    write them to a file outside the repo and replace the text:
