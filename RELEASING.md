@@ -12,10 +12,12 @@ Python wheel (PyPI) and the `pbz` CLI binaries (GitHub release) ship in lockstep
    build the changelog.
 2. **release-please opens (or updates) a release PR** titled `chore(main): release <version>`.
    It bumps the one version line in the root `Cargo.toml` `[workspace.package]`
-   table (annotated `# x-release-please-version`) and writes `CHANGELOG.md`. Every
-   crate inherits that version via `version.workspace = true`, and the wheel reads
-   it through `dynamic = ["version"]` in `pyproject.toml`, so nothing else needs a
-   per-file bump.
+   table (annotated `# x-release-please-version`), bumps the four workspace crates
+   in `Cargo.lock`, and writes `CHANGELOG.md`. Every crate inherits that version
+   via `version.workspace = true`, and the wheel reads it through
+   `dynamic = ["version"]` in `pyproject.toml`, so nothing else needs a per-file
+   bump. The `Cargo.lock` bump keeps `cargo build --locked` working on the release
+   PR.
 3. **Merge the release PR.** That creates the git tag and GitHub release
    (`releases_created == 'true'`), which triggers the publish jobs in
    `.github/workflows/release.yml`:
@@ -34,9 +36,31 @@ Python wheel (PyPI) and the `pbz` CLI binaries (GitHub release) ship in lockstep
    - **publish-crate**: `cargo publish -p pbzarr` via crates.io Trusted
      Publishing (OIDC; no token stored).
 
-   CI (`ci.yml`) runs the wheel and binary workflows on every pull request to
-   `main`, which includes the release PR, so a broken build shows up before a
-   release. A push runs only the Rust and Python tests.
+   The release builds do not use the build cache, so the published wheels and
+   binaries always come from a clean build. CI caches dependency builds
+   (`Swatinem/rust-cache` for cargo, sccache for the wheels) and saves the cache
+   only from `main`. A pull request reads the cache from `main`.
+
+   CI (`ci.yml`) runs the tests, the wheel and binary builds and the docs build
+   on every push to `main` and on the release PR, so a broken build shows up
+   before a release. On other pull requests, CI runs the tests and the docs build
+   at once, but the wheel and binary builds wait in the `approve-builds` job for
+   approval through the `pr-builds` environment. To run them, open the run and
+   click **Review deployments**. Each new push to the PR asks again. If nobody
+   approves, the builds do not run.
+
+   On a push to `main`, the docs job also deploys the site:
+   `.github/workflows/docs.yml` builds it with Zensical (`pixi run -e docs
+   docs-build`) and pushes `site/` to the `gh-pages` branch of
+   `pbzarr/pbzarr.github.io`, which serves <https://pbzarr.github.io>. It uses
+   the `DOCS_DEPLOY_KEY` secret. The site follows `main`, so it can show changes
+   that are not in a release yet.
+
+   release-please opens and updates the release PR with the default
+   `GITHUB_TOKEN`, so GitHub holds those CI runs until someone approves them.
+   Before you merge the release PR, click **Approve workflows to run** in its
+   merge box and wait for CI to pass. release-please pushes to the PR each time
+   `main` changes, and each push needs a new approval.
 4. **Replace the release notes (optional).** release-please uses the generated
    changelog entry as the text of the GitHub release. To use curated notes,
    write them to a file outside the repo and replace the text:
@@ -73,6 +97,9 @@ missing files), re-run the `Release` workflow via **Run workflow**
 rebuilds the wheels and binaries off the tag, runs `publish-pypi` through trusted
 publishing, and attaches the binaries again (`--clobber`). `publish-crate` stays
 gated on a fresh release and does not re-fire, so the crate is untouched.
+
+To deploy the docs without a push to `main`, run the `Docs` workflow via **Run
+workflow**. Leave the `ref` input empty to build from `main`, or set it to a tag.
 
 ## Package version and format version
 
@@ -128,6 +155,23 @@ patch when both fixes are in an upstream release.
   repos don't both publish the `pbzarr` project.
 - **GitHub:** the `Release` workflow needs `contents: write` + `pull-requests: write`
   (already set); the PyPI job needs `id-token: write` (already set).
+- **Docs site:** make `pbzarr/pbzarr.github.io` public (GitHub Pages on a private
+  repo needs a paid plan). Make a deploy key:
+
+  ```bash
+  ssh-keygen -t ed25519 -N "" -C "pbzarr docs deploy" -f docs-deploy
+  ```
+
+  Add `docs-deploy.pub` to `pbzarr/pbzarr.github.io` (Settings, Deploy keys) and
+  select **Allow write access**. Add the private key `docs-deploy` to
+  `pbzarr/pbzarr` as the repository secret `DOCS_DEPLOY_KEY`. Then delete both
+  key files. The first push to `main` (or a `Docs` run) makes the `gh-pages`
+  branch. Then, in `pbzarr/pbzarr.github.io` (Settings, Pages), set the source to
+  **Deploy from a branch**, branch `gh-pages`, folder `/ (root)`. Delete the old
+  `.github/workflows/deploy.yml` in that repo, because it deploys the old site.
+- **PR build approval:** create the `pr-builds` environment in `pbzarr/pbzarr`
+  (Settings, Environments) and add yourself under **Required reviewers**. Leave
+  **Prevent self-review** off, so that you can approve builds on your own PRs.
 - **crates.io:** add a Trusted Publisher for the `pbzarr` crate: publisher type
   GitHub, repository `pbzarr/pbzarr`, workflow filename `release.yml` (leave
   environment blank, the job sets none). The crate `pbzarr@0.1.0` must already be

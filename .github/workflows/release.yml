@@ -33,6 +33,7 @@ jobs:
     uses: ./.github/workflows/wheels.yml
     with:
       ref: ${{ inputs.ref }}
+      cache: false
 
   build-binaries:
     needs: release-please
@@ -41,6 +42,7 @@ jobs:
     with:
       ref: ${{ inputs.ref }}
       upload_tag: ${{ needs.release-please.outputs.tag_name || inputs.ref }}
+      cache: false
 
   publish-pypi:
     needs: build-wheels
