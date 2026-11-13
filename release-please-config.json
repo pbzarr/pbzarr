@@ -8,7 +8,11 @@
       "release-type": "simple",
       "bump-minor-pre-major": true,
       "extra-files": [
-        { "type": "generic", "path": "Cargo.toml" }
+        { "type": "generic", "path": "Cargo.toml" },
+        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name.value==='pbz')].version" },
+        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name.value==='pbzarr')].version" },
+        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name.value==='pbzarr-readers')].version" },
+        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name.value==='pbzarr-python')].version" }
       ]
     }
   }

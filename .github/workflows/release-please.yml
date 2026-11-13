@@ -33,6 +33,7 @@ jobs:
     uses: ./.github/workflows/wheels.yml
     with:
       ref: ${{ inputs.ref }}
+      cache: false
 
   build-binaries:
     needs: release-please

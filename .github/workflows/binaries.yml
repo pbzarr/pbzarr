@@ -1,0 +1,44 @@
+name: Binaries
+
+on:
+  workflow_call:
+
+env:
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang and Rust
+        run: |
+          dnf install -y clang-devel
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --release --locked -p pbz
+      - name: Test the binary
+        run: |
+          target/release/pbz --version
+          target/release/pbz import d4 "$RUNNER_TEMP/test.pbz" fixtures/d4/banded_1k.d4 --track depth -q
+          target/release/pbz stat "$RUNNER_TEMP/test.pbz" -r chr1:100-110
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --release --locked -p pbz
+      - name: Test the binary
+        run: |
+          target/release/pbz --version
+          target/release/pbz import d4 "$RUNNER_TEMP/test.pbz" fixtures/d4/banded_1k.d4 --track depth -q
+          target/release/pbz stat "$RUNNER_TEMP/test.pbz" -r chr1:100-110
+

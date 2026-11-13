@@ -17,6 +17,11 @@ jobs:
           pixi-version: v0.70.1
           cache: true
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: pixi run {0}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - run: pixi run test
 
       - run: pixi run clippy
@@ -33,12 +38,37 @@ jobs:
           pixi-version: v0.70.1
           cache: true
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: pixi run {0}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - run: pixi run install-wheel
 
       - run: pixi run test-py
 
       - run: pixi run validate-roundtrip
 
+  approve-builds:
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
+    runs-on: ubuntu-latest
+    environment: pr-builds
+    steps:
+      - run: echo "Wheel and binary builds approved for this run."
+
   wheels:
-    if: github.event_name == 'pull_request'
+    needs: approve-builds
+    if: ${{ !cancelled() && (needs.approve-builds.result == 'success' || needs.approve-builds.result == 'skipped') }}
     uses: ./.github/workflows/wheels.yml
+
+  binaries:
+    needs: approve-builds
+    if: ${{ !cancelled() && (needs.approve-builds.result == 'success' || needs.approve-builds.result == 'skipped') }}
+    uses: ./.github/workflows/binaries.yml
+
+  docs:
+    uses: ./.github/workflows/docs.yml
+    with:
+      deploy: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    secrets:
+      DOCS_DEPLOY_KEY: ${{ secrets.DOCS_DEPLOY_KEY }}
