@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PBZ core draft root attributes",
+  "description": "Validates root attributes only. The reference arrays contig_id and contig_length, array geometry and coordinate contents require a store validator. This is an unpublished proposal.",
+  "type": "object",
+  "required": ["zarr_conventions", "pbz:version"],
+  "properties": {
+    "zarr_conventions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/convention"},
+      "contains": {
+        "type": "object",
+        "required": ["uuid"],
+        "properties": {
+          "uuid": {"const": "d5bd7bea-0388-4e0a-9844-707c034e9add"}
+        }
+      },
+      "minContains": 1,
+      "maxContains": 1
+    },
+    "pbz:version": {"const": "0.5"}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "convention": {
+      "type": "object",
+      "properties": {
+        "uuid": {"type": "string", "format": "uuid"},
+        "schema_url": {"type": "string", "format": "uri"},
+        "spec_url": {"type": "string", "format": "uri"},
+        "name": {"type": "string"},
+        "description": {"type": "string"}
+      },
+      "anyOf": [
+        {"required": ["uuid"]},
+        {"required": ["schema_url"]},
+        {"required": ["spec_url"]}
+      ],
+      "additionalProperties": false
+    }
+  }
+}

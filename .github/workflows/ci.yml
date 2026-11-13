@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 0.8-wip]
   pull_request:
     branches: [main]
 
@@ -40,4 +40,9 @@ jobs:
       - run: pixi run validate-roundtrip
 
   wheels:
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/wheels.yml
+
+  binaries:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/binaries.yml

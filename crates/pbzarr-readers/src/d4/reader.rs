@@ -16,35 +16,14 @@ use d4::D4TrackReader;
 use d4::ptab::{BitArrayPartReader, DecodeResult, Decoder};
 use d4::stab::{RangeRecord, SecondaryTablePartReader, SparseArrayPartReader};
 
-use pbzarr::genome::{Contig, Genome};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader};
+use pbzarr::{Contig, Reference};
 
 type ContigPart = (BitArrayPartReader, SparseArrayPartReader<RangeRecord>);
 
-/// Read a d4 file's contig list from its header without opening the data path.
-///
-/// Returns `(name, length)` pairs in file order, so a store can be sized from
-/// the source without pyd4 or an external d4tools invocation.
-pub fn contigs<P: AsRef<Path>>(src: P) -> Result<Vec<(String, u64)>> {
-    let path = src.as_ref();
-    // Pin the default table generics, as the `D4Reader::inner` field does;
-    // `open_first_track` is otherwise ambiguous over its type parameters.
-    let reader: D4TrackReader =
-        D4TrackReader::open_first_track(path).map_err(|source| ReaderError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    Ok(reader
-        .header()
-        .chrom_list()
-        .iter()
-        .map(|c| (c.name.clone(), c.size as u64))
-        .collect())
-}
-
 struct Shared {
     path: PathBuf,
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
 }
 
@@ -75,8 +54,8 @@ fn contig_partitions(
 }
 
 impl D4Reader {
-    /// Open a d4 file, taking its first data track. Reads the header to build
-    /// the canonical `Genome`.
+    /// Open a d4 file, taking its first data track. The header gives the
+    /// contig list.
     pub fn open<P: AsRef<Path>>(src: P) -> Result<Self> {
         let path = src.as_ref().to_path_buf();
         let mut inner =
@@ -103,7 +82,7 @@ impl D4Reader {
                 length: c.size as u64,
             })
             .collect();
-        let genome = Genome::new(contigs).map_err(|e| {
+        let genome = Reference::new(contigs).map_err(|e| {
             ReaderError::Other(anyhow::anyhow!(
                 "invalid contig list in {}: {e}",
                 path.display(),
@@ -183,11 +162,21 @@ fn decode_region(
         return Ok(());
     }
 
+    // `stab.decode` keeps a forward-only cursor, and a pooled handle can read
+    // pieces in any order. A fresh iterator per read is correct in any order.
+    let mut records = stab.seek_iter(from).peekable();
     let mut codec = ptab.to_codec();
     codec.decode_block(from as usize, (to - from) as usize, |pos, value| {
         let resolved = match value {
             DecodeResult::Definitely(v) => v,
-            DecodeResult::Maybe(v) => stab.decode(pos as u32).unwrap_or(v),
+            DecodeResult::Maybe(v) => {
+                let pos = pos as u32;
+                while records.next_if(|&(_, end, _)| end <= pos).is_some() {}
+                match records.peek() {
+                    Some(&(begin, _, value)) if begin <= pos => value,
+                    _ => v,
+                }
+            }
         };
         emit(pos - start_u32 as usize, resolved);
     });
@@ -196,7 +185,7 @@ fn decode_region(
 }
 
 impl ValueReader for D4Reader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.shared.genome
     }
 

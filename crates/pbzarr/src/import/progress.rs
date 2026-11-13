@@ -3,8 +3,8 @@
 //!
 //! Bridges the pipeline's `ProgressSink` to an animated indicatif bar when
 //! stderr is a terminal, and to periodic plain lines otherwise so that
-//! batch-job logs and Jupyter (where stderr is not a TTY and control codes
-//! would be noise) still get readable progress.
+//! batch-job logs still get readable progress. [`line_sink`] gives the same
+//! plain lines to a caller's writer, such as Python `sys.stderr`.
 
 use std::io::IsTerminal;
 use std::sync::Mutex;
@@ -17,7 +17,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use super::ProgressSink;
 
 /// Format a byte count with a binary unit (e.g. "12.3 GiB").
-fn human_bytes(n: u64) -> String {
+pub(crate) fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
     let mut i = 0;
@@ -55,8 +55,17 @@ pub fn make_sink(label: &str) -> Arc<dyn ProgressSink> {
         pb.enable_steady_tick(Duration::from_millis(500));
         Arc::new(BarSink { pb })
     } else {
-        Arc::new(PlainSink::new(label))
+        line_sink(label, |line| eprintln!("{line}"))
     }
+}
+
+/// Build a progress sink that hands one plain text line, with no newline, to
+/// `write` at most every two seconds and once at the end.
+pub fn line_sink(
+    label: &str,
+    write: impl Fn(&str) + Send + Sync + 'static,
+) -> Arc<dyn ProgressSink> {
+    Arc::new(PlainSink::new(label, Box::new(write)))
 }
 
 struct BarSink {
@@ -87,10 +96,11 @@ struct PlainSink {
     done: AtomicU64,
     last: Mutex<Instant>,
     interval: Duration,
+    write: Box<dyn Fn(&str) + Send + Sync>,
 }
 
 impl PlainSink {
-    fn new(label: &str) -> Self {
+    fn new(label: &str, write: Box<dyn Fn(&str) + Send + Sync>) -> Self {
         let interval = Duration::from_secs(2);
         // Bias the clock back one interval so the first tick prints right away,
         // giving batch logs an early sign of life.
@@ -103,6 +113,7 @@ impl PlainSink {
             done: AtomicU64::new(0),
             last: Mutex::new(last),
             interval,
+            write,
         }
     }
 
@@ -113,12 +124,12 @@ impl PlainSink {
         } else {
             100.0
         };
-        eprintln!(
+        (self.write)(&format!(
             "{}: {pct:.0}% ({} / {})",
             self.label,
             human_bytes(done),
             human_bytes(total),
-        );
+        ));
     }
 }
 

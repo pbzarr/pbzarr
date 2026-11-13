@@ -6,17 +6,14 @@
 //! window.
 //!
 //! A `Backend` and its decode scratch (`Accumulators`, `MateBuffer`) are only
-//! ever driven by one worker thread at a time, each fork getting its own. The
-//! `Mutex` around them exists because `may_have_data` probes the index
-//! through `&self` while `Backend::has_records` needs `&mut`; `read_into`
-//! takes `&mut self` and goes through `get_mut` instead.
+//! ever driven by one worker thread at a time, each fork getting its own.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ndarray::ArrayView1;
 
-use pbzarr::genome::Genome;
+use pbzarr::Reference;
 use pbzarr::io::{
     Dtype, OutputField, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader, WindowSink,
 };
@@ -30,7 +27,7 @@ use super::{DepthFilter, RecordFields};
 struct Shared {
     path: PathBuf,
     reference: Option<PathBuf>,
-    genome: Genome,
+    genome: Reference,
     filter: DepthFilter,
     mode: ImportMode,
     fields: RecordFields,
@@ -38,18 +35,26 @@ struct Shared {
 }
 
 /// Per-fork decode scratch: the open file handle plus the walk's working
-/// buffers, reused window to window.
+/// buffers. The buffers are freed after each read, so an idle fork holds only
+/// its file handle.
 struct Scratch {
     backend: Backend,
     acc: Accumulators,
     mates: MateBuffer,
 }
 
+impl Scratch {
+    fn release(&mut self) {
+        self.acc.release();
+        self.mates = MateBuffer::default();
+    }
+}
+
 /// Reader over one BAM/CRAM alignment file, driving the depth or composition
 /// walk (per [`ImportMode`]) into per-fork scratch buffers.
 pub struct BamReader {
     shared: Arc<Shared>,
-    scratch: Mutex<Scratch>,
+    scratch: Scratch,
 }
 
 impl BamReader {
@@ -101,11 +106,11 @@ impl BamReader {
                 fields,
                 schema: schema_for(mode),
             }),
-            scratch: Mutex::new(Scratch {
+            scratch: Scratch {
                 backend,
                 acc: Accumulators::new(n_fields, 0),
                 mates: MateBuffer::default(),
-            }),
+            },
         })
     }
 
@@ -118,25 +123,12 @@ impl BamReader {
         let n_fields = self.shared.mode.n_fields();
         Ok(Self {
             shared: Arc::clone(&self.shared),
-            scratch: Mutex::new(Scratch {
+            scratch: Scratch {
                 backend,
                 acc: Accumulators::new(n_fields, 0),
                 mates: MateBuffer::default(),
-            }),
+            },
         })
-    }
-
-    fn probe(&self, contig_name: &str, start: u64, end: u64) -> bool {
-        // Same poisoned-lock recovery as `read_into`: this fn only returns a
-        // bool, so there's no error path to propagate a poisoned mutex into.
-        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
-        // A probe failure (e.g. a transient query error) shouldn't silently
-        // skip a task; fall back to "assume data present" so the pipeline
-        // still reads (and surfaces the real error there).
-        scratch
-            .backend
-            .has_records(contig_name, start, end)
-            .unwrap_or(true)
     }
 }
 
@@ -223,7 +215,7 @@ fn copy_fields(
 }
 
 impl ValueReader for BamReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.shared.genome
     }
 
@@ -242,17 +234,16 @@ impl ValueReader for BamReader {
             return Ok(());
         }
         let Self { shared, scratch } = self;
-        // Scratch is per-window and fully reset by `accumulate`, so a poisoned
-        // lock (from a panic mid-window on another call) is safe to reuse.
-        let scratch = scratch.get_mut().unwrap_or_else(|e| e.into_inner());
-        accumulate(shared, scratch, contig, start, end, |_, _| {})?;
-        copy_fields(&scratch.acc, 0, (end - start) as usize, outputs)
+        let result = accumulate(shared, scratch, contig, start, end, |_, _| {})
+            .and_then(|()| copy_fields(&scratch.acc, 0, (end - start) as usize, outputs));
+        scratch.release();
+        result
     }
 
     /// One `fetch` over the whole span, then one sink per window out of the
     /// single accumulator. Coverage comes from the visited records' reference
-    /// spans rather than one index probe per window, which matches what
-    /// `may_have_data` reports and costs no extra seek.
+    /// spans, so a window that no record reaches is reported as uncovered
+    /// with no extra seek.
     fn read_windows(
         &mut self,
         contig: &str,
@@ -271,8 +262,7 @@ impl ValueReader for BamReader {
         let mut covered = vec![false; bounds.len() - 1];
 
         let Self { shared, scratch } = self;
-        let scratch = scratch.get_mut().unwrap_or_else(|e| e.into_inner());
-        accumulate(shared, scratch, contig, start, end, |lo, hi| {
+        let result = accumulate(shared, scratch, contig, start, end, |lo, hi| {
             let lo = lo.max(start);
             let hi = hi.min(end);
             if hi <= lo {
@@ -284,32 +274,54 @@ impl ValueReader for BamReader {
             for flag in &mut covered[first..=last] {
                 *flag = true;
             }
-        })?;
-
-        for (window, pair) in bounds.windows(2).enumerate() {
-            let (lo, hi) = (pair[0], pair[1]);
-            if hi <= lo {
-                continue;
+        })
+        .and_then(|()| {
+            for (window, pair) in bounds.windows(2).enumerate() {
+                let (lo, hi) = (pair[0], pair[1]);
+                if hi <= lo {
+                    continue;
+                }
+                if covered[window] {
+                    let mut outputs = sink.sinks(lo, hi)?;
+                    copy_fields(
+                        &scratch.acc,
+                        (lo - start) as usize,
+                        (hi - start) as usize,
+                        &mut outputs,
+                    )?;
+                }
+                sink.done(lo, hi, covered[window])?;
             }
-            if covered[window] {
-                let mut outputs = sink.sinks(lo, hi)?;
-                copy_fields(
-                    &scratch.acc,
-                    (lo - start) as usize,
-                    (hi - start) as usize,
-                    &mut outputs,
-                )?;
-            }
-            sink.done(lo, hi, covered[window])?;
-        }
-        Ok(())
-    }
-
-    fn may_have_data(&self, contig: &str, start: u64, end: u64) -> bool {
-        self.probe(contig, start, end)
+            Ok(())
+        });
+        scratch.release();
+        result
     }
 
     fn fork(&self) -> Result<Self> {
         self.fork_handle()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::ArrayViewMut1;
+
+    #[test]
+    fn fork_frees_decode_scratch_after_a_read() {
+        let bam = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/bam/reads.bam");
+        let base = BamReader::open(&bam, None, ImportMode::Depth, DepthFilter::default()).unwrap();
+        let mut fork = base.fork().unwrap();
+
+        let mut depth = vec![0i32; 100];
+        let mut outputs = [OutputSinkMut::I32(ArrayViewMut1::from(
+            depth.as_mut_slice(),
+        ))];
+        fork.read_into("ref1", 0, 100, &mut outputs).unwrap();
+
+        assert!(depth.iter().any(|&d| d > 0));
+        assert_eq!(fork.scratch.acc.fields.len(), 1);
+        assert!(fork.scratch.acc.fields.iter().all(|f| f.capacity() == 0));
     }
 }

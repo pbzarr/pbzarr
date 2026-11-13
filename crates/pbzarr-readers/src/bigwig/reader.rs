@@ -2,38 +2,21 @@
 //!
 //! Backed by `bigtools::BigWigRead` over a `ReopenableFile`. Each region is read
 //! with `BigWigRead::values`, which returns a per-base `Vec<f32>` with `NaN` for
-//! positions the file does not cover. Those `NaN`s pass through unchanged: a
-//! bigWig holds no value at an uncovered base, so the gap is missing data
-//! rather than zero.
+//! positions the file does not cover. The reader skips those positions, so
+//! they keep the fill of the track.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bigtools::BigWigRead;
 use bigtools::utils::file::reopen::ReopenableFile;
+use bigtools::{BigWigRead, BigWigReadOpenError};
 
-use pbzarr::genome::{Contig, Genome};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ReaderError, Result, ValueReader};
-
-/// Read a bigWig file's contig list from its header.
-///
-/// Returns `(name, length)` pairs in the file's chrom order. Used by the Python
-/// `PbzStore.from_bigwig` constructor to size a store directly from the source,
-/// so callers do not need pybigtools.
-pub fn contigs<P: AsRef<Path>>(src: P) -> Result<Vec<(String, u64)>> {
-    let path = src.as_ref();
-    let reader = BigWigRead::open_file(path)
-        .map_err(|e| ReaderError::Other(anyhow::anyhow!("open {}: {e}", path.display())))?;
-    Ok(reader
-        .chroms()
-        .iter()
-        .map(|c| (c.name.clone(), c.length as u64))
-        .collect())
-}
+use pbzarr::{Contig, Reference};
 
 struct Shared {
     path: PathBuf,
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
 }
 
@@ -45,11 +28,16 @@ pub struct BigWigReader {
 }
 
 impl BigWigReader {
-    /// Open a bigWig file. Reads the header to build the canonical `Genome`.
+    /// Open a bigWig file. The header gives the contig list.
     pub fn open<P: AsRef<Path>>(src: P) -> Result<Self> {
         let path = src.as_ref().to_path_buf();
-        let inner = BigWigRead::open_file(&path)
-            .map_err(|e| ReaderError::Other(anyhow::anyhow!("open {}: {e}", path.display())))?;
+        let inner = BigWigRead::open_file(&path).map_err(|e| match e {
+            BigWigReadOpenError::IoError(source) => ReaderError::Io {
+                path: path.clone(),
+                source,
+            },
+            e => ReaderError::Other(anyhow::anyhow!("open {}: {e}", path.display())),
+        })?;
 
         let contigs: Vec<Contig> = inner
             .chroms()
@@ -59,7 +47,7 @@ impl BigWigReader {
                 length: c.length as u64,
             })
             .collect();
-        let genome = Genome::new(contigs).map_err(|e| {
+        let genome = Reference::new(contigs).map_err(|e| {
             ReaderError::Other(anyhow::anyhow!(
                 "invalid contig list in {}: {e}",
                 path.display(),
@@ -87,8 +75,7 @@ impl BigWigReader {
     }
 }
 
-/// `emit` receives each base as an offset from `start`, `NaN` where the file
-/// has no coverage.
+/// `emit` receives each covered base as an offset from `start`.
 fn decode_region(
     shared: &Shared,
     inner: &mut BigWigRead<ReopenableFile>,
@@ -101,8 +88,7 @@ fn decode_region(
         return Ok(());
     }
 
-    // Resolve the name in the bigWig's own genome; the caller's ContigId
-    // (if it had one) belongs to a different namespace.
+    // Look up the name in the bigWig's own contig list.
     if shared.genome.id(contig_name).is_none() {
         return Err(ReaderError::ContigNotFound {
             path: shared.path.clone(),
@@ -136,14 +122,16 @@ fn decode_region(
     })?;
 
     for (idx, v) in values.into_iter().enumerate() {
-        emit(idx, v);
+        if !v.is_nan() {
+            emit(idx, v);
+        }
     }
 
     Ok(())
 }
 
 impl ValueReader for BigWigReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.shared.genome
     }
 

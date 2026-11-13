@@ -3,11 +3,9 @@
 use std::path::PathBuf;
 
 use log::{debug, info, warn};
-use pbzarr::Genome;
 use pbzarr::PbzError;
-use pbzarr::PbzStore;
 use pbzarr::Result;
-use pbzarr::import::{Config, Import, PipelineOptions, Report, Source};
+use pbzarr::import::{Axes, Config, Report, Source, Target};
 use pbzarr::io::Dtype;
 use pbzarr::io::ValueReader as _;
 
@@ -22,14 +20,18 @@ use super::{DepthFilter, OverlapMode};
 /// per [`FIELDS`] entry: index 0 (`"depth"`) keeps the bare `track_name`, the
 /// rest are named `"{track_name}_{field}"` (e.g. `"{track_name}_ins"`).
 ///
-/// Every source's `Genome` is built from its own header and must
-/// checksum-match the rest (mirrors `from_d4`/`from_bigwig`). CRAM sources
+/// Every source header must list the same contigs in the same order
+/// (as in `from_d4` and `from_bigwig`). CRAM sources
 /// need `reference`; BAM sources ignore it. One source with no configured
 /// column dimension yields scalar tracks; otherwise the sources become the
 /// columns of cohort tracks, whose dimension name comes from
 /// `config.column_dim` and defaults to `"sample"`.
-pub fn from_bam(
-    store: &mut PbzStore,
+///
+/// A Dataset keeps its own reference, which the sources must match.
+/// A [`Target::Path`] that does not exist becomes a new store whose
+/// reference is the contig list of the sources.
+pub fn from_bam<'t>(
+    target: impl Into<Target<'t>>,
     track_name: &str,
     sources: &[Source],
     mode: ImportMode,
@@ -89,7 +91,7 @@ pub fn from_bam(
                         }
                         Err(e) => {
                             failed.store(true, std::sync::atomic::Ordering::Relaxed);
-                            let err = PbzError::Store(format!("open {}: {e}", s.path.display()));
+                            let err = crate::open_failed(&s.path, e);
                             errors.lock().expect("open errors poisoned").push((i, err));
                             return;
                         }
@@ -117,12 +119,15 @@ pub fn from_bam(
         })
         .collect();
 
-    let genome = shared_genome(&readers, sources)?;
-    debug!(
-        "bam import genome: {} contig(s), {} positions",
-        genome.contigs().len(),
-        genome.contigs().iter().map(|c| c.length).sum::<u64>()
-    );
+    crate::check_same_contigs("bam", &readers, sources)?;
+    if let Some(reader) = readers.first() {
+        let reference = reader.contigs();
+        debug!(
+            "bam import reference: {} contig(s), {} positions",
+            reference.len(),
+            reference.contigs().iter().map(|c| c.length).sum::<u64>()
+        );
+    }
 
     let names = track_names(track_name, mode);
     info!("bam import writes track(s) {names:?}");
@@ -141,57 +146,24 @@ pub fn from_bam(
             let cfg = config
                 .track_config(
                     Dtype::I32,
-                    Some(serde_json::json!(0)),
+                    Some(pbzarr::Fill::Value(serde_json::json!(0))),
                     column_labels.clone(),
                     "sample",
                 )
                 .description(describe_track(name, track_name, &filter))
                 .source(source_paths.clone());
-            (name.clone(), genome.clone(), cfg)
+            (name.clone(), cfg)
         })
         .collect();
 
-    let options = PipelineOptions {
-        workers: config.workers,
-        in_flight_spans: config.in_flight_spans,
-        decode_chunks: config.decode_chunks,
-        handle_budget: config.handle_budget,
-        progress: config.progress.clone(),
+    let mut axes = match mode {
+        ImportMode::Depth => Axes::default(),
+        ImportMode::Composition => Axes::default().fields_as_tracks(),
     };
-    let report = store.create_tracks_with(specs, move |tracks| {
-        let builder = Import::from_readers(readers)?;
-        let mut builder = match mode {
-            ImportMode::Depth => builder.into_track(tracks[0]),
-            ImportMode::Composition => builder.into_tracks(tracks).fields_as_tracks(),
-        };
-        if let Some(labels) = column_labels {
-            builder = builder.readers_as_columns().expect_column_labels(labels);
-        }
-        builder.options(options).run()
-    })?;
-    config.scale_tracks(store, &names)?;
-    Ok(report)
-}
-
-/// The genome shared by every source, taken from the first and required to
-/// match the rest by checksum (all files must describe the same reference).
-fn shared_genome(readers: &[BamReader], sources: &[Source]) -> Result<Genome> {
-    let genome = readers
-        .first()
-        .ok_or_else(|| PbzError::Metadata("bam import: no readers to derive a genome from".into()))?
-        .contigs()
-        .clone();
-    let checksum = genome.checksum();
-    for (reader, source) in readers.iter().zip(sources).skip(1) {
-        if reader.contigs().checksum() != checksum {
-            return Err(PbzError::Metadata(format!(
-                "bam import: {} genome differs from {}",
-                source.path.display(),
-                sources[0].path.display()
-            )));
-        }
+    if let Some(labels) = column_labels {
+        axes = axes.readers_as_columns(labels);
     }
-    Ok(genome)
+    target.into().import(specs, readers, axes, config)
 }
 
 /// Spec-required `description`: field name plus the filter settings that

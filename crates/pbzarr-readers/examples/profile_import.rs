@@ -2,7 +2,7 @@
 //!   cargo build --release --example profile_import
 //!   ./target/release/examples/profile_import \
 //!       --contigs 4 --length 50000000 --cols 8 \
-//!       --chunk-size 1000000 --workers 4
+//!       --chunk 65536 --shard 1024 --workers 4
 //!
 //! Profile with samply:
 //!   pixi global install samply  (or: cargo install samply)
@@ -11,9 +11,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use pbzarr::import::{Config, Import, PipelineOptions, Source};
+use pbzarr::import::{Config, Import, Source};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, Genome, PbzStore, TrackConfig};
+use pbzarr::{Contig, TrackConfig};
+use pbzarr::{Dataset, Reference};
 use pbzarr_readers::from_d4;
 use tempfile::TempDir;
 
@@ -22,14 +23,15 @@ struct Args {
     contigs: usize,
     length: u64,
     cols: usize,
-    chunk_size: usize,
-    column_chunk_size: usize,
-    shard_size: Option<usize>,
+    chunk: usize,
+    /// `None` (from `--unsharded`) writes one object per inner chunk.
+    shard: Option<usize>,
+    shard_columns: usize,
     workers: usize,
     keep: bool,
     out: Option<PathBuf>,
     /// If set, import using `D4Reader` against this file (replicated `cols` times).
-    /// Genome and `length` come from the d4 header.
+    /// Reference and `length` come from the d4 header.
     d4: Option<PathBuf>,
 }
 
@@ -39,9 +41,9 @@ impl Args {
             contigs: 4,
             length: 50_000_000,
             cols: 8,
-            chunk_size: 1_000_000,
-            column_chunk_size: 16,
-            shard_size: None,
+            chunk: pbzarr::DEFAULT_CHUNK,
+            shard: Some(pbzarr::DEFAULT_SHARD),
+            shard_columns: pbzarr::DEFAULT_SHARD_COLUMNS,
             workers: 4,
             keep: false,
             out: None,
@@ -53,9 +55,10 @@ impl Args {
                 "--contigs" => a.contigs = it.next().unwrap().parse().unwrap(),
                 "--length" => a.length = it.next().unwrap().parse().unwrap(),
                 "--cols" => a.cols = it.next().unwrap().parse().unwrap(),
-                "--chunk-size" => a.chunk_size = it.next().unwrap().parse().unwrap(),
-                "--column-chunk-size" => a.column_chunk_size = it.next().unwrap().parse().unwrap(),
-                "--shard-size" => a.shard_size = Some(it.next().unwrap().parse().unwrap()),
+                "--chunk" => a.chunk = it.next().unwrap().parse().unwrap(),
+                "--shard" => a.shard = Some(it.next().unwrap().parse().unwrap()),
+                "--shard-columns" => a.shard_columns = it.next().unwrap().parse().unwrap(),
+                "--unsharded" => a.shard = None,
                 "--workers" => a.workers = it.next().unwrap().parse().unwrap(),
                 "--keep" => a.keep = true,
                 "--out" => a.out = Some(PathBuf::from(it.next().unwrap())),
@@ -63,7 +66,7 @@ impl Args {
                 "-h" | "--help" => {
                     eprintln!(
                         "usage: profile_import [--contigs N] [--length L] [--cols C] \
-                         [--chunk-size N] [--column-chunk-size N] [--shard-size N] \
+                         [--chunk N] [--shard N] [--shard-columns N] [--unsharded] \
                          [--workers W] [--keep] [--out PATH]"
                     );
                     std::process::exit(0);
@@ -79,13 +82,13 @@ impl Args {
 /// Pattern defeats trivial compression but is cheap to compute, so the cost
 /// stays on the writer (encode + IO) rather than the reader.
 struct SynthReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     seed: u32,
 }
 
 impl SynthReader {
-    fn new(genome: Genome, seed: u32) -> Self {
+    fn new(genome: Reference, seed: u32) -> Self {
         Self {
             genome,
             schema: OutputSchema::single("depth", Dtype::U32),
@@ -95,7 +98,7 @@ impl SynthReader {
 }
 
 impl ValueReader for SynthReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
 
@@ -139,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("config: {args:?}");
 
     // For --d4 mode, override the synthetic contigs with the d4 file's genome.
-    let (genome, total_length): (Genome, u64) = if let Some(ref d4) = args.d4 {
+    let (genome, total_length): (Reference, u64) = if let Some(ref d4) = args.d4 {
         let r = pbzarr_readers::D4Reader::open(d4)?;
         let g = r.contigs().clone();
         let total: u64 = g.contigs().iter().map(|c| c.length).sum();
@@ -151,7 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 length: args.length,
             })
             .collect();
-        let g = Genome::new(contigs)?;
+        let g = Reference::new(contigs)?;
         let total: u64 = g.contigs().iter().map(|c| c.length).sum();
         (g, total)
     };
@@ -163,43 +166,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .unwrap_or_else(|| tmp.path().join("profile.pbz"));
 
-    let mut store = PbzStore::create(&path)?;
+    let mut dataset = Dataset::create(&path, genome.clone())?;
 
     let import_cfg = Config {
         workers: args.workers,
-        chunk_size: Some(args.chunk_size),
-        column_chunk_size: Some(args.column_chunk_size),
-        shard_size: args.shard_size,
+        chunk: args.chunk,
+        shard: args.shard,
+        shard_columns: args.shard_columns,
         ..Config::default()
     };
 
     let t0 = Instant::now();
     let report = if let Some(ref d4) = args.d4 {
-        // `from_d4` builds the genome and creates the (int32) track itself.
-        let sources: Vec<Source> = (0..args.cols).map(|_| Source::new(d4.clone())).collect();
-        from_d4(&mut store, "depth", &sources, import_cfg)?
+        // `from_d4` creates the (int32) track itself.
+        let sources: Vec<Source> = (0..args.cols)
+            .map(|i| Source::labeled(d4.clone(), format!("s{i}")))
+            .collect();
+        from_d4(&mut dataset, "depth", &sources, import_cfg)?
     } else {
-        // Synth path: create the u32 track ourselves, then drive the pipeline.
         let column_names: Vec<String> = (0..args.cols).map(|i| format!("s{i}")).collect();
         let mut cfg = TrackConfig::new(Dtype::U32)
             .columns(column_names)
             .column_dim("sample")
-            .chunk_size(args.chunk_size)
-            .column_chunk_size(args.column_chunk_size);
-        if let Some(s) = args.shard_size {
-            cfg = cfg.shard_size(s);
-        }
-        store.create_track("depth", genome.clone(), cfg)?;
+            .chunk(args.chunk)
+            .shard_columns(args.shard_columns);
+        cfg.shard = args.shard;
         let readers: Vec<SynthReader> = (0..args.cols)
             .map(|i| SynthReader::new(genome.clone(), 0x9E3779B9u32.wrapping_mul(i as u32 + 1)))
             .collect();
-        let track = store.track("depth").unwrap();
         Import::from_readers(readers)?
-            .into_track(track)
+            .into_dataset(&mut dataset, vec![("depth".into(), cfg)])
             .readers_as_columns()
-            .options(PipelineOptions {
+            .config(Config {
                 workers: args.workers,
-                ..PipelineOptions::default()
+                ..Config::default()
             })
             .run()?
     };
@@ -209,8 +209,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let per_contig_total: u64 = genome.contigs().iter().map(|c| c.length).sum();
     let logical_bytes = (per_contig_total as usize) * args.cols * std::mem::size_of::<u32>();
     println!(
-        "imported {} contigs, {} tasks, {} logical bytes, wall {:.2}s",
-        report.contigs_written, report.tasks_completed, logical_bytes, secs,
+        "imported {} positions, {} chunks, {} logical bytes, wall {:.2}s",
+        report.positions, report.chunks_written, logical_bytes, secs,
     );
     println!(
         "  throughput (logical): {}",

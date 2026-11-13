@@ -4,7 +4,7 @@
 //! dtype-erased [`OutputSchema`] and fills one [`OutputSinkMut`] per schema
 //! field in a single decode pass.
 
-use crate::genome::Genome;
+use crate::dataset::Reference;
 use crate::io::dtype::Dtype;
 use crate::io::error::ReaderError;
 use ndarray::ArrayViewMut1;
@@ -44,14 +44,10 @@ impl OutputSchema {
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
     }
-
-    pub fn dtypes(&self) -> Vec<Dtype> {
-        self.fields.iter().map(|f| f.dtype).collect()
-    }
 }
 
 macro_rules! output_sink {
-    ($( $variant:ident => $ty:ty, $as_mut:ident );* $(;)?) => {
+    ($( $variant:ident => $ty:ty $(, $as_mut:ident)? );* $(;)?) => {
         /// A borrowing, dtype-tagged mutable view a reader fills.
         pub enum OutputSinkMut<'a> {
             $( $variant(ArrayViewMut1<'a, $ty>), )*
@@ -74,7 +70,7 @@ macro_rules! output_sink {
                 self.len() == 0
             }
 
-            $(
+            $($(
                 /// `SchemaMismatch` when the sink holds a different dtype.
                 pub fn $as_mut(&mut self) -> Result<&mut ArrayViewMut1<'a, $ty>, ReaderError> {
                     match self {
@@ -88,20 +84,22 @@ macro_rules! output_sink {
                         }),
                     }
                 }
-            )*
+            )?)*
         }
     };
 }
 
 output_sink! {
-    U8 => u8, as_u8_mut;
-    U16 => u16, as_u16_mut;
+    U8 => u8;
+    U16 => u16;
     U32 => u32, as_u32_mut;
-    I8 => i8, as_i8_mut;
-    I16 => i16, as_i16_mut;
+    U64 => u64;
+    I8 => i8;
+    I16 => i16;
     I32 => i32, as_i32_mut;
+    I64 => i64;
     F32 => f32, as_f32_mut;
-    F64 => f64, as_f64_mut;
+    F64 => f64;
     Bool => bool, as_bool_mut;
 }
 
@@ -121,7 +119,7 @@ pub trait WindowSink {
 /// its file handles and decode buffers directly, with no internal `Mutex`.
 pub trait ValueReader: Send + Sized {
     /// Contigs present in the source, with lengths.
-    fn contigs(&self) -> &Genome;
+    fn contigs(&self) -> &Reference;
 
     fn output_schema(&self) -> &OutputSchema;
 
@@ -138,20 +136,15 @@ pub trait ValueReader: Send + Sized {
         outputs: &mut [OutputSinkMut<'_>],
     ) -> Result<(), ReaderError>;
 
-    /// Cheap pre-check: could this reader have any data in `[start, end)`?
-    /// A sparse source returns `false` so the engine can skip whole buffers.
-    fn may_have_data(&self, _contig: &str, _start: u64, _end: u64) -> bool {
-        true
-    }
-
     /// A worker-local handle. Shared state (index, header) is reused through
     /// `Arc`; per-thread state (file handle, decode buffers) is reallocated.
     fn fork(&self) -> Result<Self, ReaderError>;
 
     /// Decode `[start, end)` as consecutive windows split at `cuts`
     /// (ascending, strictly inside the range), calling `sink` per window in
-    /// order. The default probes and reads one window at a time; a reader
-    /// that can open the range once and stream should override it.
+    /// order. The default reads one window at a time and reports each one
+    /// as covered. A reader that can open the range once and stream, or
+    /// that knows which windows hold no data, should override it.
     fn read_windows(
         &mut self,
         contig: &str,
@@ -165,12 +158,9 @@ pub trait ValueReader: Send + Sized {
             if hi <= lo {
                 continue;
             }
-            let covered = self.may_have_data(contig, lo, hi);
-            if covered {
-                let mut outputs = sink.sinks(lo, hi)?;
-                self.read_into(contig, lo, hi, &mut outputs)?;
-            }
-            sink.done(lo, hi, covered)?;
+            let mut outputs = sink.sinks(lo, hi)?;
+            self.read_into(contig, lo, hi, &mut outputs)?;
+            sink.done(lo, hi, true)?;
             lo = hi;
         }
         Ok(())
@@ -196,8 +186,7 @@ mod tests {
         assert_eq!(buf[2], 7);
     }
 
-    /// The default `read_windows` visits every window in order, probes each
-    /// one, and reads only the covered ones.
+    /// The default `read_windows` reads every window once, in order.
     #[test]
     fn default_read_windows_visits_each_window_once() {
         struct Log(Vec<(u64, u64, bool)>, Vec<i32>);
@@ -217,9 +206,9 @@ mod tests {
                 Ok(())
             }
         }
-        struct Half; // covers [0, 10) only
-        impl ValueReader for Half {
-            fn contigs(&self) -> &Genome {
+        struct Ones;
+        impl ValueReader for Ones {
+            fn contigs(&self) -> &Reference {
                 unimplemented!()
             }
             fn output_schema(&self) -> &OutputSchema {
@@ -228,35 +217,23 @@ mod tests {
             fn read_into(
                 &mut self,
                 _: &str,
-                start: u64,
-                end: u64,
+                _start: u64,
+                _end: u64,
                 outputs: &mut [OutputSinkMut<'_>],
             ) -> Result<(), ReaderError> {
-                assert!(
-                    end <= 10,
-                    "read_into called on an uncovered window {start}..{end}"
-                );
                 outputs[0].as_i32_mut()?.fill(1);
                 Ok(())
             }
-            fn may_have_data(&self, _: &str, start: u64, _end: u64) -> bool {
-                start < 10
-            }
             fn fork(&self) -> Result<Self, ReaderError> {
-                Ok(Half)
+                Ok(Ones)
             }
         }
         let mut log = Log(Vec::new(), Vec::new());
-        Half.read_windows("c", 2, 18, &[5, 10, 15], &mut log)
+        Ones.read_windows("c", 2, 18, &[5, 10, 15], &mut log)
             .unwrap();
         assert_eq!(
             log.0,
-            vec![
-                (2, 5, true),
-                (5, 10, true),
-                (10, 15, false),
-                (15, 18, false)
-            ]
+            vec![(2, 5, true), (5, 10, true), (10, 15, true), (15, 18, true)]
         );
     }
 }

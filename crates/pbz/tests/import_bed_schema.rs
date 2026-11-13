@@ -1,11 +1,12 @@
+// One range per axis; the single-range reads are rank-one selections.
+#![allow(clippy::single_range_in_vec_init)]
 mod common;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use common::{run_pbz, write_bed_bgzip_tabix};
-use pbzarr::io::Dtype;
-use pbzarr::{PbzStore, Region};
+use pbzarr::Dataset;
 use tempfile::TempDir;
 
 fn write_genome(dir: &Path) -> PathBuf {
@@ -24,13 +25,12 @@ fn import_args(
     let mut args = vec![
         "import".into(),
         "bed".into(),
-        "--output".into(),
         output.as_os_str().to_owned(),
         "--genome".into(),
         genome.as_os_str().to_owned(),
         "--schema".into(),
         schema.as_os_str().to_owned(),
-        "--column-dim".into(),
+        "--dim".into(),
         column_dim.into(),
         "--infer-rows".into(),
         "all".into(),
@@ -70,21 +70,16 @@ fn grouped_schema_one_source_creates_an_ordered_bed_column_axis() {
         String::from_utf8_lossy(&command.stderr)
     );
 
-    let store = PbzStore::open(&output).unwrap();
-    let track = store.track("stats").unwrap();
-    assert_eq!(track.rank(), 2);
-    assert_eq!(track.dtype(), Dtype::U16);
-    assert_eq!(track.column_dim(), Some("metric"));
+    let dataset = Dataset::open(&output).unwrap();
+    let stats = &dataset.variables()["stats"];
+    assert_eq!(stats.dims, vec!["position".to_owned(), "metric".to_owned()]);
+    assert_eq!(stats.shape, vec![8, 2]);
+    let labels = dataset.read_raw::<String>("metric", &[0..2]).unwrap();
     assert_eq!(
-        track.column_labels().unwrap(),
+        labels.iter().cloned().collect::<Vec<_>>(),
         vec!["mapq".to_owned(), "cov".to_owned()]
     );
-    let region = Region {
-        contig: store.genome_for("stats").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
-    let values = track.read_region::<u16>(&region).unwrap();
+    let values = dataset.read_raw::<u16>("stats", &[0..8, 0..2]).unwrap();
     assert_eq!(values.shape(), &[8, 2]);
     assert_eq!(
         values.iter().copied().collect::<Vec<_>>(),
@@ -125,71 +120,29 @@ fn unique_schema_two_sources_infers_across_sources_and_keeps_source_labels() {
         String::from_utf8_lossy(&command.stderr)
     );
 
-    let store = PbzStore::open(&output).unwrap();
-    for (name, dtype) in [("mapping", Dtype::U8), ("coverage", Dtype::U32)] {
-        let track = store.track(name).unwrap();
-        assert_eq!(track.rank(), 2);
-        assert_eq!(track.dtype(), dtype);
-        assert_eq!(track.column_dim(), Some("sample"));
-        assert_eq!(
-            track.column_labels().unwrap(),
-            vec!["tumor".to_owned(), "normal".to_owned()]
-        );
+    let dataset = Dataset::open(&output).unwrap();
+    for name in ["mapping", "coverage"] {
+        let info = &dataset.variables()[name];
+        assert_eq!(info.dims, vec!["position".to_owned(), "sample".to_owned()]);
+        assert_eq!(info.shape, vec![8, 2]);
     }
-    let region = Region {
-        contig: store.genome_for("coverage").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
-    let coverage = store
-        .track("coverage")
-        .unwrap()
-        .read_region::<u32>(&region)
-        .unwrap();
+    let labels = dataset.read_raw::<String>("sample", &[0..2]).unwrap();
+    assert_eq!(
+        labels.iter().cloned().collect::<Vec<_>>(),
+        vec!["tumor".to_owned(), "normal".to_owned()]
+    );
+    let coverage = dataset.read_raw::<u32>("coverage", &[0..8, 0..2]).unwrap();
     assert_eq!(coverage.shape(), &[8, 2]);
     assert_eq!(
         coverage.iter().copied().collect::<Vec<_>>(),
         [4, 70_000].repeat(8)
     );
-    let mapping = store
-        .track("mapping")
-        .unwrap()
-        .read_region::<u8>(&region)
-        .unwrap();
+    let mapping = dataset.read_raw::<u8>("mapping", &[0..8, 0..2]).unwrap();
     assert_eq!(mapping.shape(), &[8, 2]);
     assert_eq!(
         mapping.iter().copied().collect::<Vec<_>>(),
         [60, 30].repeat(8)
     );
-}
-
-#[test]
-fn dry_run_prints_plan_and_estimate_without_creating_the_store() {
-    let dir = TempDir::new().unwrap();
-    let bed = write_bed_bgzip_tabix(
-        dir.path(),
-        "wide",
-        &["chrom", "start", "end", "cov", "mapq"],
-        &[("chr1", 0, 4, &["4", "60"]), ("chr1", 4, 8, &["9", "30"])],
-    );
-    let genome = write_genome(dir.path());
-    let schema = dir.path().join("schema.tsv");
-    std::fs::write(&schema, "mapq\tmapping\tuint16\ncov\tcoverage\tuint16\n").unwrap();
-    let output = dir.path().join("dry.pbz");
-
-    let mut args = import_args(&output, &genome, &schema, "metric", [bed.into_os_string()]);
-    args.push("--dry-run".into());
-    let command = run_pbz(args);
-    assert!(
-        command.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&command.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&command.stdout);
-    assert!(stdout.contains("track mapping"), "{stdout}");
-    assert!(stdout.contains("track coverage"), "{stdout}");
-    assert!(stdout.contains("tasks/worker"), "{stdout}");
-    assert!(!output.exists(), "dry run created the output store");
 }
 
 #[test]
@@ -262,7 +215,6 @@ fn out_of_range_numeric_schema_selector_reports_the_original_one_based_column() 
     let command = run_pbz([
         "import".into(),
         "bed".into(),
-        "--output".into(),
         output.as_os_str().to_owned(),
         "--genome".into(),
         genome.into_os_string(),
@@ -301,7 +253,6 @@ fn out_of_range_numeric_schema_selector_during_inference_is_one_based() {
     let command = run_pbz([
         "import".into(),
         "bed".into(),
-        "--output".into(),
         output.as_os_str().to_owned(),
         "--genome".into(),
         genome.into_os_string(),
@@ -341,7 +292,6 @@ fn overflowing_numeric_schema_selector_is_not_treated_as_a_header_name() {
     let command = run_pbz([
         "import".into(),
         "bed".into(),
-        "--output".into(),
         output.as_os_str().to_owned(),
         "--genome".into(),
         genome.into_os_string(),
@@ -383,7 +333,6 @@ fn invalid_schema_target_track_names_fail_before_output_creation() {
         let command = run_pbz([
             "import".into(),
             "bed".into(),
-            "--output".into(),
             output.as_os_str().to_owned(),
             "--genome".into(),
             genome.as_os_str().to_owned(),
@@ -432,9 +381,50 @@ fn schema_help_describes_unique_and_grouped_target_tracks() {
     assert!(help.contains("Unique target"), "{help}");
     assert!(help.contains("single BED-column-axis track"), "{help}");
     assert!(
-        help.contains("BED column, target track, inferred dtype"),
+        help.contains("BED column, target track, inferred dtype, fill"),
         "{help}"
     );
-    assert!(help.contains("-c metric --schema schema.tsv"), "{help}");
+    assert!(help.contains("--dim metric --schema schema.tsv"), "{help}");
     assert!(!help.contains("own scalar track"), "{help}");
+}
+
+#[test]
+fn schema_fill_column_sets_the_fill_of_each_track() {
+    let dir = TempDir::new().unwrap();
+    let bed = write_bed_bgzip_tabix(
+        dir.path(),
+        "gaps",
+        &["chrom", "start", "end", "cov", "mapq"],
+        &[("chr1", 0, 4, &["4", "60"])],
+    );
+    let emitted = common::stdout_of(&run_pbz([
+        "import".into(),
+        "bed".into(),
+        "--emit-schema".into(),
+        bed.clone().into_os_string(),
+    ]));
+    assert!(emitted.contains("cov\tcov\tuint8\tna\n"), "{emitted}");
+
+    let genome = write_genome(dir.path());
+    let schema = dir.path().join("schema.tsv");
+    std::fs::write(&schema, "cov\tcov\tint32\t0\nmapq\n").unwrap();
+    let output = dir.path().join("gaps.pbz");
+    let mut args = import_args(&output, &genome, &schema, "sample", [bed.into_os_string()]);
+    args.retain(|arg| arg != "--dim" && arg != "sample");
+    common::stdout_of(&run_pbz(args));
+
+    let dataset = Dataset::open(&output).unwrap();
+    let cov = dataset.read_raw::<i32>("cov", &[0..8]).unwrap();
+    assert_eq!(
+        cov.iter().copied().collect::<Vec<_>>(),
+        [4, 4, 4, 4, 0, 0, 0, 0]
+    );
+    let attrs = |name: &str| dataset.variables()[name].metadata["attributes"].clone();
+    assert!(attrs("cov")["_FillValue"].is_null());
+    let mapq = dataset.read_raw::<u8>("mapq", &[0..8]).unwrap();
+    assert_eq!(
+        mapq.iter().copied().collect::<Vec<_>>(),
+        [60, 60, 60, 60, 255, 255, 255, 255]
+    );
+    assert_eq!(attrs("mapq")["_FillValue"], 255);
 }

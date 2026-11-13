@@ -66,7 +66,7 @@ impl ImportMode {
 
 /// Contiguous per-field scratch for one walk window, `(n_fields, window_len)`.
 /// Depth mode allocates a single field; composition mode allocates all of
-/// [`FIELDS`]. Reused across windows via [`Accumulators::reset`].
+/// [`FIELDS`]. Sized per window by [`Accumulators::reset`].
 pub struct Accumulators {
     pub fields: Vec<Vec<i32>>,
 }
@@ -82,6 +82,13 @@ impl Accumulators {
         for field in &mut self.fields {
             field.clear();
             field.resize(window_len, 0);
+        }
+    }
+
+    /// Frees every field's buffer and keeps the field count.
+    pub fn release(&mut self) {
+        for field in &mut self.fields {
+            *field = Vec::new();
         }
     }
 }

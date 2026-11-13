@@ -4,9 +4,10 @@
 //!
 //! Usage: cargo run --release -p pbzarr --example import_threads -- <out.pbz> [workers]
 
-use pbzarr::import::{Import, PipelineOptions};
+use pbzarr::import::{Config, Import};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ReaderError, ValueReader};
-use pbzarr::{Contig, ExplicitArraySpec, Genome, PbzStore, TrackConfig};
+use pbzarr::{Contig, ExplicitArraySpec, TrackConfig};
+use pbzarr::{Dataset, Reference};
 
 const SPEC: &str = r#"{
   "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1048576, 8]}},
@@ -23,13 +24,13 @@ const SPEC: &str = r#"{
 /// Depth-like values that cost a fixed amount of CPU per position to decode.
 #[derive(Clone)]
 struct BusyReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     seed: u64,
 }
 
 impl ValueReader for BusyReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
 
@@ -71,19 +72,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("usage: import_threads <out.pbz> [workers]")?;
     let workers: usize = args.next().map_or(Ok(4), |s| s.parse())?;
     let samples = 16;
-    let genome = Genome::new(vec![Contig {
+    let genome = Reference::new(vec![Contig {
         name: "chr1".into(),
         length: 24_000_000,
     }])?;
-    let mut store = PbzStore::create(&path)?;
-    store.create_track(
-        "depth",
-        genome.clone(),
-        TrackConfig::new(Dtype::U32)
-            .columns((0..samples).map(|i| format!("s{i}")).collect())
-            .column_dim("sample")
-            .codecs(ExplicitArraySpec::parse(SPEC)?),
-    )?;
+    let mut dataset = Dataset::create(&path, genome.clone())?;
+    let config = TrackConfig::new(Dtype::U32)
+        .columns((0..samples).map(|i| format!("s{i}")).collect())
+        .column_dim("sample")
+        .codecs(ExplicitArraySpec::parse(SPEC)?);
     let readers = (0..samples as u64)
         .map(|seed| BusyReader {
             genome: genome.clone(),
@@ -92,11 +89,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     Import::from_readers(readers)?
-        .into_track(store.track("depth").ok_or("no depth track")?)
+        .into_dataset(&mut dataset, vec![("depth".into(), config)])
         .readers_as_columns()
-        .options(PipelineOptions {
+        .config(Config {
             workers,
-            ..PipelineOptions::default()
+            ..Config::default()
         })
         .run()?;
     Ok(())

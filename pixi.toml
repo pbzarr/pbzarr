@@ -9,6 +9,13 @@ platforms = ["osx-arm64", "osx-64", "linux-64"]
 rust = "1.93.0.*"
 pkg-config = "0.29.2.*"
 
+# The conda rust package links with the conda toolchain, so C code in build
+# scripts must use the conda compilers too: a newer system glibc (for example
+# Ubuntu 26.04 on CI) leaves symbols such as __isoc23_strtol unresolved.
+[target.linux-64.dependencies]
+c-compiler = "2.0.0.*"
+cxx-compiler = "2.0.0.*"
+
 [tasks]
 build = "cargo build --workspace"
 build-release = "cargo build --workspace --release"
@@ -19,50 +26,67 @@ fmt-check = "cargo fmt --all -- --check"
 check = { depends-on = ["fmt-check", "clippy", "test"] }
 clean = "cargo clean"
 doc = "cargo doc --workspace --no-deps --open"
+docs-cli = { cmd = "cargo test -p pbz --test cli_reference", env = { UPDATE_CLI_DOCS = "1" } }
 
 # --- fixtures feature: tools for regenerating the committed fixtures/ tree ---
 [feature.fixtures.dependencies]
 d4tools = ">=0.3.11.post0,<0.4"
 samtools = ">=1.24,<1.25"
+python = ">=3.12,<3.13"
+
+# pybigtools writes the .bw fixtures. It has no conda package, so it comes
+# from PyPI.
+[feature.fixtures.pypi-dependencies]
+pybigtools = ">=0.3,<0.4"
 
 [feature.fixtures.tasks]
 regen-fixtures = "bash scripts/regen_fixtures.sh"
 
 # --- validate feature: cross-language xarray round-trip ---
 [feature.validate.dependencies]
-python = ">=3.11,<3.13"
-xarray = ">=2025.8,<2026"
-zarr = ">=3.0,<4"
-numpy = ">=2.0,<3"
+python = ">=3.12,<3.13"
+xarray = ">=2025.12.0,<2026"
+zarr = ">=3.2.1,<4"
+numpy = ">=2.4.5,<3"
+dask-core = ">=2026.8.0"
+pandas = ">=3.0.3"
+pcodec = ">=1.1.0,<2"
 
 [feature.validate.tasks]
 validate-roundtrip = "python scripts/validate_xarray_read.py"
+validate-dataset = "python scripts/validate_dataset.py"
 
 # --- wheel feature: build + install + test the Python wheel ---
 [feature.wheel.dependencies]
-maturin = ">=1.4,<2"
+maturin = ">=1.13,<2"
 pip = ">=24"
 pytest = ">=8"
-flox = ">=0.9,<0.11"
-
-# pybigtools synthesizes .bw fixtures for the bigwig import test (no conda
-# package, so it comes in via PyPI). pysam synthesizes BAM fixtures for the
-# bam import test.
-[feature.wheel.pypi-dependencies]
-pybigtools = ">=0.3,<0.4"
-pysam = ">=0.22,<0.23"
 
 [feature.wheel.tasks]
 build-wheel = "maturin build --release"
 install-wheel = "maturin develop --release"
 test-py = "pytest python/tests -v"
+wheel-test = "bash scripts/wheel_test.sh"
 
 # --- example feature: notebooks under python/examples ---
 [feature.example.dependencies]
 ipykernel = ">=7.2.0,<8"
+
+# --- docs feature: the user docs site ---
+[feature.docs.dependencies]
+python = ">=3.12,<3.13"
+
+[feature.docs.pypi-dependencies]
+zensical = ">=0.1.1,<0.2"
+mkdocstrings-python = ">=2.0.11,<3"
+
+[feature.docs.tasks]
+docs-serve = "zensical serve"
+docs-build = "zensical build --clean"
 
 # --- environments ---
 [environments]
 default = { features = ["validate", "wheel"], solve-group = "default" }
 fixtures = { features = ["fixtures"], solve-group = "default" }
 example = { features = ["validate", "wheel", "example"], solve-group = "default" }
+docs = { features = ["docs"], solve-group = "default" }

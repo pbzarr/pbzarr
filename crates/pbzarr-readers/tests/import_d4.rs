@@ -1,10 +1,11 @@
 //! End-to-end: import the committed d4 fixtures under `fixtures/d4/` via
-//! `import::from_d4`, read back via `Track::read_region`.
+//! `import::from_d4`, read back via `Dataset::read_region`.
 
 use std::path::{Path, PathBuf};
 
+use ndarray::ArrayD;
+use pbzarr::Dataset;
 use pbzarr::import::{Config, Source};
-use pbzarr::{PbzStore, Region};
 use pbzarr_readers::{D4Reader, from_d4};
 use tempfile::TempDir;
 
@@ -12,6 +13,13 @@ fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/d4")
         .join(name)
+}
+
+fn read(store: &Path, region: &str) -> ArrayD<i32> {
+    Dataset::open(store)
+        .unwrap()
+        .read_region::<i32>("depth", &region.parse().unwrap())
+        .unwrap()
 }
 
 /// Sharded/unsharded equivalence for a 2D cohort track: three distinct-valued
@@ -24,76 +32,61 @@ fn sharded_cohort_import_matches_unsharded() {
     let sources: Vec<Source> = (0..3)
         .map(|i| Source::labeled(fixture(&format!("cohort_s{i}.d4")), format!("s{i}")))
         .collect();
-    let region = |store: &PbzStore| Region {
-        contig: store.genome_for("depth").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 10_000,
-    };
 
-    let plain_path = dir.path().join("plain.pbz");
-    let mut plain = PbzStore::create(&plain_path).unwrap();
+    let plain = dir.path().join("plain.pbz");
     from_d4(
-        &mut plain,
+        plain.as_path(),
         "depth",
         &sources,
         Config {
-            chunk_size: Some(1_000),
+            chunk: 1_000,
+            shard: None,
             ..Config::default()
         },
     )
     .unwrap();
 
-    let sharded_path = dir.path().join("sharded.pbz");
-    let mut sharded = PbzStore::create(&sharded_path).unwrap();
+    let sharded = dir.path().join("sharded.pbz");
     from_d4(
-        &mut sharded,
+        sharded.as_path(),
         "depth",
         &sources,
         Config {
             workers: 4,
-            chunk_size: Some(1_000),
-            shard_size: Some(4_000),
+            chunk: 1_000,
+            shard: Some(4),
             ..Config::default()
         },
     )
     .unwrap();
 
-    let plain_data = plain
-        .track("depth")
-        .unwrap()
-        .read_region::<i32>(&region(&plain))
-        .unwrap();
-    let sharded_data = sharded
-        .track("depth")
-        .unwrap()
-        .read_region::<i32>(&region(&sharded))
-        .unwrap();
+    let plain_data = read(&plain, "chr1");
+    let sharded_data = read(&sharded, "chr1");
+    assert_eq!(plain_data.shape(), [10_000, 3]);
     assert_eq!(plain_data, sharded_data);
     // Sanity: the three columns really do differ (offsets applied).
     assert_ne!(sharded_data[[0, 0]], sharded_data[[0, 1]]);
     // A multi-source import defaults the column axis to "sample".
-    assert_eq!(plain.track("depth").unwrap().column_dim(), Some("sample"));
+    assert_eq!(
+        Dataset::open(&plain).unwrap().variables()["depth"].dims,
+        ["position", "sample"]
+    );
 }
 
 #[test]
 fn import_one_d4_into_scalar_track() {
     let dir = TempDir::new().unwrap();
-    let d4 = fixture("banded_1k.d4");
+    let store = dir.path().join("out.pbz");
+    from_d4(
+        store.as_path(),
+        "depth",
+        &[Source::new(fixture("banded_1k.d4"))],
+        Config::default(),
+    )
+    .unwrap();
 
-    let store_path = dir.path().join("out.pbz");
-    let mut store = PbzStore::create(&store_path).unwrap();
-    from_d4(&mut store, "depth", &[Source::new(d4)], Config::default()).unwrap();
-
-    let track = store.track("depth").unwrap();
-    assert_eq!(track.rank(), 1);
-    let region = Region {
-        contig: store.genome_for("depth").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 1_000,
-    };
-    let got = track.read_region::<i32>(&region).unwrap();
-    let arr = got.into_dimensionality::<ndarray::Ix1>().unwrap();
-
+    let arr = read(&store, "chr1:0-1000");
+    assert_eq!(arr.shape(), [1_000]);
     for i in 0..100u32 {
         let v: i32 = ((i % 50) + 1) as i32;
         for p in (i * 10)..((i + 1) * 10) {
@@ -103,51 +96,43 @@ fn import_one_d4_into_scalar_track() {
 }
 
 /// A multi-contig d4 imports each contig's data under the right name, even when
-/// the file orders contigs unusually. The track genome is built from the d4
-/// header, and the pipeline resolves each task's flat range back to a contig
-/// name before handing it to the reader.
+/// the file orders contigs unusually. The pipeline resolves each task's flat
+/// range back to a contig name before handing it to the reader.
 #[test]
 fn import_d4_multi_contig_writes_correct_contigs() {
     let dir = TempDir::new().unwrap();
     // Fixture has chr2 first, chr1 second. chr2 values: 100. chr1 values: 7.
-    let d4_path = fixture("multi_contig.d4");
-
-    let store_path = dir.path().join("out.pbz");
-    let mut store = PbzStore::create(&store_path).unwrap();
+    let store = dir.path().join("out.pbz");
     from_d4(
-        &mut store,
+        store.as_path(),
         "depth",
-        &[Source::new(d4_path)],
+        &[Source::new(fixture("multi_contig.d4"))],
         Config::default(),
     )
     .unwrap();
 
-    let genome = store.genome_for("depth").unwrap();
-    let chr1 = store
-        .track("depth")
-        .unwrap()
-        .read_region::<i32>(&Region {
-            contig: genome.id("chr1").unwrap(),
-            start: 0,
-            end: 300,
-        })
-        .unwrap()
-        .into_dimensionality::<ndarray::Ix1>()
-        .unwrap();
-    let chr2 = store
-        .track("depth")
-        .unwrap()
-        .read_region::<i32>(&Region {
-            contig: genome.id("chr2").unwrap(),
-            start: 0,
-            end: 500,
-        })
-        .unwrap()
-        .into_dimensionality::<ndarray::Ix1>()
-        .unwrap();
-
+    let chr1 = read(&store, "chr1");
+    let chr2 = read(&store, "chr2");
     assert!(chr1.iter().all(|&v| v == 7), "chr1 should have value 7");
     assert!(chr2.iter().all(|&v| v == 100), "chr2 should have value 100");
+}
+
+#[test]
+fn sources_with_different_contigs_leave_no_store() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("out.pbz");
+    let sources = [
+        Source::labeled(fixture("banded_1k.d4"), "a"),
+        Source::labeled(fixture("multi_contig.d4"), "b"),
+    ];
+    let err = from_d4(store.as_path(), "depth", &sources, Config::default())
+        .err()
+        .expect("sources with different contigs must be refused");
+    assert!(
+        err.to_string().contains("differ"),
+        "unexpected error: {err}"
+    );
+    assert!(!store.exists(), "a refused import created {store:?}");
 }
 
 /// Fix-point (non-integral) d4 files are rejected at open time.

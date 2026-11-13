@@ -17,11 +17,8 @@ fn open_reads_header_genome_and_fetch_visits_records() {
     })
     .unwrap();
     assert_eq!(n, 9);
-    assert!(b.has_records("ref1", 0, 100).unwrap());
-    assert!(!b.has_records("ref2", 0, 60).unwrap());
 
     // A zero-width window is empty, not an error.
-    assert!(!b.has_records("ref1", 10, 10).unwrap());
     let mut n = 0;
     b.fetch("ref1", 10, 10, &mut |_| {
         n += 1;
@@ -59,7 +56,6 @@ fn misnamed_cram_as_bam_extension_still_opens_as_cram() {
     assert_eq!(n, 9);
 
     // A zero-width window is empty, not an error, on the CRAM arm too.
-    assert!(!b.has_records("ref1", 10, 10).unwrap());
     let mut n = 0;
     b.fetch("ref1", 10, 10, &mut |_| {
         n += 1;

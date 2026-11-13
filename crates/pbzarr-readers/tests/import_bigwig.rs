@@ -1,10 +1,13 @@
 //! End-to-end: synthesize small bigWig files in-process (see `tests/common`),
-//! import via `from_bigwig`, read back via `Track::read_region`.
+//! import via `from_bigwig`, read back via `Dataset::read_region`.
 
 mod common;
 
+use std::path::Path;
+
+use ndarray::ArrayD;
+use pbzarr::Dataset;
 use pbzarr::import::{Config, Source};
-use pbzarr::{PbzStore, Region};
 use pbzarr_readers::from_bigwig;
 use tempfile::TempDir;
 
@@ -13,6 +16,13 @@ fn banded(chrom: &str, len: u32, base: f32) -> Vec<(&str, u32, u32, f32)> {
     (0..(len / 10))
         .map(|i| (chrom, i * 10, (i + 1) * 10, ((i % 50) + 1) as f32 + base))
         .collect()
+}
+
+fn read(store: &Path) -> ArrayD<f32> {
+    Dataset::open(store)
+        .unwrap()
+        .read_region::<f32>("signal", &"chr1".parse().unwrap())
+        .unwrap()
 }
 
 #[test]
@@ -26,20 +36,18 @@ fn import_one_bigwig_into_scalar_track() {
         false,
     );
 
-    let store_path = dir.path().join("out.pbz");
-    let mut store = PbzStore::create(&store_path).unwrap();
-    from_bigwig(&mut store, "signal", &[Source::new(bw)], Config::default()).unwrap();
+    let store = dir.path().join("out.pbz");
+    from_bigwig(
+        store.as_path(),
+        "signal",
+        &[Source::new(bw)],
+        None,
+        Config::default(),
+    )
+    .unwrap();
 
-    let track = store.track("signal").unwrap();
-    assert_eq!(track.rank(), 1);
-    let region = Region {
-        contig: store.genome_for("signal").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 1_000,
-    };
-    let got = track.read_region::<f32>(&region).unwrap();
-    let arr = got.into_dimensionality::<ndarray::Ix1>().unwrap();
-
+    let arr = read(&store);
+    assert_eq!(arr.shape(), [1_000]);
     for i in 0..100u32 {
         let v = ((i % 50) + 1) as f32;
         for p in (i * 10)..((i + 1) * 10) {
@@ -48,7 +56,7 @@ fn import_one_bigwig_into_scalar_track() {
     }
 }
 
-/// A sharded track must import to the same bytes as an unsharded one. Length
+/// A sharded track must import to the same values as an unsharded one. Length
 /// (10_000) is not a multiple of the shard span (4_000), so the run exercises
 /// full interior shards plus a partial edge shard, with >1 worker.
 #[test]
@@ -62,160 +70,96 @@ fn sharded_scalar_import_matches_unsharded() {
         false,
     );
     let src = || vec![Source::new(bw.clone())];
-    let region = |store: &PbzStore| Region {
-        contig: store.genome_for("signal").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 10_000,
-    };
 
-    let plain_path = dir.path().join("plain.pbz");
-    let mut plain = PbzStore::create(&plain_path).unwrap();
+    let plain = dir.path().join("plain.pbz");
     from_bigwig(
-        &mut plain,
+        plain.as_path(),
         "signal",
         &src(),
+        None,
         Config {
-            chunk_size: Some(1_000),
+            chunk: 1_000,
+            shard: None,
             ..Config::default()
         },
     )
     .unwrap();
 
-    let sharded_path = dir.path().join("sharded.pbz");
-    let mut sharded = PbzStore::create(&sharded_path).unwrap();
+    let sharded = dir.path().join("sharded.pbz");
     from_bigwig(
-        &mut sharded,
+        sharded.as_path(),
         "signal",
         &src(),
+        None,
         Config {
             workers: 4,
-            chunk_size: Some(1_000),
-            shard_size: Some(4_000),
+            chunk: 1_000,
+            shard: Some(4),
             ..Config::default()
         },
     )
     .unwrap();
 
-    let plain_data = plain
-        .track("signal")
-        .unwrap()
-        .read_region::<f32>(&region(&plain))
-        .unwrap();
-    let sharded_data = sharded
-        .track("signal")
-        .unwrap()
-        .read_region::<f32>(&region(&sharded))
-        .unwrap();
-    assert_eq!(plain_data, sharded_data);
+    let plain_data = read(&plain);
+    assert_eq!(plain_data.shape(), [10_000]);
+    assert_eq!(plain_data, read(&sharded));
 }
 
-/// Three distinct-valued bigWigs import into a 2D cohort track column-for-column.
-#[test]
-fn cohort_import_distinct_columns() {
-    let dir = TempDir::new().unwrap();
-    let sources: Vec<Source> = [0.0f32, 100.0, 200.0]
-        .iter()
-        .enumerate()
-        .map(|(i, &base)| {
-            Source::labeled(
-                common::write_bigwig(
-                    dir.path(),
-                    &format!("s{i}"),
-                    &[("chr1", 2_000)],
-                    &banded("chr1", 2_000, base),
-                    false,
-                ),
-                format!("s{i}"),
-            )
-        })
-        .collect();
-
-    let store_path = dir.path().join("cohort.pbz");
-    let mut store = PbzStore::create(&store_path).unwrap();
-    from_bigwig(
-        &mut store,
-        "signal",
-        &sources,
-        Config {
-            chunk_size: Some(1_000),
-            // The column axis is generic; override the "sample" default.
-            column_dim: Some("context".into()),
-            ..Config::default()
-        },
-    )
-    .unwrap();
-
-    assert_eq!(store.track("signal").unwrap().column_dim(), Some("context"));
-    let region = Region {
-        contig: store.genome_for("signal").unwrap().id("chr1").unwrap(),
-        start: 0,
-        end: 2_000,
-    };
-    let data = store
-        .track("signal")
-        .unwrap()
-        .read_region::<f32>(&region)
-        .unwrap();
-    assert_eq!(data.shape(), &[2_000, 3]);
-    // Column j carries the same banding offset by j*100.
-    for j in 0..3 {
-        // pos 0 is band 0 -> 1.0; pos 995 is band 99 -> (99 % 50) + 1 = 50.0.
-        assert_eq!(data[[0, j]], 1.0 + (j as f32) * 100.0);
-        assert_eq!(data[[995, j]], 50.0 + (j as f32) * 100.0);
-    }
-}
-
-/// Positions with no bigWig coverage import as `NaN`: the format has no value
-/// there, and `from_bigwig` creates the track with the `float32` NaN fill.
-#[test]
-fn uncovered_positions_import_as_nan() {
-    let dir = TempDir::new().unwrap();
-    // Only [0, 100) covered; the rest of the 3_000 bp contig is gaps.
+fn import_gapped(
+    dir: &Path,
+    fill: Option<pbzarr::Fill>,
+) -> (ArrayD<f32>, serde_json::Value, usize) {
     let bw = common::write_bigwig(
-        dir.path(),
-        "sparse",
-        &[("chr1", 3_000)],
-        &[("chr1", 0, 100, 9.0)],
+        dir,
+        "gap",
+        &[("chr1", 1000)],
+        &[("chr1", 0, 10, 5.0)],
         false,
     );
-
-    let store_path = dir.path().join("sparse.pbz");
-    let mut store = PbzStore::create(&store_path).unwrap();
+    let store = dir.join("gap.pbz");
     from_bigwig(
-        &mut store,
+        store.as_path(),
         "signal",
         &[Source::new(bw)],
+        fill,
         Config {
-            chunk_size: Some(1_000),
+            chunk: 100,
+            shard: None,
             ..Config::default()
         },
     )
     .unwrap();
+    let dataset = Dataset::open(&store).unwrap();
+    let attrs = dataset.variables()["signal"].metadata["attributes"].clone();
+    let stored = walkdir(&store.join("signal/c"));
+    (read(&store), attrs, stored)
+}
 
-    let track = store.track("signal").unwrap();
-    let cid = store.genome_for("signal").unwrap().id("chr1").unwrap();
+fn walkdir(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .map(|path| if path.is_dir() { walkdir(&path) } else { 1 })
+        .sum()
+}
 
-    // Covered [0, 100) keeps 9.0.
-    let head = track
-        .read_region::<f32>(&Region {
-            contig: cid,
-            start: 0,
-            end: 100,
-        })
-        .unwrap();
-    assert!(head.iter().all(|v| *v == 9.0), "covered head must be 9.0");
+#[test]
+fn bigwig_gaps_default_to_the_null() {
+    let dir = TempDir::new().unwrap();
+    let (arr, attrs, stored) = import_gapped(dir.path(), None);
+    assert!(arr.iter().take(10).all(|&v| v == 5.0));
+    assert!(arr.iter().skip(10).all(|v| v.is_nan()));
+    assert!(attrs["_FillValue"].is_string());
+    assert_eq!(stored, 1, "chunks that hold only the fill are not stored");
+}
 
-    // Everything past coverage reads back as NaN, including a fully-uncovered
-    // tail chunk.
-    let tail = track
-        .read_region::<f32>(&Region {
-            contig: cid,
-            start: 100,
-            end: 3_000,
-        })
-        .unwrap();
-    assert!(
-        tail.iter().all(|v| v.is_nan()),
-        "uncovered positions must be NaN"
-    );
+#[test]
+fn bigwig_fill_zero_writes_zero_at_gaps() {
+    let dir = TempDir::new().unwrap();
+    let fill = pbzarr::Fill::Value(serde_json::json!(0));
+    let (arr, attrs, stored) = import_gapped(dir.path(), Some(fill));
+    assert!(arr.iter().take(10).all(|&v| v == 5.0));
+    assert!(arr.iter().skip(10).all(|&v| v == 0.0));
+    assert!(attrs["_FillValue"].is_null());
+    assert_eq!(stored, 1, "chunks that hold only the fill are not stored");
 }

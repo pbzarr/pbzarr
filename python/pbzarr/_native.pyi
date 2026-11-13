@@ -1,73 +1,78 @@
 """Type stubs for the PyO3 extension."""
-from typing import Sequence
+from typing import Container, Sequence
 
 class PbzError(RuntimeError): ...
 
 def import_d4(
-    store_path: str,
+    *,
+    destination: str,
     track: str,
     sources: Sequence[tuple[str, str | None]],
-    column_dim: str | None = ...,
-    workers: int | None = ...,
-    chunk_size: int | None = ...,
-    column_chunk_size: int | None = ...,
-    shard_size: int | None = ...,
-    shard_column_size: int | None = ...,
+    dim: str | None = ...,
+    threads: int | None = ...,
+    chunk: int | None = ...,
+    shard: int | None = ...,
+    shard_columns: int | None = ...,
     progress: bool = ...,
     codecs: str | None = ...,
-    scales: Sequence[int] | None = ...,
-) -> dict[str, int]: ...
+    decode_chunks: int | None = ...,
+) -> dict[str, int | float]: ...
 def import_bigwig(
-    store_path: str,
+    *,
+    destination: str,
     track: str,
     sources: Sequence[tuple[str, str | None]],
-    column_dim: str | None = ...,
-    workers: int | None = ...,
-    chunk_size: int | None = ...,
-    column_chunk_size: int | None = ...,
-    shard_size: int | None = ...,
-    shard_column_size: int | None = ...,
+    dim: str | None = ...,
+    fill: str | None = ...,
+    threads: int | None = ...,
+    chunk: int | None = ...,
+    shard: int | None = ...,
+    shard_columns: int | None = ...,
     progress: bool = ...,
     codecs: str | None = ...,
-    scales: Sequence[int] | None = ...,
-) -> dict[str, int]: ...
+    decode_chunks: int | None = ...,
+) -> dict[str, int | float]: ...
 def import_bed(
-    store_path: str,
+    *,
+    destination: str,
     sources: Sequence[tuple[str, str | None]],
-    genome: str,
-    schema: Sequence[tuple[str, str | None]] | None = ...,
+    genome: str | None = ...,
+    schema: Sequence[tuple[str, str | None, str | None, str | None]] | None = ...,
     track: str | None = ...,
     column: str | None = ...,
     dtype: str | None = ...,
-    column_dim: str | None = ...,
-    workers: int | None = ...,
-    chunk_size: int | None = ...,
-    column_chunk_size: int | None = ...,
-    shard_size: int | None = ...,
-    shard_column_size: int | None = ...,
+    fill: str | None = ...,
+    dim: str | None = ...,
+    threads: int | None = ...,
+    chunk: int | None = ...,
+    shard: int | None = ...,
+    shard_columns: int | None = ...,
     progress: bool = ...,
     codecs: str | None = ...,
-    scales: Sequence[int] | None = ...,
-) -> dict[str, int]: ...
+    decode_chunks: int | None = ...,
+) -> dict[str, int | float]: ...
 def import_bam(
-    store_path: str,
+    *,
+    destination: str,
     track: str,
     sources: Sequence[tuple[str, str | None]],
     mode: str = ...,
-    reference: str | None = ...,
+    fasta: str | None = ...,
     min_mapq: int = ...,
     exclude_flags: int = ...,
     min_bq: int = ...,
     overlap: str = ...,
     count_deletions: bool = ...,
-    column_dim: str | None = ...,
-    workers: int | None = ...,
-    chunk_size: int | None = ...,
-    column_chunk_size: int | None = ...,
-    shard_size: int | None = ...,
-    shard_column_size: int | None = ...,
+    dim: str | None = ...,
+    threads: int | None = ...,
+    chunk: int | None = ...,
+    shard: int | None = ...,
+    shard_columns: int | None = ...,
     progress: bool = ...,
     codecs: str | None = ...,
-    scales: Sequence[int] | None = ...,
-) -> dict[str, int]: ...
-def create_store(store_path: str) -> None: ...
+    decode_chunks: int | None = ...,
+) -> dict[str, int | float]: ...
+def create_dataset(*, destination: str, reference: Sequence[tuple[str, int]]) -> None: ...
+def parse_region(
+    *, text: str, contigs: Container[str] | None = ...
+) -> tuple[str, int | None, int | None]: ...

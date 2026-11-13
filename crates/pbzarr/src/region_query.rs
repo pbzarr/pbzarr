@@ -33,9 +33,9 @@ impl FromStr for RegionQuery {
     /// Parse a region from a string.
     ///
     /// Accepted forms:
-    /// - `"chr1"` — entire contig
-    /// - `"chr1:1000-2000"` — half-open range `[1000, 2000)`
-    /// - `"chr1:1000"` — single position
+    /// - `"chr1"`: entire contig
+    /// - `"chr1:1000-2000"`: half-open range `[1000, 2000)`
+    /// - `"chr1:1000"`: from position 1000 to the contig end
     ///
     /// Commas in numeric values are stripped (e.g. `chr1:1,000,000-2,000,000`).
     /// Whitespace is trimmed.
@@ -110,6 +110,23 @@ impl FromStr for RegionQuery {
     }
 }
 
+impl RegionQuery {
+    /// Parse `text`, but take it whole as a contig name when `is_contig`
+    /// accepts it, as samtools does. A name such as `HLA-A*01:01:01` is then
+    /// not split on `':'`.
+    pub fn parse_with(text: &str, is_contig: impl FnOnce(&str) -> bool) -> Result<Self> {
+        let name = text.trim();
+        if !name.is_empty() && is_contig(name) {
+            return Ok(RegionQuery {
+                contig: name.to_string(),
+                start: None,
+                end: None,
+            });
+        }
+        text.parse()
+    }
+}
+
 impl fmt::Display for RegionQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (self.start, self.end) {
@@ -118,14 +135,6 @@ impl fmt::Display for RegionQuery {
             _ => write!(f, "{}", self.contig),
         }
     }
-}
-
-/// Parse a region string into a [`Region`].
-///
-/// Convenience wrapper around [`Region::from_str`]. See its documentation for
-/// accepted formats.
-pub fn parse_region_query(region: &str) -> Result<RegionQuery> {
-    region.parse()
 }
 
 fn parse_position(s: &str, label: &str) -> Result<u64> {
@@ -137,6 +146,10 @@ fn parse_position(s: &str, label: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_region_query(region: &str) -> Result<RegionQuery> {
+        region.parse()
+    }
 
     #[test]
     fn contig_only() {
@@ -220,6 +233,17 @@ mod tests {
     #[test]
     fn err_equal_start_end() {
         assert!(parse_region_query("chr1:1000-1000").is_err());
+    }
+
+    #[test]
+    fn whole_contig_name_wins_over_split() {
+        let names = ["HLA-A*01:01:01", "HLA-A*01:01:01:01"];
+        let parse = |text| RegionQuery::parse_with(text, |n| names.contains(&n)).unwrap();
+        assert_eq!(parse("HLA-A*01:01:01:01").contig, "HLA-A*01:01:01:01");
+        assert_eq!(parse("HLA-A*01:01:01:01").start, None);
+        let r = parse("HLA-A*01:01:01:01:5-9");
+        assert_eq!(r.contig, "HLA-A*01:01:01:01");
+        assert_eq!((r.start, r.end), (Some(5), Some(9)));
     }
 
     #[test]

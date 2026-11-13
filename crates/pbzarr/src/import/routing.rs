@@ -1,5 +1,5 @@
-//! `ImportRouting`: which source axis fans out over tracks, which over
-//! columns, and one [`TrackTarget`] per destination track.
+//! `ImportRouting`: which source axis fans out over columns, and one
+//! [`TrackTarget`] per destination track.
 //!
 //! Always built by [`ImportRouting::resolve`], never by hand: the constructor
 //! owns every cross-source and source-vs-track check, so the engine can trust
@@ -7,11 +7,11 @@
 
 use std::ops::Range;
 
+use super::destination::Destination;
+use crate::dataset::Reference;
 use crate::error::{PbzError, Result};
-use crate::genome::Genome;
+use crate::io::OutputSchema;
 use crate::io::error::ReaderError;
-use crate::io::{Dtype, OutputSchema};
-use crate::track::Track;
 
 /// A source axis that can fan out over tracks or columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,37 +24,30 @@ pub enum SourceAxis {
 /// One destination track of a routing.
 #[derive(Debug, Clone)]
 pub struct TrackTarget {
-    pub track: String,
     /// Schema field feeding this target. Under `columns_from = Fields` this
     /// is the field for the first column of `columns`; successive columns
     /// take successive fields.
     pub field: usize,
-    /// Element dtype; matches both the schema field and the track.
-    pub dtype: Dtype,
     /// Destination range on the track's column axis, not assumed to start at
     /// 0 (a column-append can target e.g. `3..5`). Scalar targets use `0..1`.
     pub columns: Range<u64>,
-    /// Expected on-disk labels over `columns`, checked at resolve time
-    /// against the track's column coordinate array.
-    pub expected_labels: Option<Vec<String>>,
 }
 
-/// Axis mapping plus one target per destination track. `None` on an axis
-/// means that axis has no fan-out: a single track, or scalar width.
+/// Column axis mapping plus one target per destination track. `None` means
+/// no column fan-out: one reader into scalar width.
 #[derive(Debug, Clone)]
 pub struct ImportRouting {
-    pub tracks_from: Option<SourceAxis>,
     pub columns_from: Option<SourceAxis>,
     pub targets: Vec<TrackTarget>,
 }
 
 impl ImportRouting {
-    /// Derive and validate a routing from the reader schemas and genomes, the
+    /// Derive and validate a routing from the reader schemas and references, the
     /// destination tracks, and the builder's axis statements.
-    pub fn resolve(
+    pub(crate) fn resolve(
         schemas: &[&OutputSchema],
-        genomes: &[&Genome],
-        tracks: &[&Track],
+        references: &[&Reference],
+        tracks: &[Destination],
         tracks_from: Option<SourceAxis>,
         columns_from: Option<SourceAxis>,
         expected_labels: Option<&[String]>,
@@ -62,9 +55,9 @@ impl ImportRouting {
         if schemas.is_empty() {
             return Err(PbzError::Metadata("import routing: no readers".into()));
         }
-        if schemas.len() != genomes.len() {
+        if schemas.len() != references.len() {
             return Err(PbzError::Metadata(
-                "import routing: schema/genome count mismatch".into(),
+                "import routing: schema/reference count mismatch".into(),
             ));
         }
         if tracks.is_empty() {
@@ -98,22 +91,20 @@ impl ImportRouting {
             }
         }
 
-        // Genomes must match as ordered contig sequences: the flat position
-        // axis is defined by contig order, so the order-insensitive checksum
-        // cannot stand in for this check.
-        let reference = genomes[0];
-        for (i, genome) in genomes.iter().enumerate().skip(1) {
-            if genome.contigs() != reference.contigs() {
+        // The flat position axis is defined by contig order.
+        let reference = references[0];
+        for (i, other) in references.iter().enumerate().skip(1) {
+            if other.contigs() != reference.contigs() {
                 return Err(PbzError::Metadata(format!(
-                    "import routing: reader {i} genome differs from reader 0 \
+                    "import routing: reader {i} reference differs from reader 0 \
                      (ordered contig sequences must be identical)"
                 )));
             }
         }
         for track in tracks {
-            if track.genome().contigs() != reference.contigs() {
+            if track.reference().contigs() != reference.contigs() {
                 return Err(PbzError::Metadata(format!(
-                    "import routing: track {:?} genome differs from the readers \
+                    "import routing: track {:?} reference differs from the readers \
                      (ordered contig sequences must be identical)",
                     track.name()
                 )));
@@ -157,6 +148,13 @@ impl ImportRouting {
                 schemas.len()
             )));
         }
+        if columns_from.is_none() && schemas.len() != 1 {
+            return Err(PbzError::Metadata(format!(
+                "import routing: {} readers but no column axis; use readers_as_columns \
+                 to give each reader its own column",
+                schemas.len()
+            )));
+        }
 
         let mut targets = Vec::with_capacity(tracks.len());
         for (track, &field) in tracks.iter().zip(&field_of_target) {
@@ -165,7 +163,8 @@ impl ImportRouting {
                 Some(SourceAxis::Fields) => n_fields as u64,
                 None => 1,
             };
-            let columns = 0..width;
+            let start = track.column_offset();
+            let columns = start..start + width;
 
             if columns_from.is_none() {
                 if track.rank() != 1 {
@@ -184,10 +183,10 @@ impl ImportRouting {
                     )));
                 }
                 let on_disk = track.columns_count()? as u64;
-                if on_disk != width {
+                if on_disk != columns.end {
                     return Err(PbzError::Metadata(format!(
                         "import routing: track {:?} has {on_disk} column(s) but the \
-                         routing supplies {width}",
+                         routing supplies {width} at column {start}",
                         track.name()
                     )));
                 }
@@ -211,8 +210,7 @@ impl ImportRouting {
                 }
             }
 
-            let expected = expected_labels.map(<[String]>::to_vec);
-            if let Some(expected) = &expected {
+            if let Some(expected) = expected_labels {
                 if track.rank() != 2 {
                     return Err(PbzError::Metadata(format!(
                         "import routing: expected_labels given for scalar track {:?}",
@@ -230,7 +228,7 @@ impl ImportRouting {
                 let on_disk = track.column_labels()?;
                 let lo = columns.start as usize;
                 let hi = columns.end as usize;
-                if on_disk.get(lo..hi) != Some(expected.as_slice()) {
+                if on_disk.get(lo..hi) != Some(expected) {
                     return Err(PbzError::Metadata(format!(
                         "import routing: track {:?} columns {lo}..{hi} carry labels {:?} \
                          but the import expected {:?}",
@@ -241,19 +239,32 @@ impl ImportRouting {
                 }
             }
 
-            targets.push(TrackTarget {
-                track: track.name().to_owned(),
-                field,
-                dtype: track.dtype(),
-                columns,
-                expected_labels: expected,
-            });
+            targets.push(TrackTarget { field, columns });
         }
 
         Ok(Self {
-            tracks_from,
             columns_from,
             targets,
         })
+    }
+
+    /// `(schema field, destination column)` pairs that `reader` feeds on
+    /// target `t_idx`, in ascending column order.
+    pub(crate) fn reader_columns(
+        &self,
+        reader: usize,
+        t_idx: usize,
+    ) -> impl Iterator<Item = (usize, u64)> {
+        let target = &self.targets[t_idx];
+        let (first, width) = match self.columns_from {
+            Some(SourceAxis::Readers) => (target.columns.start + reader as u64, 1),
+            Some(SourceAxis::Fields) => (
+                target.columns.start,
+                target.columns.end - target.columns.start,
+            ),
+            None => (target.columns.start, 1),
+        };
+        let field = target.field;
+        (0..width).map(move |i| (field + i as usize, first + i))
     }
 }

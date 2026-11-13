@@ -2,80 +2,76 @@
 //! consumes, the progress hook, and the run summary.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::codec_spec::ExplicitArraySpec;
+use crate::import::progress::make_sink;
 
 /// Hook for callers to observe import progress. Implementations must be
 /// `Send + Sync` because workers call `tick` concurrently.
 pub trait ProgressSink: Send + Sync {
-    /// Total bytes the run will write, reported once before any `tick`. The
-    /// engine knows the exact figure (positions x columns x element width),
-    /// so callers build a sink without sizing it themselves.
+    /// Total bytes the run covers (positions x columns x element width),
+    /// reported once before any `tick`. Callers build a sink without sizing
+    /// it themselves.
     fn set_total(&self, _bytes: u64) {}
+    /// Bytes of one closed buffer, written or skipped. The ticks of a run
+    /// sum to the `set_total` figure.
     fn tick(&self, _bytes: u64) {}
     fn done(&self) {}
 }
 
-/// Configuration shared by the format import entry points
-/// (`from_d4`, `from_bigwig`, `from_bed_matrix`, `from_bam`).
+/// Configuration of one import run, shared by the format import entry points
+/// (`from_d4`, `from_bigwig`, `from_bed_matrix`, `from_bam`) and the engine.
+/// The engine reads `workers`, `decode_chunks`, `progress` and `cancel`; the entry
+/// points read the track sizing fields when they create the tracks.
 pub struct Config {
-    /// Number of reader/writer worker threads.
+    /// Worker thread count: the size of the one pool that runs both source
+    /// decoding and zarrs encoding, so at most this many threads are busy.
     pub workers: usize,
-    /// Open decode spans allowed at once in the engine; `0` = auto (see
-    /// `PipelineOptions::in_flight_spans`).
-    pub in_flight_spans: usize,
-    /// Inner chunks each reader decodes per piece; 0 = auto (see
-    /// `PipelineOptions::decode_chunks`).
+    /// Inner position chunks each reader decodes per piece. `0` is auto: as
+    /// many chunks as fit in 4M positions, fewer when that leaves workers
+    /// short of pieces. An explicit value is clamped to `[1, chunk count]`,
+    /// and either is snapped to the shard grid of sharded tracks.
     pub decode_chunks: usize,
-    /// Reader handle budget across all readers; 0 = auto (see
-    /// `PipelineOptions::handle_budget`).
-    pub handle_budget: usize,
-    /// Position chunk size for the track being imported. Consumed by the
-    /// format entry points when they create the track; the engine always
-    /// steps by the track's on-disk chunk grid.
-    pub chunk_size: Option<usize>,
-    /// Column chunk size for the track being imported. Consumed at track
-    /// creation, like `chunk_size`.
-    pub column_chunk_size: Option<usize>,
-    /// Position shard size for the track being imported. Consumed at track
-    /// creation, like `chunk_size`; `None` leaves the track unsharded.
-    pub shard_size: Option<usize>,
-    /// Column shard size for the track being imported. Consumed at track
-    /// creation; ignored unless `shard_size` is set.
-    pub shard_column_size: Option<usize>,
+    /// Positions per inner chunk of the tracks the import creates. The
+    /// engine always steps by the track's on-disk chunk grid. Default:
+    /// [`DEFAULT_CHUNK`](crate::DEFAULT_CHUNK) (65,536).
+    pub chunk: usize,
+    /// Inner chunks per shard along positions of the created tracks; `None`
+    /// leaves them unsharded. Default:
+    /// `Some(`[`DEFAULT_SHARD`](crate::DEFAULT_SHARD)`)` (1,024).
+    pub shard: Option<usize>,
+    /// Columns per shard of the created 2D tracks. Default:
+    /// [`DEFAULT_SHARD_COLUMNS`](crate::DEFAULT_SHARD_COLUMNS) (16).
+    pub shard_columns: usize,
     /// Column-axis dimension name for a cohort import (several sources). The
     /// axis is generic; the readers default it to `"sample"`, but set this to
     /// `"strand"`, `"context"`, etc. when the columns are not samples. Ignored
     /// for single-source (scalar) imports.
     pub column_dim: Option<String>,
-    /// Explicit Zarr codec/chunk-grid metadata for created `values` arrays.
+    /// Explicit Zarr codec/chunk-grid metadata for the created track arrays.
     /// Consumed at track creation; replaces the default pipeline and the
     /// chunk/shard sizing above.
     pub codecs: Option<ExplicitArraySpec>,
-    /// Downsampling factors for an opt-in multiscale pyramid, built on every
-    /// track the import creates once its base data is published. Empty builds
-    /// no pyramid. The scale engine validates the factors (unique, ascending,
-    /// `>= 2`).
-    pub scales: Vec<u64>,
     /// Optional progress observer.
     pub progress: Option<Arc<dyn ProgressSink>>,
+    /// When another thread sets this flag, the engine stops before its next
+    /// piece and the run fails with `PbzError::Cancelled`.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             workers: 4,
-            in_flight_spans: 0,
             decode_chunks: 0,
-            handle_budget: 0,
-            chunk_size: None,
-            column_chunk_size: None,
-            shard_size: None,
-            shard_column_size: None,
+            chunk: crate::DEFAULT_CHUNK,
+            shard: Some(crate::DEFAULT_SHARD),
+            shard_columns: crate::DEFAULT_SHARD_COLUMNS,
             column_dim: None,
             codecs: None,
-            scales: Vec::new(),
             progress: None,
+            cancel: None,
         }
     }
 }
@@ -91,83 +87,103 @@ impl Config {
     pub fn track_config(
         &self,
         dtype: crate::io::Dtype,
-        fill: Option<serde_json::Value>,
+        fill: Option<crate::Fill>,
         labels: Option<Vec<String>>,
         default_column_dim: &str,
-    ) -> crate::track::TrackConfig {
-        let mut cfg = crate::track::TrackConfig::new(dtype);
+    ) -> crate::TrackConfig {
+        let mut cfg = crate::TrackConfig::new(dtype)
+            .chunk(self.chunk)
+            .shard_columns(self.shard_columns);
+        cfg.shard = self.shard;
         if let Some(fill) = fill {
-            cfg = cfg.fill_value(fill);
-        }
-        if let Some(cs) = self.chunk_size {
-            cfg = cfg.chunk_size(cs);
-        }
-        if let Some(ss) = self.shard_size {
-            cfg = cfg.shard_size(ss);
-        }
-        if let Some(scs) = self.shard_column_size {
-            cfg = cfg.shard_column_size(scs);
+            cfg = cfg.fill(fill);
         }
         if let Some(labels) = labels {
             let dim = self.column_dim.as_deref().unwrap_or(default_column_dim);
             cfg = cfg.columns(labels).column_dim(dim);
-            if let Some(ccs) = self.column_chunk_size {
-                cfg = cfg.column_chunk_size(ccs);
-            }
         }
         if let Some(spec) = &self.codecs {
             cfg = cfg.codecs(spec.clone());
         }
         cfg
     }
+}
 
-    /// Build the configured pyramid on each of `tracks`, in order. A no-op
-    /// when `scales` is empty. The factors and worker count pass to the scale
-    /// engine unchanged; it owns factor validation and publication ordering.
-    /// Format entry points call this after their tracks are published.
-    pub fn scale_tracks(&self, store: &crate::PbzStore, tracks: &[String]) -> crate::Result<()> {
-        if self.scales.is_empty() {
-            return Ok(());
+/// A [`Config`] from optional settings, as the CLI and the Python bindings
+/// take them. A `None` field keeps the `Config` default.
+#[derive(Default)]
+pub struct ConfigBuilder {
+    pub workers: Option<usize>,
+    pub decode_chunks: Option<usize>,
+    pub chunk: Option<usize>,
+    pub shard: Option<usize>,
+    pub shard_columns: Option<usize>,
+    pub column_dim: Option<String>,
+    pub codecs: Option<ExplicitArraySpec>,
+    /// Label of the progress display; `None` shows no progress.
+    pub progress: Option<String>,
+}
+
+impl ConfigBuilder {
+    /// The first layout knob that is set. A `codecs` spec replaces the
+    /// layout, so a caller refuses them together.
+    pub fn layout_knob_set(&self) -> Option<&'static str> {
+        [
+            ("chunk", self.chunk),
+            ("shard", self.shard),
+            ("shard_columns", self.shard_columns),
+        ]
+        .into_iter()
+        .find_map(|(name, size)| size.map(|_| name))
+    }
+
+    pub fn build(self) -> Config {
+        let default = Config::default();
+        Config {
+            workers: self.workers.unwrap_or(default.workers),
+            decode_chunks: self.decode_chunks.unwrap_or(default.decode_chunks),
+            chunk: self.chunk.unwrap_or(default.chunk),
+            shard: self.shard.or(default.shard),
+            shard_columns: self.shard_columns.unwrap_or(default.shard_columns),
+            column_dim: self.column_dim,
+            codecs: self.codecs,
+            progress: self.progress.as_deref().map(make_sink),
+            cancel: None,
         }
-        let config = crate::ScaleConfig {
-            factors: Some(self.scales.clone()),
-            workers: self.workers,
-            ..crate::ScaleConfig::default()
-        };
-        for track in tracks {
-            crate::scale(store, track, &config)?;
-        }
-        Ok(())
     }
 }
 
 /// Summary of a finished import.
 pub struct Report {
-    pub contigs_written: usize,
-    /// Pieces dispatched: decode spans times readers.
-    pub pieces: usize,
+    /// Positions the import covered, summed over every contig.
+    pub positions: u64,
+    /// Chunk buffers written.
+    pub chunks_written: usize,
+    /// Chunk buffers skipped because no reader covered them.
+    pub chunks_skipped: usize,
     pub bytes_written: u64,
-    /// Number of buffers written.
-    pub tasks_completed: usize,
-    /// Number of buffers elided because no reader covered them
-    /// (`may_have_data` was false for every overlapping contig).
-    pub tasks_skipped: usize,
     /// Wall-clock duration of the engine run.
     pub wall_seconds: f64,
-    /// Summed per-piece decode time across workers: the coverage probe, the
-    /// source read, and the merges and chunk writes the stream runs inside
-    /// it.
-    pub decode_seconds: f64,
-    /// Summed `may_have_data` probe time across workers.
-    pub probe_seconds: f64,
-    /// Summed encode+write time across workers.
-    pub write_seconds: f64,
-    /// Summed worker time spent processing pieces.
-    pub worker_busy_seconds: f64,
-    /// Summed worker time spent blocked on the piece channel.
-    pub worker_idle_seconds: f64,
-    /// Producer time blocked on the in-flight span gate.
-    pub gate_wait_seconds: f64,
-    /// Summed time workers spent blocked on reader handle checkout.
-    pub handle_wait_seconds: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_keeps_defaults_and_names_the_first_layout_knob() {
+        let builder = ConfigBuilder {
+            shard: Some(8),
+            shard_columns: Some(2),
+            ..ConfigBuilder::default()
+        };
+        assert_eq!(builder.layout_knob_set(), Some("shard"));
+        let config = builder.build();
+        assert_eq!(config.workers, Config::default().workers);
+        assert_eq!(config.decode_chunks, 0);
+        assert_eq!(config.chunk, crate::DEFAULT_CHUNK);
+        assert_eq!(config.shard, Some(8));
+        assert_eq!(config.shard_columns, 2);
+        assert!(config.progress.is_none());
+    }
 }

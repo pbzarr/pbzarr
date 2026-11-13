@@ -1,17 +1,22 @@
-use pbzarr::import::{Import, PipelineOptions};
+use pbzarr::import::{Config, Import};
 use pbzarr::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
-use pbzarr::{Contig, Genome, PbzStore, Region, TrackConfig};
+use pbzarr::{Contig, TrackConfig};
+use pbzarr::{Dataset, Reference};
 use tempfile::TempDir;
+
+fn dataset(path: &std::path::Path, genome: &Reference) -> Dataset {
+    Dataset::create(path, genome.clone()).unwrap()
+}
 
 /// A reader that fills every position with a constant value.
 struct ConstReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
     val: u32,
 }
 
 impl ConstReader {
-    fn new(genome: Genome, val: u32) -> Self {
+    fn new(genome: Reference, val: u32) -> Self {
         Self {
             genome,
             schema: OutputSchema::single("value", Dtype::U32),
@@ -21,7 +26,7 @@ impl ConstReader {
 }
 
 impl ValueReader for ConstReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
 
@@ -49,7 +54,7 @@ impl ValueReader for ConstReader {
 fn pipeline_writes_constants_into_cohort_track() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("t.pbz");
-    let genome = Genome::new(vec![
+    let genome = Reference::new(vec![
         Contig {
             name: "chr1".into(),
             length: 5_000,
@@ -61,43 +66,30 @@ fn pipeline_writes_constants_into_cohort_track() {
     ])
     .unwrap();
 
-    let mut store = PbzStore::create(&path).unwrap();
-    store
-        .create_track(
-            "depth",
-            genome.clone(),
-            TrackConfig::new(Dtype::U32)
-                .columns(vec!["A".into(), "B".into()])
-                .column_dim("sample"),
-        )
-        .unwrap();
+    let mut ds = dataset(&path, &genome);
+    let cfg = TrackConfig::new(Dtype::U32)
+        .columns(vec!["A".into(), "B".into()])
+        .column_dim("sample");
 
     let readers = vec![
         ConstReader::new(genome.clone(), 7),
         ConstReader::new(genome.clone(), 13),
     ];
 
-    let track = store.track("depth").unwrap();
     let report = Import::from_readers(readers)
         .unwrap()
-        .into_track(track)
+        .into_dataset(&mut ds, vec![("depth".into(), cfg)])
         .readers_as_columns()
         .run()
         .unwrap();
     assert!(report.bytes_written > 0);
-    assert_eq!(report.contigs_written, 2);
+    assert_eq!(report.positions, 6_500);
 
     for (name, len) in [("chr1", 5_000usize), ("chr2", 1_500)] {
-        let region = Region {
-            contig: genome.id(name).unwrap(),
-            start: 0,
-            end: len as u64,
-        };
-        let got = store
-            .track("depth")
-            .unwrap()
-            .read_region::<u32>(&region)
+        let got = ds
+            .read_region::<u32>("depth", &name.parse().unwrap())
             .unwrap();
+        assert_eq!(got.shape(), [len, 2]);
         let got2 = got.into_dimensionality::<ndarray::Ix2>().unwrap();
         for i in 0..len {
             assert_eq!(got2[[i, 0]], 7, "{name} col 0 at i={i}");
@@ -110,22 +102,16 @@ fn pipeline_writes_constants_into_cohort_track() {
 fn cohort_pipeline_tiles_columns_with_multiple_workers() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("tiled.pbz");
-    let genome = Genome::new(vec![Contig {
+    let genome = Reference::new(vec![Contig {
         name: "chr1".into(),
         length: 8,
     }])
     .unwrap();
-    let mut store = PbzStore::create(&path).unwrap();
-    store
-        .create_track(
-            "depth",
-            genome.clone(),
-            TrackConfig::new(Dtype::U32)
-                .columns(vec!["a".into(), "b".into(), "c".into(), "d".into()])
-                .chunk_size(4)
-                .column_chunk_size(2),
-        )
-        .unwrap();
+    let mut ds = dataset(&path, &genome);
+    let cfg = TrackConfig::new(Dtype::U32)
+        .columns(vec!["a".into(), "b".into(), "c".into(), "d".into()])
+        .chunk(4)
+        .unsharded();
 
     let readers = [7, 8, 9, 10]
         .into_iter()
@@ -133,43 +119,67 @@ fn cohort_pipeline_tiles_columns_with_multiple_workers() {
         .collect();
     let report = Import::from_readers(readers)
         .unwrap()
-        .into_track(store.track("depth").unwrap())
+        .into_dataset(&mut ds, vec![("depth".into(), cfg)])
         .readers_as_columns()
-        .options(PipelineOptions {
+        .config(Config {
             workers: 2,
-            ..PipelineOptions::default()
+            ..Config::default()
         })
         .run()
         .unwrap();
 
-    assert_eq!(report.tasks_completed, 4);
-    let region = Region {
-        contig: genome.id("chr1").unwrap(),
-        start: 0,
-        end: 8,
-    };
-    let values = store
-        .track("depth")
-        .unwrap()
-        .read_region::<u32>(&region)
+    assert_eq!(report.chunks_written, 8);
+    let values = ds
+        .read_region::<u32>("depth", &"chr1".parse().unwrap())
         .unwrap()
         .into_dimensionality::<ndarray::Ix2>()
         .unwrap();
+    assert_eq!(values.nrows(), 8);
     for row in values.rows() {
         assert_eq!(row.as_slice().unwrap(), &[7, 8, 9, 10]);
     }
+}
+
+#[test]
+fn several_readers_without_a_column_axis_are_refused() {
+    let dir = TempDir::new().unwrap();
+    let genome = Reference::new(vec![Contig {
+        name: "chr1".into(),
+        length: 8,
+    }])
+    .unwrap();
+    let mut ds = dataset(&dir.path().join("scalar.pbz"), &genome);
+    let readers = vec![
+        ConstReader::new(genome.clone(), 1),
+        ConstReader::new(genome.clone(), 2),
+    ];
+    let Err(err) = Import::from_readers(readers)
+        .unwrap()
+        .into_dataset(
+            &mut ds,
+            vec![("depth".into(), TrackConfig::new(Dtype::U32))],
+        )
+        .run()
+    else {
+        panic!("two readers without a column axis must be refused");
+    };
+    assert!(
+        err.to_string().contains("no column axis"),
+        "unexpected error: {err}"
+    );
+    assert!(!ds.variables().contains_key("depth"));
 }
 
 /// Fills each position with `contig_index * 1_000_000 + local_position`, so a
 /// read-back reveals whether a span handed the reader the right contig name and
 /// local range.
 struct RampReader {
-    genome: Genome,
+    genome: Reference,
     schema: OutputSchema,
 }
 
 impl RampReader {
-    fn new(genome: Genome) -> Self {
+    fn new(genome: Reference) -> Self {
         Self {
             genome,
             schema: OutputSchema::single("value", Dtype::U32),
@@ -178,7 +188,7 @@ impl RampReader {
 }
 
 impl ValueReader for RampReader {
-    fn contigs(&self) -> &Genome {
+    fn contigs(&self) -> &Reference {
         &self.genome
     }
 
@@ -215,7 +225,7 @@ impl ValueReader for RampReader {
 fn pipeline_span_straddling_contig_boundary_maps_local_coords() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("r.pbz");
-    let genome = Genome::new(vec![
+    let genome = Reference::new(vec![
         Contig {
             name: "chr1".into(),
             length: 2_000,
@@ -227,36 +237,21 @@ fn pipeline_span_straddling_contig_boundary_maps_local_coords() {
     ])
     .unwrap();
 
-    let mut store = PbzStore::create(&path).unwrap();
-    // chunk_size 700 → chunks at 0,700,1400,2100,2800; [1400,2100) straddles
+    let mut ds = dataset(&path, &genome);
+    // chunk 700 → chunks at 0,700,1400,2100,2800; [1400,2100) straddles
     // the chr1/chr2 boundary at flat 2000.
-    store
-        .create_track(
-            "depth",
-            genome.clone(),
-            TrackConfig::new(Dtype::U32).chunk_size(700),
-        )
-        .unwrap();
-
-    let readers = vec![RampReader::new(genome.clone())];
-    let track = store.track("depth").unwrap();
-    Import::from_readers(readers)
+    let cfg = TrackConfig::new(Dtype::U32).chunk(700).unsharded();
+    Import::from_readers(vec![RampReader::new(genome.clone())])
         .unwrap()
-        .into_track(track)
+        .into_dataset(&mut ds, vec![("depth".into(), cfg)])
         .run()
         .unwrap();
 
     for (name, cid, len) in [("chr1", 0u32, 2_000usize), ("chr2", 1, 1_500)] {
-        let region = Region {
-            contig: genome.id(name).unwrap(),
-            start: 0,
-            end: len as u64,
-        };
-        let got = store
-            .track("depth")
-            .unwrap()
-            .read_region::<u32>(&region)
+        let got = ds
+            .read_region::<u32>("depth", &name.parse().unwrap())
             .unwrap();
+        assert_eq!(got.len(), len);
         let got1 = got.into_dimensionality::<ndarray::Ix1>().unwrap();
         for pos in 0..len {
             assert_eq!(got1[pos], cid * 1_000_000 + pos as u32, "{name} pos={pos}");

@@ -1,0 +1,15 @@
+{
+  "zarr_format": 3,
+  "node_type": "group",
+  "attributes": {
+    "zarr_conventions": [
+      {
+        "uuid": "d5bd7bea-0388-4e0a-9844-707c034e9add",
+        "name": "pbz"
+      }
+    ],
+    "pbz:version": "0.5",
+    "coordinates": "contig_id contig_length",
+    "description": "Example cohort with independent base and binned tracks."
+  }
+}

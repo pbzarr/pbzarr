@@ -7,7 +7,7 @@ use log::debug;
 use noodles_bgzf as bgzf;
 use pbzarr::import::Source;
 use pbzarr::io::{Dtype, ReaderError};
-use pbzarr::{PbzError, Result};
+use pbzarr::{Fill, PbzError, Result};
 
 /// Open a bgzipped file for reading.
 pub(super) fn open_bgzf(path: &Path) -> std::result::Result<bgzf::io::Reader<File>, ReaderError> {
@@ -42,12 +42,21 @@ pub fn column_index_by_name<P: AsRef<Path>>(
     })
 }
 
+/// How many BED records dtype inference reads: a sample of the first
+/// records (1000 by default), or all of them.
 #[derive(Debug, Clone, Copy)]
 pub enum InferRows {
     Sample(usize),
     All,
 }
 
+impl Default for InferRows {
+    fn default() -> Self {
+        Self::Sample(1_000)
+    }
+}
+
+#[derive(Default)]
 pub struct BedImportOptions {
     /// Header field names to import; `None` selects every value field.
     pub fields: Option<Vec<String>>,
@@ -58,18 +67,12 @@ pub struct BedImportOptions {
     pub track: Option<String>,
     /// Value dtype for headerless BED4 input (skips inference).
     pub dtype: Option<Dtype>,
-}
-
-impl Default for BedImportOptions {
-    fn default() -> Self {
-        Self {
-            fields: None,
-            dtype_overrides: BTreeMap::new(),
-            infer_rows: InferRows::Sample(1_000),
-            track: None,
-            dtype: None,
-        }
-    }
+    /// Grow the existing `track`: one BED column fills it, as `dtype` when given.
+    pub append: bool,
+    /// The value of bases that no interval covers, for value columns. `None`
+    /// gives [`Fill::Na`], or false for a bool column. An append with `None`
+    /// keeps the fill of the stored track. BED3 masks always fill false.
+    pub fill: Option<Fill>,
 }
 
 pub(super) struct ResolvedField {
@@ -114,7 +117,7 @@ pub struct BedLayout {
 
 /// Sniff a BED's layout from its first line.
 pub fn read_bed_layout(path: &Path) -> Result<BedLayout> {
-    let mut reader = open_bgzf(path).map_err(|error| PbzError::Store(error.to_string()))?;
+    let mut reader = open_bgzf(path)?;
     let mut line = Vec::new();
     reader
         .read_until(b'\n', &mut line)
@@ -185,6 +188,9 @@ pub(super) fn resolve_sources(
         }
     }
     let labels = sources.iter().map(Source::label).collect::<Vec<_>>();
+    if options.append {
+        return resolve_append(sources, &layout, options, labels);
+    }
 
     if layout.n_cols == 3 {
         if options.fields.is_some() {
@@ -197,6 +203,7 @@ pub(super) fn resolve_sources(
                 "bed import: BED3 input is always bool; drop the dtype".into(),
             ));
         }
+        reject_bed3_fill(options)?;
         reject_overrides(options)?;
         return Ok(ResolvedImport::SingleTrack {
             track: required_track(options, "for BED3 input")?,
@@ -229,7 +236,7 @@ pub(super) fn resolve_sources(
                     .ok_or_else(|| {
                         PbzError::Metadata("bed import: inference produced no dtype".into())
                     })?
-                    .finish(exact)?
+                    .finish(exact, options.fill.as_ref())?
             }
         };
         return Ok(ResolvedImport::SingleTrack {
@@ -262,17 +269,7 @@ pub(super) fn resolve_sources(
     }
     let columns = selected
         .iter()
-        .map(|name| {
-            header
-                .iter()
-                .position(|field| field == name)
-                .filter(|index| *index >= 3)
-                .ok_or_else(|| {
-                    PbzError::Metadata(format!(
-                        "bed import: BED column {name:?} is not a value BED column of the header"
-                    ))
-                })
-        })
+        .map(|name| value_column(header, name))
         .collect::<Result<Vec<_>>>()?;
 
     if sources.len() == 1 && selected.len() > 1 {
@@ -302,7 +299,7 @@ pub(super) fn resolve_sources(
                 word_bool_fields.join(", ")
             )));
         }
-        let dtype = joint.finish(exact)?;
+        let dtype = joint.finish(exact, options.fill.as_ref())?;
         return Ok(ResolvedImport::Wide {
             track: required_track(options, "when several BED columns form one wide track")?,
             dtype,
@@ -327,7 +324,7 @@ pub(super) fn resolve_sources(
                 .get(&name)
                 .copied()
                 .map(Ok)
-                .unwrap_or_else(|| state.finish(exact))?;
+                .unwrap_or_else(|| state.finish(exact, options.fill.as_ref()))?;
             Ok(ResolvedField { name, dtype })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -338,10 +335,103 @@ pub(super) fn resolve_sources(
     })
 }
 
+/// Resolve an append into one existing track: BED3 presence, headerless BED4,
+/// or the one selected BED column of a headered file.
+fn resolve_append(
+    sources: &[Source],
+    layout: &BedLayout,
+    options: &BedImportOptions,
+    labels: Vec<String>,
+) -> Result<ResolvedImport> {
+    let track = required_track(options, "to append")?;
+    reject_overrides(options)?;
+    if layout.n_cols == 3 {
+        if options.fields.is_some() {
+            return Err(PbzError::Metadata(
+                "bed append: BED3 input has no BED value columns to select".into(),
+            ));
+        }
+        reject_bed3_fill(options)?;
+        return Ok(ResolvedImport::SingleTrack {
+            track,
+            dtype: Dtype::Bool,
+            column: None,
+            labels,
+        });
+    }
+    let column = match &layout.header {
+        None if layout.n_cols > 4 => {
+            return Err(PbzError::Metadata(format!(
+                "bed append: input has {} BED value columns and no header; add a header line",
+                layout.n_cols - 3
+            )));
+        }
+        None if options.fields.is_some() => {
+            return Err(PbzError::Metadata(
+                "bed append: `--field` selection requires a #-prefixed header".into(),
+            ));
+        }
+        None => 3,
+        Some(header) => {
+            let selected = options
+                .fields
+                .clone()
+                .unwrap_or_else(|| header[3..].to_vec());
+            let [name] = selected.as_slice() else {
+                return Err(PbzError::Metadata(format!(
+                    "bed append: {track:?} takes one BED column but {} are selected; select one with `--field`",
+                    selected.len()
+                )));
+            };
+            value_column(header, name)?
+        }
+    };
+    let dtype = match options.dtype {
+        Some(dtype) => dtype,
+        None => {
+            let (mut states, exact) = infer_states(sources, &[column], options.infer_rows)?;
+            states
+                .pop()
+                .ok_or_else(|| {
+                    PbzError::Metadata("bed append: inference produced no dtype".into())
+                })?
+                .finish(exact, options.fill.as_ref())?
+        }
+    };
+    Ok(ResolvedImport::SingleTrack {
+        track,
+        dtype,
+        column: Some(column),
+        labels,
+    })
+}
+
+fn value_column(header: &[String], name: &str) -> Result<usize> {
+    header
+        .iter()
+        .position(|field| field == name)
+        .filter(|index| *index >= 3)
+        .ok_or_else(|| {
+            PbzError::Metadata(format!(
+                "bed import: BED column {name:?} is not a value BED column of the header"
+            ))
+        })
+}
+
 fn required_track(options: &BedImportOptions, context: &str) -> Result<String> {
     options.track.clone().ok_or_else(|| {
         PbzError::Metadata(format!("bed import: a track name is required {context}"))
     })
+}
+
+fn reject_bed3_fill(options: &BedImportOptions) -> Result<()> {
+    match &options.fill {
+        None => Ok(()),
+        Some(_) => Err(PbzError::Metadata(
+            "bed import: BED3 input makes a bool mask whose gaps are always false; drop the fill"
+                .into(),
+        )),
+    }
 }
 
 fn reject_overrides(options: &BedImportOptions) -> Result<()> {
@@ -370,7 +460,9 @@ fn infer_states(
     Ok((states, exact))
 }
 
-/// Sample `bed_gz` and infer a dtype per file column (0-based, `>= 3`).
+/// Sample `bed_gz` and infer a dtype per file column (0-based, `>= 3`), for
+/// columns with the default fill: an integer dtype keeps its maximum free for
+/// the null.
 pub fn infer_bed_dtypes(
     bed_gz: &Path,
     columns: &[usize],
@@ -380,7 +472,7 @@ pub fn infer_bed_dtypes(
     let exact = sample_columns(bed_gz, columns, infer_rows, &mut states)?;
     let dtypes = states
         .into_iter()
-        .map(|state| state.finish(exact))
+        .map(|state| state.finish(exact, None))
         .collect::<Result<Vec<_>>>()?;
     log_inferred(&[bed_gz.to_path_buf()], columns, &dtypes, exact);
     Ok(dtypes)
@@ -405,16 +497,28 @@ fn log_inferred(sources: &[std::path::PathBuf], columns: &[usize], dtypes: &[Dty
 ///
 /// Observations are combined before choosing each dtype, so the result covers
 /// values from every source rather than promoting independently inferred
-/// dtypes after the fact.
+/// dtypes after the fact. Each column has the default fill, as in
+/// [`infer_bed_dtypes`].
 pub fn infer_bed_dtypes_for_sources(
     sources: &[Source],
     columns: &[usize],
     infer_rows: InferRows,
 ) -> Result<Vec<Dtype>> {
+    infer_with_fills(sources, columns, &vec![None; columns.len()], infer_rows)
+}
+
+/// [`infer_bed_dtypes_for_sources`] with one fill per column.
+pub(super) fn infer_with_fills(
+    sources: &[Source],
+    columns: &[usize],
+    fills: &[Option<&Fill>],
+    infer_rows: InferRows,
+) -> Result<Vec<Dtype>> {
     let (states, exact) = infer_states(sources, columns, infer_rows)?;
     let dtypes = states
         .into_iter()
-        .map(|state| state.finish(exact))
+        .zip(fills)
+        .map(|(state, fill)| state.finish(exact, *fill))
         .collect::<Result<Vec<_>>>()?;
     let paths = sources.iter().map(|s| s.path.clone()).collect::<Vec<_>>();
     log_inferred(&paths, columns, &dtypes, exact);
@@ -429,7 +533,7 @@ fn sample_columns(
     limit: InferRows,
     inference: &mut [InferenceState],
 ) -> Result<bool> {
-    let mut reader = open_bgzf(path).map_err(|error| PbzError::Store(error.to_string()))?;
+    let mut reader = open_bgzf(path)?;
     let mut line = Vec::new();
     let mut count = 0usize;
     while reader
@@ -479,7 +583,7 @@ where
     for cell in cells {
         state.observe(cell.as_ref())?;
     }
-    state.finish(true)
+    state.finish(true, None)
 }
 
 #[derive(Clone)]
@@ -577,7 +681,11 @@ impl InferenceState {
     /// nothing (head-of-file coverage says nothing about peak coverage), so a
     /// sampled scan returns the conservative class instead: bool only for
     /// true/false words, int32 for integers, float32 for decimals.
-    fn finish(self, exact: bool) -> Result<Dtype> {
+    ///
+    /// Unless `fill` is a value, the gaps hold the null, so an integer dtype
+    /// keeps its maximum free. A fill of na also keeps numeric 0/1 columns off
+    /// bool, which has no null.
+    fn finish(self, exact: bool, fill: Option<&Fill>) -> Result<Dtype> {
         if self.min.is_none() && !self.saw_decimal {
             return Err(PbzError::Metadata("bed type inference: no values".into()));
         }
@@ -586,7 +694,8 @@ impl InferenceState {
                 "bed type inference: column mixes true/false with numbers".into(),
             ));
         }
-        if self.bool_only && (exact || self.saw_word_bool) {
+        let numeric_bool = !matches!(fill, Some(Fill::Na));
+        if self.bool_only && (self.saw_word_bool || (exact && numeric_bool)) {
             return Ok(Dtype::Bool);
         }
         if self.saw_decimal {
@@ -602,34 +711,47 @@ impl InferenceState {
         let max = self
             .max
             .ok_or_else(|| PbzError::Metadata("bed type inference: no integers".into()))?;
+        let keep_max_free = !matches!(fill, Some(Fill::Value(_)));
+        let fits = |type_max: i128| max < type_max || (!keep_max_free && max == type_max);
+        let note = if keep_max_free {
+            "; the maximum of each integer dtype marks a missing value"
+        } else {
+            ""
+        };
         if !exact {
-            return if min >= i128::from(i32::MIN) && max <= i128::from(i32::MAX) {
+            return if min >= i128::from(i32::MIN) && fits(i32::MAX.into()) {
                 Ok(Dtype::I32)
-            } else if min >= 0 && max <= u32::MAX as i128 {
+            } else if min >= 0 && fits(u32::MAX.into()) {
                 Ok(Dtype::U32)
             } else {
                 Err(PbzError::Metadata(format!(
-                    "bed type inference: integer range {min}..{max} exceeds int32/uint32"
+                    "bed type inference: integer range {min}..{max} exceeds int32/uint32{note}"
                 )))
             };
         }
         if min >= 0 {
-            return match max {
-                0..=255 => Ok(Dtype::U8),
-                256..=65_535 => Ok(Dtype::U16),
-                65_536..=4_294_967_295 => Ok(Dtype::U32),
-                _ => Err(PbzError::Metadata(format!(
-                    "bed type inference: integer {max} exceeds uint32"
-                ))),
+            return if fits(u8::MAX.into()) {
+                Ok(Dtype::U8)
+            } else if fits(u16::MAX.into()) {
+                Ok(Dtype::U16)
+            } else if fits(u32::MAX.into()) {
+                Ok(Dtype::U32)
+            } else {
+                Err(PbzError::Metadata(format!(
+                    "bed type inference: integer {max} exceeds uint32{note}"
+                )))
             };
         }
-        match (min, max) {
-            (-128..=-1, ..=127) => Ok(Dtype::I8),
-            (-32_768..=-1, ..=32_767) => Ok(Dtype::I16),
-            (-2_147_483_648..=-1, ..=2_147_483_647) => Ok(Dtype::I32),
-            _ => Err(PbzError::Metadata(format!(
-                "bed type inference: signed range {min}..{max} exceeds int32"
-            ))),
+        if min >= i128::from(i8::MIN) && fits(i8::MAX.into()) {
+            Ok(Dtype::I8)
+        } else if min >= i128::from(i16::MIN) && fits(i16::MAX.into()) {
+            Ok(Dtype::I16)
+        } else if min >= i128::from(i32::MIN) && fits(i32::MAX.into()) {
+            Ok(Dtype::I32)
+        } else {
+            Err(PbzError::Metadata(format!(
+                "bed type inference: signed range {min}..{max} exceeds int32{note}"
+            )))
         }
     }
 }
@@ -640,8 +762,9 @@ mod tests {
 
     #[test]
     fn infers_smallest_integer_dtype() {
-        assert_eq!(infer_dtype(["0", "255"]).unwrap(), Dtype::U8);
-        assert_eq!(infer_dtype(["-128", "127"]).unwrap(), Dtype::I8);
+        assert_eq!(infer_dtype(["0", "254"]).unwrap(), Dtype::U8);
+        assert_eq!(infer_dtype(["0", "255"]).unwrap(), Dtype::U16);
+        assert_eq!(infer_dtype(["-128", "126"]).unwrap(), Dtype::I8);
         assert_eq!(infer_dtype(["-129", "128"]).unwrap(), Dtype::I16);
         assert_eq!(infer_dtype(["65536"]).unwrap(), Dtype::U32);
     }
@@ -659,7 +782,7 @@ mod tests {
         let mut b = InferenceState::default();
         b.observe("70000").unwrap();
         a.merge(&b);
-        assert_eq!(a.finish(true).unwrap(), Dtype::U32);
+        assert_eq!(a.finish(true, None).unwrap(), Dtype::U32);
     }
 
     #[test]
@@ -668,18 +791,18 @@ mod tests {
         for cell in ["0", "1", "2"] {
             ints.observe(cell).unwrap();
         }
-        assert_eq!(ints.clone().finish(false).unwrap(), Dtype::I32);
-        assert_eq!(ints.finish(true).unwrap(), Dtype::U8);
+        assert_eq!(ints.clone().finish(false, None).unwrap(), Dtype::I32);
+        assert_eq!(ints.finish(true, None).unwrap(), Dtype::U8);
 
         // Numeric 0/1 could be a truncated count; only true/false words prove bool.
         let mut numeric_flags = InferenceState::default();
         numeric_flags.observe("0").unwrap();
         numeric_flags.observe("1").unwrap();
-        assert_eq!(numeric_flags.finish(false).unwrap(), Dtype::I32);
+        assert_eq!(numeric_flags.finish(false, None).unwrap(), Dtype::I32);
 
         let mut word_flags = InferenceState::default();
         word_flags.observe("false").unwrap();
-        assert_eq!(word_flags.finish(false).unwrap(), Dtype::Bool);
+        assert_eq!(word_flags.finish(false, None).unwrap(), Dtype::Bool);
     }
 
     #[test]
@@ -687,7 +810,7 @@ mod tests {
         let mut state = InferenceState::default();
         state.observe("false").unwrap();
         state.observe("7").unwrap();
-        assert!(state.clone().finish(true).is_err());
-        assert!(state.finish(false).is_err());
+        assert!(state.clone().finish(true, None).is_err());
+        assert!(state.finish(false, None).is_err());
     }
 }

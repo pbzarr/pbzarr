@@ -5,10 +5,10 @@ use std::str::FromStr;
 
 use rayon::prelude::*;
 
+use crate::Region;
 use crate::error::{PbzError, Result};
-use crate::genome::Region;
 use crate::io::{Dtype, Numeric};
-use crate::track::Track;
+use crate::measurement::Measurement;
 
 /// The statistic one `stat` run computes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,9 +323,9 @@ pub(crate) fn plan_batches(ranges: &[FlatRange], chunk: u64, max_chunks: u64) ->
 /// Batches for `ranges` (sorted by `lo`) on the track's inner chunk grid,
 /// so a sharded track decodes only the subchunks its regions touch. Each
 /// batch is read one column tile at a time, so its budget covers one tile.
-pub(crate) fn plan(track: &Track, ranges: &[FlatRange]) -> Result<Vec<Batch>> {
-    let (inner_pos, inner_col) = track.inner_chunk_shape()?;
-    let tile_bytes = inner_pos * inner_col * dtype_size(track.dtype()) as u64;
+pub(crate) fn plan(measurement: &Measurement, ranges: &[FlatRange]) -> Result<Vec<Batch>> {
+    let (inner_pos, inner_col) = measurement.inner_chunk_shape()?;
+    let tile_bytes = inner_pos * inner_col * measurement.dtype().size() as u64;
     let max_chunks = (BATCH_TARGET_BYTES / tile_bytes.max(1)).max(1);
     Ok(plan_batches(ranges, inner_pos, max_chunks))
 }
@@ -414,18 +414,18 @@ pub struct StatOutput {
 const BATCH_TARGET_BYTES: u64 = 8 << 20;
 
 pub fn run(
-    track: &Track,
+    measurement: &Measurement,
     regions: &[Region],
     kind: StatKind,
     options: &StatOptions,
 ) -> Result<StatOutput> {
-    let (selected, samples) = resolve_columns(track, options)?;
-    let offsets = track.genome().offsets();
+    let (selected, samples) = resolve_columns(measurement, options)?;
+    let offsets = measurement.reference().offsets();
     let mut ranges: Vec<FlatRange> = regions
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let base = offsets[r.contig.as_usize()] as u64;
+            let base = offsets[r.contig.as_usize()];
             FlatRange {
                 region_pos: i,
                 lo: base + r.start,
@@ -450,23 +450,39 @@ pub fn run(
     } else {
         regions.len()
     };
-    let batches = plan(track, &ranges)?;
-    let result = dispatch(track, &batches, n_regions, &selected, kind)?;
+    let batches = plan(measurement, &ranges)?;
+    let result = dispatch(measurement, &batches, n_regions, &selected, kind)?;
     Ok(StatOutput { samples, result })
 }
 
+/// Reject shapes whose column handling below would otherwise be wrong.
+fn ensure_supported_shape(measurement: &Measurement) -> Result<()> {
+    if measurement.rank() > 2 {
+        return Err(PbzError::UnsupportedEncoding(format!(
+            "track {:?} with dimensions ({}): stat reduces position and renders at most one more axis",
+            measurement.name(),
+            measurement.dimensions().join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// Selected column indices (empty for rank-1) plus their labels.
-fn resolve_columns(track: &Track, options: &StatOptions) -> Result<(Vec<usize>, Vec<String>)> {
-    if track.rank() == 1 {
+fn resolve_columns(
+    measurement: &Measurement,
+    options: &StatOptions,
+) -> Result<(Vec<usize>, Vec<String>)> {
+    ensure_supported_shape(measurement)?;
+    if measurement.rank() == 1 {
         if options.columns.is_some() {
             return Err(PbzError::Metadata(format!(
                 "track {:?} has no column axis",
-                track.name()
+                measurement.name()
             )));
         }
         return Ok((Vec::new(), Vec::new()));
     }
-    let labels = track.column_labels()?;
+    let labels = measurement.column_labels()?;
     let Some(requested) = &options.columns else {
         return Ok(((0..labels.len()).collect(), labels));
     };
@@ -475,7 +491,7 @@ fn resolve_columns(track: &Track, options: &StatOptions) -> Result<(Vec<usize>, 
         let index = labels.iter().position(|c| c == label).ok_or_else(|| {
             PbzError::Metadata(format!(
                 "column {label:?} is not a column of track {:?} (available: {})",
-                track.name(),
+                measurement.name(),
                 labels.join(", ")
             ))
         })?;
@@ -484,17 +500,8 @@ fn resolve_columns(track: &Track, options: &StatOptions) -> Result<(Vec<usize>, 
     Ok((indices, requested.clone()))
 }
 
-fn dtype_size(dtype: Dtype) -> usize {
-    match dtype {
-        Dtype::Bool | Dtype::U8 | Dtype::I8 => 1,
-        Dtype::U16 | Dtype::I16 => 2,
-        Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
-        Dtype::F64 => 8,
-    }
-}
-
 fn dispatch(
-    track: &Track,
+    measurement: &Measurement,
     batches: &[Batch],
     n_regions: usize,
     selected: &[usize],
@@ -502,39 +509,67 @@ fn dispatch(
 ) -> Result<StatResult> {
     match kind {
         StatKind::Mean | StatKind::Min | StatKind::Max => {
-            let rows = match track.dtype() {
+            let rows = match measurement.dtype() {
                 Dtype::U8 => {
-                    float_rows::<u8>(track, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<u8>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
                 Dtype::U16 => {
-                    float_rows::<u16>(track, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<u16>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
                 Dtype::U32 => {
-                    float_rows::<u32>(track, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<u32>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
+                }
+                Dtype::U64 => {
+                    float_rows::<u64>(measurement, batches, n_regions, selected, kind, |v| {
+                        v as f64
+                    })
                 }
                 Dtype::I8 => {
-                    float_rows::<i8>(track, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<i8>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
                 Dtype::I16 => {
-                    float_rows::<i16>(track, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<i16>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
                 Dtype::I32 => {
-                    float_rows::<i32>(track, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<i32>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
+                }
+                Dtype::I64 => {
+                    float_rows::<i64>(measurement, batches, n_regions, selected, kind, |v| {
+                        v as f64
+                    })
                 }
                 Dtype::F32 => {
-                    float_rows::<f32>(track, batches, n_regions, selected, kind, |v| v.into())
+                    float_rows::<f32>(measurement, batches, n_regions, selected, kind, |v| {
+                        v.into()
+                    })
                 }
-                Dtype::F64 => float_rows::<f64>(track, batches, n_regions, selected, kind, |v| v),
-                Dtype::Bool => float_rows::<bool>(track, batches, n_regions, selected, kind, |v| {
-                    if v { 1.0 } else { 0.0 }
-                }),
+                Dtype::F64 => {
+                    float_rows::<f64>(measurement, batches, n_regions, selected, kind, |v| v)
+                }
+                Dtype::Bool => {
+                    float_rows::<bool>(measurement, batches, n_regions, selected, kind, |v| {
+                        if v { 1.0 } else { 0.0 }
+                    })
+                }
             }?;
             Ok(StatResult::PerRegion(rows))
         }
         StatKind::Median | StatKind::Hist => {
-            let accs = match track.dtype() {
+            let accs = match measurement.dtype() {
                 Dtype::U8 => count_accs::<u8>(
-                    track,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -542,7 +577,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::I8 => count_accs::<i8>(
-                    track,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -550,7 +585,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::U16 => count_accs::<u16>(
-                    track,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -564,7 +599,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::I16 => count_accs::<i16>(
-                    track,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -578,7 +613,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::U32 => count_accs::<u32>(
-                    track,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -592,7 +627,7 @@ fn dispatch(
                     |v| v.into(),
                 ),
                 Dtype::I32 => count_accs::<i32>(
-                    track,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -605,8 +640,24 @@ fn dispatch(
                     },
                     |v| v.into(),
                 ),
+                Dtype::U64 => count_accs::<u64>(
+                    measurement,
+                    batches,
+                    n_regions,
+                    selected,
+                    || CountAcc::windowed(0, 256),
+                    |v| i64::try_from(v).unwrap_or(i64::MAX),
+                ),
+                Dtype::I64 => count_accs::<i64>(
+                    measurement,
+                    batches,
+                    n_regions,
+                    selected,
+                    || CountAcc::windowed(0, 256),
+                    |v| v,
+                ),
                 Dtype::Bool => count_accs::<bool>(
-                    track,
+                    measurement,
                     batches,
                     n_regions,
                     selected,
@@ -617,14 +668,14 @@ fn dispatch(
                     dtype: format!(
                         "{} needs an integer or bool track, but track {:?} is f32",
                         kind.name(),
-                        track.name(),
+                        measurement.name(),
                     ),
                 }),
                 Dtype::F64 => Err(PbzError::InvalidDtype {
                     dtype: format!(
                         "{} needs an integer or bool track, but track {:?} is f64",
                         kind.name(),
-                        track.name(),
+                        measurement.name(),
                     ),
                 }),
             }?;
@@ -634,7 +685,13 @@ fn dispatch(
                     .map(|per_sample| {
                         per_sample
                             .into_iter()
-                            .map(|acc| StatValue::Int(acc.median()))
+                            .map(|acc| {
+                                if acc.total() == 0 {
+                                    StatValue::Float(f64::NAN)
+                                } else {
+                                    StatValue::Int(acc.median())
+                                }
+                            })
                             .collect()
                     })
                     .collect();
@@ -646,15 +703,15 @@ fn dispatch(
     }
 }
 
-fn float_rows<T: Numeric>(
-    track: &Track,
+fn float_rows<T: Numeric + PartialEq>(
+    measurement: &Measurement,
     batches: &[Batch],
     n_regions: usize,
     selected: &[usize],
     kind: StatKind,
     convert: fn(T) -> f64,
 ) -> Result<Vec<Vec<StatValue>>> {
-    let integer = !matches!(track.dtype(), Dtype::F32 | Dtype::F64);
+    let integer = !matches!(measurement.dtype(), Dtype::F32 | Dtype::F64);
     let extreme = |v: f64| {
         if integer && v.is_finite() {
             StatValue::Int(v as i64)
@@ -665,7 +722,7 @@ fn float_rows<T: Numeric>(
     let rows = match kind {
         StatKind::Mean => finalize_rows(
             accumulate::<T, MeanAcc, _, _>(
-                track,
+                measurement,
                 batches,
                 n_regions,
                 selected,
@@ -676,7 +733,7 @@ fn float_rows<T: Numeric>(
         ),
         StatKind::Min => finalize_rows(
             accumulate::<T, MinAcc, _, _>(
-                track,
+                measurement,
                 batches,
                 n_regions,
                 selected,
@@ -687,7 +744,7 @@ fn float_rows<T: Numeric>(
         ),
         StatKind::Max => finalize_rows(
             accumulate::<T, MaxAcc, _, _>(
-                track,
+                measurement,
                 batches,
                 n_regions,
                 selected,
@@ -710,15 +767,15 @@ fn finalize_rows<A: Accumulator<Output = f64>>(
         .collect()
 }
 
-fn count_accs<T: Numeric>(
-    track: &Track,
+fn count_accs<T: Numeric + PartialEq>(
+    measurement: &Measurement,
     batches: &[Batch],
     n_regions: usize,
     selected: &[usize],
     init: impl Fn() -> CountAcc + Sync,
     convert: fn(T) -> i64,
 ) -> Result<Vec<Vec<CountAcc>>> {
-    accumulate::<T, CountAcc, _, _>(track, batches, n_regions, selected, init, convert)
+    accumulate::<T, CountAcc, _, _>(measurement, batches, n_regions, selected, init, convert)
 }
 
 fn hist_table(accs: Vec<Vec<CountAcc>>) -> HistTable {
@@ -752,7 +809,7 @@ type RegionAccs<A> = Vec<(usize, Vec<A>)>;
 /// partials in unit order, so a work unit holds at most one tile of one
 /// batch in memory.
 fn accumulate<T, A, I, C>(
-    track: &Track,
+    measurement: &Measurement,
     batches: &[Batch],
     n_regions: usize,
     selected: &[usize],
@@ -760,12 +817,17 @@ fn accumulate<T, A, I, C>(
     convert: C,
 ) -> Result<Vec<Vec<A>>>
 where
-    T: Numeric,
+    T: Numeric + PartialEq,
     A: Accumulator,
     I: Fn() -> A + Sync,
     C: Fn(T) -> A::Value + Sync,
 {
-    let rank1 = track.rank() == 1;
+    // The accumulators already skip NaN.
+    let null = match T::DTYPE {
+        Dtype::F32 | Dtype::F64 => None,
+        _ => measurement.null_as::<T>(),
+    };
+    let rank1 = measurement.rank() == 1;
     let n_out = if rank1 { 1 } else { selected.len() };
     let tiles = if rank1 {
         vec![ColumnTile {
@@ -773,7 +835,7 @@ where
             picks: vec![(0, 0)],
         }]
     } else {
-        column_tiles(selected, track.inner_chunk_shape()?.1)
+        column_tiles(selected, measurement.inner_chunk_shape()?.1)
     };
     let units: Vec<(&Batch, &ColumnTile)> = batches
         .iter()
@@ -788,9 +850,9 @@ where
             .par_iter()
             .map(|&(batch, tile)| {
                 let data = if rank1 {
-                    track.read_flat::<T>(batch.span.clone())?
+                    measurement.read_flat::<T>(batch.span.clone())?
                 } else {
-                    track.read_flat_columns::<T>(
+                    measurement.read_flat_columns::<T>(
                         batch.span.clone(),
                         tile.cols.start as u64..tile.cols.end as u64,
                     )?
@@ -807,7 +869,10 @@ where
                     for row in first..first + rows {
                         let base = row * width;
                         for (acc, &(_, col)) in accs.iter_mut().zip(&tile.picks) {
-                            acc.update(convert(raw[base + col - tile.cols.start]));
+                            let value = raw[base + col - tile.cols.start];
+                            if null != Some(value) {
+                                acc.update(convert(value));
+                            }
                         }
                     }
                 }
@@ -996,13 +1061,88 @@ mod tests {
         assert_eq!(coalesce(&mut ranges), vec![(0, 80), (100, 110)]);
     }
 
-    use crate::genome::{Contig, Genome, Region};
-    use crate::io::Dtype;
-    use crate::store::PbzStore;
-    use crate::track::TrackConfig;
+    use crate::TrackConfig;
+    use crate::dataset::{Dataset, Reference};
+    use crate::import::Import;
+    use crate::io::{Dtype, OutputSchema, OutputSinkMut, ValueReader};
+    use crate::{Contig, Region};
 
-    fn fixture(dir: &std::path::Path) -> PbzStore {
-        let genome = Genome::new(vec![
+    /// Writes runs of `(contig, start, values)`; other positions keep the fill.
+    #[derive(Clone)]
+    struct RunReader {
+        genome: Reference,
+        schema: OutputSchema,
+        runs: Vec<(&'static str, u64, Vec<f64>)>,
+    }
+
+    impl ValueReader for RunReader {
+        fn contigs(&self) -> &Reference {
+            &self.genome
+        }
+
+        fn output_schema(&self) -> &OutputSchema {
+            &self.schema
+        }
+
+        fn read_into(
+            &mut self,
+            contig: &str,
+            start: u64,
+            end: u64,
+            outputs: &mut [OutputSinkMut<'_>],
+        ) -> std::result::Result<(), crate::io::ReaderError> {
+            for (name, at, values) in &self.runs {
+                if *name != contig {
+                    continue;
+                }
+                for (pos, &v) in (*at..).zip(values) {
+                    if pos < start || pos >= end {
+                        continue;
+                    }
+                    let row = (pos - start) as usize;
+                    match &mut outputs[0] {
+                        OutputSinkMut::I32(dst) => dst[row] = v as i32,
+                        OutputSinkMut::F32(dst) => dst[row] = v as f32,
+                        _ => panic!("test reader supports i32/f32 sinks only"),
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn fork(&self) -> std::result::Result<Self, crate::io::ReaderError> {
+            Ok(self.clone())
+        }
+    }
+
+    type Runs = Vec<(&'static str, u64, Vec<f64>)>;
+
+    /// Import one reader per entry of `columns`, as columns when `cfg` has
+    /// labels.
+    fn import(ds: &mut Dataset, name: &str, cfg: TrackConfig, columns: Vec<Runs>) {
+        let genome = ds.reference().unwrap().clone();
+        let readers: Vec<RunReader> = columns
+            .into_iter()
+            .map(|runs| RunReader {
+                genome: genome.clone(),
+                schema: OutputSchema::single("value", cfg.dtype),
+                runs,
+            })
+            .collect();
+        let as_columns = cfg.columns.is_some();
+        let builder = Import::from_readers(readers)
+            .unwrap()
+            .into_dataset(ds, vec![(name.into(), cfg)]);
+        let builder = if as_columns {
+            builder.readers_as_columns()
+        } else {
+            builder
+        };
+        builder.run().unwrap();
+    }
+
+    fn reference() -> Reference {
+        Reference::new(vec![
             Contig {
                 name: "chr1".into(),
                 length: 10,
@@ -1012,64 +1152,46 @@ mod tests {
                 length: 6,
             },
         ])
-        .unwrap();
-        let mut store = PbzStore::create(dir.join("stat.pbz")).unwrap();
-        store
-            .create_track("depth", genome.clone(), TrackConfig::new(Dtype::I32))
-            .unwrap();
-        store
-            .create_track(
-                "af",
-                genome.clone(),
-                TrackConfig::new(Dtype::F32)
-                    .columns(vec!["s1".into(), "s2".into()])
-                    .column_dim("sample"),
-            )
-            .unwrap();
-        let depth = store.track("depth").unwrap();
-        let chr1 = genome.resolve(&"chr1".parse().unwrap()).unwrap();
-        depth
-            .write_region(
-                &chr1,
-                ndarray::Array1::from(vec![5i32, 5, 5, 7, 7, 0, 0, 0, 0, 0]).into_dyn(),
-            )
-            .unwrap();
-        let af = store.track("af").unwrap();
-        let window = genome.resolve(&"chr1:2-6".parse().unwrap()).unwrap();
-        af.write_region(
-            &window,
-            ndarray::Array2::from_shape_vec(
-                (4, 2),
-                vec![0.5f32, 1.0, 0.5, 1.0, 0.25, 1.0, 0.25, 1.0],
-            )
-            .unwrap()
-            .into_dyn(),
-        )
-        .unwrap();
-        store
-            .create_track(
-                "cov",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns(vec!["s1".into(), "s2".into()])
-                    .column_dim("sample"),
-            )
-            .unwrap();
-        let cov = store.track("cov").unwrap();
-        let head = genome.resolve(&"chr1:0-4".parse().unwrap()).unwrap();
-        cov.write_region(
-            &head,
-            ndarray::Array2::from_shape_vec((4, 2), vec![1i32, 5, 1, 5, 2, 5, 0, 7])
-                .unwrap()
-                .into_dyn(),
-        )
-        .unwrap();
-        store
+        .unwrap()
     }
 
-    fn whole(track: &crate::track::Track) -> Vec<Region> {
-        track
-            .genome()
+    fn fixture(dir: &std::path::Path) -> Dataset {
+        let mut ds = Dataset::create(dir.join("stat.pbz"), reference()).unwrap();
+        let samples = || vec!["s1".to_string(), "s2".to_string()];
+        import(
+            &mut ds,
+            "depth",
+            TrackConfig::new(Dtype::I32),
+            vec![vec![("chr1", 0, vec![5., 5., 5., 7., 7.])]],
+        );
+        import(
+            &mut ds,
+            "af",
+            TrackConfig::new(Dtype::F32)
+                .columns(samples())
+                .column_dim("sample"),
+            vec![
+                vec![("chr1", 2, vec![0.5, 0.5, 0.25, 0.25])],
+                vec![("chr1", 2, vec![1.0; 4])],
+            ],
+        );
+        import(
+            &mut ds,
+            "cov",
+            TrackConfig::new(Dtype::I32)
+                .columns(samples())
+                .column_dim("sample"),
+            vec![
+                vec![("chr1", 0, vec![1., 1., 2., 0.])],
+                vec![("chr1", 0, vec![5., 5., 5., 7.])],
+            ],
+        );
+        ds
+    }
+
+    fn whole(measurement: &Measurement) -> Vec<Region> {
+        measurement
+            .reference()
             .iter()
             .map(|(id, c)| Region {
                 contig: id,
@@ -1082,11 +1204,17 @@ mod tests {
     #[test]
     fn run_mean_median_on_integer_track() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let track = store.track("depth").unwrap();
-        let regions = whole(track);
+        let ds = fixture(dir.path());
+        let measurement = Measurement::root(&ds, "depth").unwrap();
+        let regions = whole(&measurement);
 
-        let mean = run(track, &regions, StatKind::Mean, &StatOptions::default()).unwrap();
+        let mean = run(
+            &measurement,
+            &regions,
+            StatKind::Mean,
+            &StatOptions::default(),
+        )
+        .unwrap();
         assert!(mean.samples.is_empty());
         let StatResult::PerRegion(rows) = mean.result else {
             panic!("expected rows")
@@ -1101,7 +1229,13 @@ mod tests {
             start: 0,
             end: 5,
         };
-        let median = run(track, &[head], StatKind::Median, &StatOptions::default()).unwrap();
+        let median = run(
+            &measurement,
+            &[head],
+            StatKind::Median,
+            &StatOptions::default(),
+        )
+        .unwrap();
         let StatResult::PerRegion(rows) = median.result else {
             panic!("expected rows")
         };
@@ -1111,12 +1245,12 @@ mod tests {
     #[test]
     fn dispatch_merges_region_partials_across_batches() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let track = store.track("depth").unwrap();
+        let ds = fixture(dir.path());
+        let measurement = Measurement::root(&ds, "depth").unwrap();
         let batches = plan_batches(&[range(0, 0, 10), range(1, 10, 16)], 4, 1);
         assert!(batches.len() > 1);
         let StatResult::PerRegion(rows) =
-            dispatch(track, &batches, 2, &[], StatKind::Mean).unwrap()
+            dispatch(&measurement, &batches, 2, &[], StatKind::Mean).unwrap()
         else {
             panic!("expected rows")
         };
@@ -1126,7 +1260,7 @@ mod tests {
         );
         let batches = plan_batches(&[range(0, 0, 5)], 4, 1);
         let StatResult::PerRegion(rows) =
-            dispatch(track, &batches, 1, &[], StatKind::Median).unwrap()
+            dispatch(&measurement, &batches, 1, &[], StatKind::Median).unwrap()
         else {
             panic!("expected rows")
         };
@@ -1136,9 +1270,9 @@ mod tests {
     #[test]
     fn run_hist_unions_overlapping_regions() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let track = store.track("depth").unwrap();
-        let contig = whole(track)[0].contig;
+        let ds = fixture(dir.path());
+        let measurement = Measurement::root(&ds, "depth").unwrap();
+        let contig = whole(&measurement)[0].contig;
         let overlapping = [
             Region {
                 contig,
@@ -1151,7 +1285,13 @@ mod tests {
                 end: 8,
             },
         ];
-        let out = run(track, &overlapping, StatKind::Hist, &StatOptions::default()).unwrap();
+        let out = run(
+            &measurement,
+            &overlapping,
+            StatKind::Hist,
+            &StatOptions::default(),
+        )
+        .unwrap();
         let StatResult::Hist(table) = out.result else {
             panic!("expected hist")
         };
@@ -1163,13 +1303,13 @@ mod tests {
     #[test]
     fn run_mean_skips_nan_and_subsets_columns() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let track = store.track("af").unwrap();
-        let regions = whole(track);
+        let ds = fixture(dir.path());
+        let measurement = Measurement::root(&ds, "af").unwrap();
+        let regions = whole(&measurement);
         let options = StatOptions {
             columns: Some(vec!["s2".into(), "s1".into()]),
         };
-        let out = run(track, &regions, StatKind::Mean, &options).unwrap();
+        let out = run(&measurement, &regions, StatKind::Mean, &options).unwrap();
         assert_eq!(out.samples, vec!["s2".to_string(), "s1".to_string()]);
         let StatResult::PerRegion(rows) = out.result else {
             panic!("expected rows")
@@ -1187,36 +1327,42 @@ mod tests {
     #[test]
     fn run_rejects_median_on_float_and_bad_columns() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let af = store.track("af").unwrap();
-        let regions = whole(af);
-        let err = run(af, &regions, StatKind::Median, &StatOptions::default()).unwrap_err();
+        let ds = fixture(dir.path());
+        let af = Measurement::root(&ds, "af").unwrap();
+        let regions = whole(&af);
+        let err = run(&af, &regions, StatKind::Median, &StatOptions::default()).unwrap_err();
         assert!(err.to_string().contains("median"), "{err}");
         assert!(err.to_string().contains("f32"), "{err}");
 
         let options = StatOptions {
             columns: Some(vec!["nope".into()]),
         };
-        let err = run(af, &regions, StatKind::Mean, &options).unwrap_err();
+        let err = run(&af, &regions, StatKind::Mean, &options).unwrap_err();
         assert!(err.to_string().contains("s1"), "{err}");
 
-        let depth = store.track("depth").unwrap();
+        let depth = Measurement::root(&ds, "depth").unwrap();
         let options = StatOptions {
             columns: Some(vec!["s1".into()]),
         };
-        assert!(run(depth, &whole(depth), StatKind::Mean, &options).is_err());
+        assert!(run(&depth, &whole(&depth), StatKind::Mean, &options).is_err());
     }
 
     #[test]
     fn run_hist_on_rank2_track_counts_per_sample() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = fixture(dir.path());
-        let track = store.track("cov").unwrap();
-        let region = track
-            .genome()
-            .resolve(&"chr1:0-4".parse().unwrap())
+        let ds = fixture(dir.path());
+        let measurement = Measurement::root(&ds, "cov").unwrap();
+        let region = measurement
+            .reference()
+            .region(&"chr1:0-4".parse().unwrap())
             .unwrap();
-        let out = run(track, &[region], StatKind::Hist, &StatOptions::default()).unwrap();
+        let out = run(
+            &measurement,
+            &[region],
+            StatKind::Hist,
+            &StatOptions::default(),
+        )
+        .unwrap();
         assert_eq!(out.samples, vec!["s1".to_string(), "s2".to_string()]);
         let StatResult::Hist(table) = out.result else {
             panic!("expected hist")
@@ -1230,53 +1376,46 @@ mod tests {
 
     /// 100 positions × 5 samples, 10×2 inner chunks in 40×2 shards.
     /// value = pos*10 + col.
-    fn sharded(dir: &std::path::Path) -> PbzStore {
-        let genome = Genome::new(vec![Contig {
+    fn sharded(dir: &std::path::Path) -> Dataset {
+        let reference = Reference::new(vec![Contig {
             name: "chr1".into(),
             length: 100,
         }])
         .unwrap();
-        let mut store = PbzStore::create(dir.join("sharded.pbz")).unwrap();
-        store
-            .create_track(
-                "cov",
-                genome.clone(),
-                TrackConfig::new(Dtype::I32)
-                    .columns((1..=5).map(|i| format!("s{i}")).collect())
-                    .column_dim("sample")
-                    .chunk_size(10)
-                    .column_chunk_size(2)
-                    .shard_size(40)
-                    .shard_column_size(2),
-            )
-            .unwrap();
-        let all = genome.resolve(&"chr1".parse().unwrap()).unwrap();
-        let data: Vec<i32> = (0..100)
-            .flat_map(|pos| (0..5).map(move |col| pos * 10 + col))
+        let mut ds = Dataset::create(dir.join("sharded.pbz"), reference).unwrap();
+        let columns = (0..5)
+            .map(|col| {
+                vec![(
+                    "chr1",
+                    0,
+                    (0..100).map(|pos| (pos * 10 + col) as f64).collect(),
+                )]
+            })
             .collect();
-        store
-            .track("cov")
-            .unwrap()
-            .write_region(
-                &all,
-                ndarray::Array2::from_shape_vec((100, 5), data)
-                    .unwrap()
-                    .into_dyn(),
-            )
-            .unwrap();
-        store
+        import(
+            &mut ds,
+            "cov",
+            TrackConfig::new(Dtype::I32)
+                .columns((1..=5).map(|i| format!("s{i}")).collect())
+                .column_dim("sample")
+                .chunk(10)
+                .shard(4)
+                .shard_columns(2),
+            columns,
+        );
+        ds
     }
 
     #[test]
     fn inner_chunk_shape_reports_subchunk_of_sharded_track() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = sharded(dir.path());
-        let track = store.track("cov").unwrap();
-        assert_eq!(track.chunk_size().unwrap(), 40);
-        assert_eq!(track.inner_chunk_shape().unwrap(), (10, 2));
-        // Unsharded: the chunk itself (clipped to the 16-position track).
-        let store = fixture(dir.path());
-        let depth = store.track("depth").unwrap();
+        let ds = sharded(dir.path());
+        let cov = Measurement::root(&ds, "cov").unwrap();
+        assert_eq!(cov.chunk_size().unwrap(), 40);
+        assert_eq!(cov.inner_chunk_shape().unwrap(), (10, 1));
+        // A shard capped at one inner chunk: the inner chunk is the shard.
+        let ds = fixture(dir.path());
+        let depth = Measurement::root(&ds, "depth").unwrap();
         assert_eq!(
             depth.inner_chunk_shape().unwrap(),
             (depth.chunk_size().unwrap() as u64, 1)
@@ -1284,13 +1423,31 @@ mod tests {
     }
 
     #[test]
+    fn read_flat_crosses_contig_boundary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut ds = Dataset::create(dir.path().join("flat.pbz"), reference()).unwrap();
+        import(
+            &mut ds,
+            "depth",
+            TrackConfig::new(Dtype::I32),
+            vec![vec![
+                ("chr1", 0, (0..10).map(f64::from).collect()),
+                ("chr2", 0, (100..106).map(f64::from).collect()),
+            ]],
+        );
+        let depth = Measurement::root(&ds, "depth").unwrap();
+        let flat = depth.read_flat::<i32>(8..12).unwrap();
+        assert_eq!(flat.into_raw_vec_and_offset().0, vec![8, 9, 100, 101]);
+    }
+
+    #[test]
     fn plan_reads_only_touched_inner_chunks_within_a_shard() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = sharded(dir.path());
-        let track = store.track("cov").unwrap();
+        let ds = sharded(dir.path());
+        let cov = Measurement::root(&ds, "cov").unwrap();
         // Both regions sit in shard 0 (positions 0..40) but in inner chunks 0 and 3.
         let ranges = [range(0, 0, 5), range(1, 30, 35)];
-        let batches = plan(track, &ranges).unwrap();
+        let batches = plan(&cov, &ranges).unwrap();
         let spans: Vec<_> = batches.iter().map(|b| b.span.clone()).collect();
         assert_eq!(spans, vec![0..5, 30..35]);
     }
@@ -1316,12 +1473,12 @@ mod tests {
     #[test]
     fn run_mean_on_sharded_track_across_column_tiles() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = sharded(dir.path());
-        let track = store.track("cov").unwrap();
-        let contig = whole(track)[0].contig;
+        let ds = sharded(dir.path());
+        let cov = Measurement::root(&ds, "cov").unwrap();
+        let contig = whole(&cov)[0].contig;
         let region = |start, end| Region { contig, start, end };
         let regions = [region(0, 5), region(30, 35), region(35, 85)];
-        let out = run(track, &regions, StatKind::Mean, &StatOptions::default()).unwrap();
+        let out = run(&cov, &regions, StatKind::Mean, &StatOptions::default()).unwrap();
         let StatResult::PerRegion(rows) = out.result else {
             panic!("expected rows")
         };
@@ -1336,7 +1493,7 @@ mod tests {
         let options = StatOptions {
             columns: Some(vec!["s5".into(), "s2".into()]),
         };
-        let out = run(track, &regions[..1], StatKind::Max, &options).unwrap();
+        let out = run(&cov, &regions[..1], StatKind::Max, &options).unwrap();
         let StatResult::PerRegion(rows) = out.result else {
             panic!("expected rows")
         };

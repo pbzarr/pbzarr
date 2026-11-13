@@ -1,21 +1,26 @@
 //! `pbz view`: stream one track as bedGraph-like text.
 
-use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
-use noodles_bgzf as bgzf;
 use pbzarr::io::{Dtype, Numeric};
-use pbzarr::{PbzStore, Region, Track};
+use pbzarr::{Dataset, Measurement};
+use rayon::prelude::*;
 
-/// Target bytes fetched per batch (full stored width).
-const BATCH_TARGET_BYTES: usize = 64 << 20;
+use crate::output::Output;
+use crate::regions::{NamedRegion, select_regions};
+
+/// Target bytes fetched per batch over the selected columns.
+const BATCH_TARGET_BYTES: u64 = 64 << 20;
+const BATCH_MAX_ROWS: u64 = 4 << 20;
 
 pub(crate) struct ViewSpec {
     pub store: PathBuf,
     pub track: Option<String>,
+    pub regions: Vec<String>,
+    pub regions_file: Option<PathBuf>,
     pub columns: Vec<String>,
     pub output: Option<PathBuf>,
     pub no_header: bool,
@@ -24,65 +29,73 @@ pub(crate) struct ViewSpec {
 }
 
 pub(crate) fn run_view(spec: &ViewSpec) -> Result<()> {
-    if !(1..=17).contains(&spec.precision) {
-        bail!("--precision must be between 1 and 17 significant digits");
-    }
-    // One rayon pool serves both zarrs chunk decode and BGZF compression.
-    if let Some(threads) = spec.threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads.get())
-            .build_global()
-            .context("configure worker thread pool")?;
-    }
-    let store = PbzStore::open(&spec.store)
-        .with_context(|| format!("open store {}", spec.store.display()))?;
-    let track = resolve_track(&store, spec.track.as_deref())?;
-    let (columns, names) = resolve_columns(track, &spec.columns)?;
-    let precision = usize::from(spec.precision);
-    match spec.output.as_deref() {
-        None => {
-            let mut out = BufWriter::new(io::stdout());
-            stream(track, &columns, &names, spec.no_header, precision, &mut out)?;
-            out.flush()?;
-        }
-        Some(path)
-            if path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("gz")) =>
-        {
-            let file =
-                File::create(path).with_context(|| format!("create output {}", path.display()))?;
-            // Deflate dominates the export cost; compress blocks on a pool.
-            let mut out = bgzf::io::MultithreadedWriter::new(file);
-            stream(track, &columns, &names, spec.no_header, precision, &mut out)?;
-            out.finish()?;
-        }
-        Some(path) => {
-            let file =
-                File::create(path).with_context(|| format!("create output {}", path.display()))?;
-            let mut out = BufWriter::new(file);
-            stream(track, &columns, &names, spec.no_header, precision, &mut out)?;
-            out.flush()?;
-        }
+    let precision = crate::output::prepare(spec.precision, spec.threads)?;
+    let store = open_store(&spec.store)?;
+    let measurement = resolve_measurement(&store, spec.track.as_deref())?;
+    let (columns, names) = resolve_columns(&measurement, &spec.columns)?;
+    let regions = select_regions(
+        measurement.reference(),
+        &spec.regions,
+        spec.regions_file.as_ref(),
+    )?;
+    let mut out = Output::create(spec.output.as_deref())?;
+    stream(
+        &measurement,
+        &regions,
+        &columns,
+        &names,
+        spec.no_header,
+        precision,
+        &mut out,
+    )?;
+    out.finish()?;
+    Ok(())
+}
+
+pub(crate) fn open_store(path: &Path) -> Result<Dataset> {
+    require_store(path)?;
+    Dataset::open_read_only(path).with_context(|| format!("open store {}", path.display()))
+}
+
+pub(crate) fn require_store(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("store {} does not exist", path.display());
     }
     Ok(())
 }
 
-pub(crate) fn resolve_track<'s>(store: &'s PbzStore, requested: Option<&str>) -> Result<&'s Track> {
-    let mut available: Vec<&str> = store.track_names().collect();
-    available.sort_unstable();
+/// Track names in sorted order.
+fn track_names(store: &Dataset) -> Vec<&str> {
+    let mut names: Vec<&str> = store
+        .variables()
+        .values()
+        .filter(|v| v.is_track())
+        .map(|v| v.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+pub(crate) fn resolve_measurement<'s>(
+    store: &'s Dataset,
+    requested: Option<&str>,
+) -> Result<Measurement<'s>> {
+    let available = track_names(store);
     match requested {
-        Some(name) => store.track(name).with_context(|| {
-            format!(
-                "track {name:?} is not in the store (available: {})",
-                available.join(", ")
-            )
-        }),
+        Some(name) => {
+            if !available.contains(&name) {
+                bail!(
+                    "track {name:?} is not in the store (available: {})",
+                    available.join(", ")
+                );
+            }
+            Ok(Measurement::root(store, name)?)
+        }
         None => match available.as_slice() {
             [] => bail!("store has no tracks"),
-            [only] => Ok(store.track(only).expect("listed track exists")),
+            [only] => Ok(Measurement::root(store, only)?),
             _ => bail!(
-                "store has {} tracks; name one (available: {})",
+                "store has {} tracks; name one with --track (available: {})",
                 available.len(),
                 available.join(", ")
             ),
@@ -91,17 +104,27 @@ pub(crate) fn resolve_track<'s>(store: &'s PbzStore, requested: Option<&str>) ->
 }
 
 /// Column indices to emit (empty for rank-1) and the header names.
-fn resolve_columns(track: &Track, requested: &[String]) -> Result<(Vec<usize>, Vec<String>)> {
-    if track.rank() == 1 {
+fn resolve_columns(
+    measurement: &Measurement,
+    requested: &[String],
+) -> Result<(Vec<usize>, Vec<String>)> {
+    if measurement.rank() > 2 {
+        bail!(
+            "track {:?} with dimensions ({}): view renders a position axis and at most one more",
+            measurement.name(),
+            measurement.dimensions().join(", ")
+        );
+    }
+    if measurement.rank() == 1 {
         if !requested.is_empty() {
             bail!(
                 "--columns was given but track {:?} has no column axis",
-                track.name()
+                measurement.name()
             );
         }
-        return Ok((Vec::new(), vec![track.name().to_owned()]));
+        return Ok((Vec::new(), vec![measurement.name().to_owned()]));
     }
-    let labels = track.column_labels()?;
+    let labels = measurement.column_labels()?;
     if requested.is_empty() {
         return Ok(((0..labels.len()).collect(), labels));
     }
@@ -113,7 +136,7 @@ fn resolve_columns(track: &Track, requested: &[String]) -> Result<(Vec<usize>, V
             .with_context(|| {
                 format!(
                     "column {label:?} is not a column of track {:?}",
-                    track.name()
+                    measurement.name()
                 )
             })?;
         indices.push(index);
@@ -122,7 +145,8 @@ fn resolve_columns(track: &Track, requested: &[String]) -> Result<(Vec<usize>, V
 }
 
 fn stream<W: Write>(
-    track: &Track,
+    measurement: &Measurement,
+    regions: &[NamedRegion],
     columns: &[usize],
     names: &[String],
     no_header: bool,
@@ -136,24 +160,27 @@ fn stream<W: Write>(
         }
         writeln!(out)?;
     }
-    match track.dtype() {
-        Dtype::U8 => export::<u8, _>(track, columns, precision, out),
-        Dtype::U16 => export::<u16, _>(track, columns, precision, out),
-        Dtype::U32 => export::<u32, _>(track, columns, precision, out),
-        Dtype::I8 => export::<i8, _>(track, columns, precision, out),
-        Dtype::I16 => export::<i16, _>(track, columns, precision, out),
-        Dtype::I32 => export::<i32, _>(track, columns, precision, out),
-        Dtype::F32 => export::<f32, _>(track, columns, precision, out),
-        Dtype::F64 => export::<f64, _>(track, columns, precision, out),
-        Dtype::Bool => export::<bool, _>(track, columns, precision, out),
+    match measurement.dtype() {
+        Dtype::U8 => export::<u8, _>(measurement, regions, columns, precision, out),
+        Dtype::U16 => export::<u16, _>(measurement, regions, columns, precision, out),
+        Dtype::U32 => export::<u32, _>(measurement, regions, columns, precision, out),
+        Dtype::U64 => export::<u64, _>(measurement, regions, columns, precision, out),
+        Dtype::I8 => export::<i8, _>(measurement, regions, columns, precision, out),
+        Dtype::I16 => export::<i16, _>(measurement, regions, columns, precision, out),
+        Dtype::I32 => export::<i32, _>(measurement, regions, columns, precision, out),
+        Dtype::I64 => export::<i64, _>(measurement, regions, columns, precision, out),
+        Dtype::F32 => export::<f32, _>(measurement, regions, columns, precision, out),
+        Dtype::F64 => export::<f64, _>(measurement, regions, columns, precision, out),
+        Dtype::Bool => export::<bool, _>(measurement, regions, columns, precision, out),
     }
 }
 
 /// Per-dtype cell behavior: run equality, missing-ness, rounding, rendering.
-trait Cell: Numeric {
+trait Cell: Numeric + PartialEq {
     fn same(self, other: Self) -> bool;
-    fn is_missing(self) -> bool {
-        false
+    /// `null` is the track's declared integer null, if any.
+    fn is_missing(self, null: Option<Self>) -> bool {
+        null == Some(self)
     }
     /// Round to `sig` significant digits before run comparison, so values
     /// that print identically collapse into one row. Identity for non-floats.
@@ -177,7 +204,7 @@ macro_rules! impl_cell_int {
     };
 }
 
-impl_cell_int!(u8, u16, u32, i8, i16, i32);
+impl_cell_int!(u8, u16, u32, u64, i8, i16, i32, i64);
 
 macro_rules! impl_cell_float {
     ($($ty:ty),*) => {
@@ -186,7 +213,7 @@ macro_rules! impl_cell_float {
             fn same(self, other: Self) -> bool {
                 self.to_bits() == other.to_bits()
             }
-            fn is_missing(self) -> bool {
+            fn is_missing(self, _null: Option<Self>) -> bool {
                 self.is_nan()
             }
             fn quantize(self, sig: usize) -> Self {
@@ -218,72 +245,155 @@ impl Cell for bool {
     }
 }
 
-fn dtype_size(dtype: Dtype) -> usize {
-    match dtype {
-        Dtype::Bool | Dtype::U8 | Dtype::I8 => 1,
-        Dtype::U16 | Dtype::I16 => 2,
-        Dtype::U32 | Dtype::I32 | Dtype::F32 => 4,
-        Dtype::F64 => 8,
-    }
+/// One read of a contiguous column range and the output slots it fills.
+struct ColumnRead {
+    cols: std::ops::Range<u64>,
+    /// (output slot, track column) pairs.
+    picks: Vec<(usize, usize)>,
 }
 
-/// Read one batch as per-output-column vectors, quantized to the output
-/// precision. `columns` is empty for rank-1 tracks. `read_region` returns a
-/// standard-layout (row-major) array, so `raw[row * n_cols + col]` addresses
-/// `(row, col)`.
-fn read_columns<T: Cell>(
-    track: &Track,
-    region: &Region,
-    columns: &[usize],
-    precision: usize,
-) -> Result<Vec<Vec<T>>> {
-    let array = track.read_region::<T>(region)?;
-    if track.rank() == 1 {
-        let raw = array.into_raw_vec_and_offset().0;
-        return Ok(vec![
-            raw.into_iter().map(|v| v.quantize(precision)).collect(),
-        ]);
+/// Reads that touch only the inner column chunks holding selected columns.
+/// Touched chunks that are next to each other share one read.
+fn column_reads(columns: &[usize], inner_col: u64) -> Vec<ColumnRead> {
+    let inner_col = inner_col.max(1);
+    let mut picks: Vec<(usize, usize)> = columns.iter().copied().enumerate().collect();
+    picks.sort_by_key(|&(slot, col)| (col, slot));
+    let mut reads: Vec<ColumnRead> = Vec::new();
+    for (slot, col) in picks {
+        let chunk = col as u64 / inner_col;
+        match reads.last_mut() {
+            Some(read) if chunk <= (read.cols.end - 1) / inner_col + 1 => {
+                read.cols.end = read.cols.end.max(col as u64 + 1);
+                read.picks.push((slot, col));
+            }
+            _ => reads.push(ColumnRead {
+                cols: col as u64..col as u64 + 1,
+                picks: vec![(slot, col)],
+            }),
+        }
     }
-    let n_cols = array.shape()[1];
-    let raw = array.into_raw_vec_and_offset().0;
-    let rows = raw.len() / n_cols.max(1);
-    Ok(columns
-        .iter()
-        .map(|&col| {
-            (0..rows)
-                .map(|row| raw[row * n_cols + col].quantize(precision))
-                .collect()
+    reads
+}
+
+/// Batch plan on the inner chunk grid of the selected columns.
+struct Plan {
+    inner_pos: u64,
+    batch_chunks: u64,
+    /// Empty for rank-1 tracks.
+    reads: Vec<ColumnRead>,
+    n_out: usize,
+}
+
+impl Plan {
+    fn new(measurement: &Measurement, columns: &[usize]) -> Result<Self> {
+        let (inner_pos, inner_col) = measurement.inner_chunk_shape()?;
+        let inner_pos = inner_pos.max(1);
+        let reads = if measurement.rank() == 1 {
+            Vec::new()
+        } else {
+            column_reads(columns, inner_col)
+        };
+        let width: u64 = if reads.is_empty() {
+            1
+        } else {
+            reads
+                .iter()
+                .map(|read| read.cols.end - read.cols.start)
+                .sum()
+        };
+        let per_chunk = inner_pos * width * measurement.dtype().size() as u64;
+        let batch_chunks = (BATCH_TARGET_BYTES / per_chunk.max(1))
+            .min(BATCH_MAX_ROWS / inner_pos)
+            .max(1);
+        Ok(Self {
+            inner_pos,
+            batch_chunks,
+            reads,
+            n_out: columns.len().max(1),
         })
-        .collect())
+    }
+
+    /// End of the batch that starts at flat position `lo`, at most `hi`.
+    fn batch_end(&self, lo: u64, hi: u64) -> u64 {
+        let first = lo / self.inner_pos * self.inner_pos;
+        (first + self.batch_chunks * self.inner_pos).min(hi)
+    }
+
+    /// Read one batch as per-output-column vectors, quantized to the output
+    /// precision. `read_flat_columns` returns a row-major array, so
+    /// `raw[row * width + col]` addresses `(row, col)`.
+    fn read<T: Cell>(
+        &self,
+        measurement: &Measurement,
+        positions: std::ops::Range<u64>,
+        precision: usize,
+    ) -> Result<Vec<Vec<T>>> {
+        if self.reads.is_empty() {
+            let raw = measurement
+                .read_flat::<T>(positions)?
+                .into_raw_vec_and_offset()
+                .0;
+            return Ok(vec![
+                raw.into_iter().map(|v| v.quantize(precision)).collect(),
+            ]);
+        }
+        let parts: Vec<Vec<(usize, Vec<T>)>> = self
+            .reads
+            .par_iter()
+            .map(|read| {
+                let raw = measurement
+                    .read_flat_columns::<T>(positions.clone(), read.cols.clone())?
+                    .into_raw_vec_and_offset()
+                    .0;
+                let width = (read.cols.end - read.cols.start) as usize;
+                let first = read.cols.start as usize;
+                let rows = raw.len() / width;
+                Ok(read
+                    .picks
+                    .iter()
+                    .map(|&(slot, col)| {
+                        let values = (0..rows)
+                            .map(|row| raw[row * width + col - first].quantize(precision))
+                            .collect();
+                        (slot, values)
+                    })
+                    .collect())
+            })
+            .collect::<Result<_>>()?;
+        let mut out: Vec<Vec<T>> = (0..self.n_out).map(|_| Vec::new()).collect();
+        for (slot, values) in parts.into_iter().flatten() {
+            out[slot] = values;
+        }
+        Ok(out)
+    }
 }
 
-/// Stream the whole track in genome order, collapsing equal-value runs.
-/// One `read_region` per batch; zarrs decodes its chunks concurrently.
+/// Stream each region in order, collapsing equal-value runs. Runs do not
+/// cross region edges.
 fn export<T: Cell, W: Write>(
-    track: &Track,
+    measurement: &Measurement,
+    regions: &[NamedRegion],
     columns: &[usize],
     precision: usize,
     out: &mut W,
 ) -> Result<()> {
-    let per_row = track.columns_count()? * dtype_size(track.dtype());
-    let batch_rows = (BATCH_TARGET_BYTES / per_row.max(1)).clamp(1, 4 << 20) as u64;
-    for (id, contig) in track.genome().iter() {
-        // Open run on this contig: (start, end, values).
+    let plan = Plan::new(measurement, columns)?;
+    let null = measurement.null_as::<T>();
+    let offsets = measurement.reference().offsets();
+    for named in regions {
+        let base = offsets[named.region.contig.as_usize()];
+        let chrom = named.chrom.as_str();
+        // Open run in this region: (start, end, values).
         let mut run: Option<(u64, u64, Vec<T>)> = None;
-        let mut start = 0u64;
-        while start < contig.length {
-            let end = (start + batch_rows).min(contig.length);
-            let region = Region {
-                contig: id,
-                start,
-                end,
-            };
-            let batch = read_columns::<T>(track, &region, columns, precision)?;
+        let mut start = named.region.start;
+        while start < named.region.end {
+            let end = plan.batch_end(base + start, base + named.region.end) - base;
+            let batch = plan.read::<T>(measurement, base + start..base + end, precision)?;
             let rows = batch.first().map_or(0, Vec::len);
             for row in 0..rows {
                 let pos = start + row as u64;
-                if batch.iter().all(|column| column[row].is_missing()) {
-                    flush(out, &contig.name, &mut run, precision)?;
+                if batch.iter().all(|column| column[row].is_missing(null)) {
+                    flush(out, chrom, &mut run, null, precision)?;
                     continue;
                 }
                 let extends = run.as_ref().is_some_and(|(_, run_end, values)| {
@@ -297,7 +407,7 @@ fn export<T: Cell, W: Write>(
                     run.as_mut().expect("checked above").1 += 1;
                     continue;
                 }
-                flush(out, &contig.name, &mut run, precision)?;
+                flush(out, chrom, &mut run, null, precision)?;
                 run = Some((
                     pos,
                     pos + 1,
@@ -306,7 +416,7 @@ fn export<T: Cell, W: Write>(
             }
             start = end;
         }
-        flush(out, &contig.name, &mut run, precision)?;
+        flush(out, chrom, &mut run, null, precision)?;
     }
     Ok(())
 }
@@ -315,6 +425,7 @@ fn flush<T: Cell>(
     out: &mut impl Write,
     contig: &str,
     run: &mut Option<(u64, u64, Vec<T>)>,
+    null: Option<T>,
     precision: usize,
 ) -> io::Result<()> {
     let Some((start, end, values)) = run.take() else {
@@ -323,7 +434,11 @@ fn flush<T: Cell>(
     write!(out, "{contig}\t{start}\t{end}")?;
     for value in values {
         out.write_all(b"\t")?;
-        value.write_to(&mut *out, precision)?;
+        if value.is_missing(null) {
+            out.write_all(b"NaN")?;
+        } else {
+            value.write_to(&mut *out, precision)?;
+        }
     }
     out.write_all(b"\n")
 }
@@ -331,6 +446,14 @@ fn flush<T: Cell>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_reads_skip_untouched_chunks_and_merge_neighbors() {
+        let reads = column_reads(&[9, 0, 3], 2);
+        let spans: Vec<_> = reads.iter().map(|r| r.cols.clone()).collect();
+        assert_eq!(spans, vec![0..4, 9..10]);
+        assert_eq!(reads[0].picks, vec![(1, 0), (2, 3)]);
+    }
 
     #[test]
     fn quantize_collapses_values_that_print_identically() {

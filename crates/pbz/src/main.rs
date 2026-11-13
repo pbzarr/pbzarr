@@ -1,34 +1,38 @@
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use indicatif_log_bridge::LogWrapper;
-use log::{LevelFilter, debug, info, warn};
-use pbzarr::import::progress::{self, make_sink};
-use pbzarr::import::{
-    Config, GenomeGeometry, LayoutEstimate, LayoutKnobs, TrackShape, auto_in_flight_spans,
-};
-use pbzarr::io::{Dtype, ValueReader as _};
-use pbzarr::{ExplicitArraySpec, Genome, PbzStore, ScaleConfig};
+use log::{LevelFilter, debug, info};
+use pbzarr::Dataset;
+use pbzarr::import::Source;
+use pbzarr::import::progress;
+use pbzarr::import::{Config, ConfigBuilder};
+use pbzarr::import::{Target, store_reference};
+use pbzarr::io::Dtype;
+use pbzarr::stat::StatKind;
+use pbzarr::{ExplicitArraySpec, Fill, Reference};
 use pbzarr_readers::{
-    BamReader, BedColumnSpec, BedImportOptions, BedSchema, BigWigReader, ColumnSelector, D4Reader,
-    DepthFilter, ImportMode, InferRows, OverlapMode, column_index_by_name, execute_bed_schema_plan,
-    from_bam, from_bed_matrix, from_bigwig, from_d4, infer_bed_dtypes,
-    infer_bed_dtypes_for_sources, plan_bed_schema, read_bed_layout,
+    BedColumnRequest, BedImportOptions, BedSchema, DepthFilter, ImportMode, InferRows, OverlapMode,
+    build_bed_schema, execute_bed_schema_plan, from_bam, from_bed_matrix, from_bigwig, from_d4,
+    infer_bed_dtypes, plan_bed_schema, read_bed_layout,
 };
 
 mod fmt;
+mod info;
+mod output;
+mod regions;
 mod stat;
+mod validate;
 mod view;
 
 #[derive(Debug, Parser)]
 #[command(name = "pbz", version, about = "Per-base Zarr tools")]
 struct Cli {
+    #[command(flatten)]
+    global: GlobalOptions,
     #[command(subcommand)]
     command: Command,
 }
@@ -41,21 +45,66 @@ enum Command {
     Stat(StatArgs),
     /// Import data into a PBZ store.
     Import(Box<ImportArgs>),
-    /// Compute and publish a multiscale pyramid for a track.
-    Scale(ScaleArgs),
+    /// Append columns to a track of a format-0.5 PBZ store.
+    Append(Box<AppendArgs>),
+    /// Print the reference, dimensions and per-variable layout of a store.
+    Info(InfoArgs),
+    /// Check a store against the PBZ format rules. Exit code 1 when the
+    /// store is not valid.
+    Validate(ValidateArgs),
 }
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  pbz view cohort.pbz depth\n  pbz view -o depth.bedgraph.gz cohort.pbz depth\n  pbz view -c s1,s2 cohort.pbz af"
+    after_help = "Examples:\n  pbz info cohort.pbz\n  pbz info cohort.pbz.zip --json\n\nThe chunk column gives the inner chunk shape. The shard column gives the shard shape, or - when the array is not sharded. stored and objects count the chunk or shard objects, without the zarr.json metadata."
+)]
+struct InfoArgs {
+    /// PBZ store to describe (directory or zip).
+    store: PathBuf,
+    /// Print one JSON object instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Examples:\n  pbz validate cohort.pbz\n  pbz validate cohort.pbz.zip --json\n\nThe check reads metadata, the reference arrays and the dimension labels. It does not read track values."
+)]
+struct ValidateArgs {
+    /// PBZ store to check (directory or zip).
+    store: PathBuf,
+    /// Print one JSON object with the status and the problems. Each problem
+    /// also gives the code of the format rule it breaks.
+    #[arg(long)]
+    json: bool,
+}
+
+/// The track shapes that `view` and `stat` read.
+macro_rules! track_limits {
+    () => {
+        "The track must have position as its first dimension and at most one other \
+         dimension. Tracks on a bin_N dimension are not supported. A null marks a missing \
+         value: NaN in a float track, and the _FillValue in an integer track. A float \
+         _FillValue must be NaN. view prints a null as NaN and leaves out rows where all \
+         columns are null. stat skips nulls."
+    };
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = concat!(
+        "Examples:\n  pbz view cohort.pbz --track depth\n  pbz view cohort.pbz --track depth -r chr1:0-1000000 -o depth.bedgraph.gz\n  pbz view cohort.pbz --track af -c s1,s2 -R targets.bed\n\nEach region is written in order. Rows do not extend across region edges.\n\n",
+        track_limits!()
+    )
 )]
 struct ViewArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
     /// PBZ store to export.
     store: PathBuf,
     /// Track to export. Optional when the store holds exactly one track.
+    #[arg(long)]
     track: Option<String>,
+    #[command(flatten)]
+    regions: RegionArgs,
     /// Column labels of a rank-2 track, comma-separated or repeated.
     /// Default: all columns in stored order.
     #[arg(short('c'), long, value_name = "LABEL", value_delimiter = ',')]
@@ -78,22 +127,22 @@ struct ViewArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  pbz stat cohort.pbz depth\n  pbz stat -s median -r targets.bed cohort.pbz depth\n  pbz stat -s hist -c s1,s2 cohort.pbz af"
+    after_help = concat!(
+        "Examples:\n  pbz stat cohort.pbz --track depth\n  pbz stat cohort.pbz --track depth -s median -R targets.bed\n  pbz stat cohort.pbz --track depth -r chr1:0-1000 -r chr2:500-900\n  pbz stat cohort.pbz --track af -s hist -c s1,s2\n\nWithout a region, stat writes one row per contig.\n\n",
+        track_limits!()
+    )
 )]
 struct StatArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
     /// PBZ store to read.
     store: PathBuf,
     /// Track to compute over. Optional when the store holds exactly one track.
+    #[arg(long)]
     track: Option<String>,
-    /// BED file with the regions to compute over. Default: one region per
-    /// chromosome.
-    #[arg(short('r'), long, value_name = "BED")]
-    region: Option<PathBuf>,
-    /// Statistic: mean, min, max, median, or hist.
-    #[arg(short('s'), long, value_name = "STAT", default_value = "mean")]
-    stat: String,
+    #[command(flatten)]
+    regions: RegionArgs,
+    /// Statistic to compute.
+    #[arg(short('s'), long, value_enum, default_value_t = StatArg::Mean)]
+    stat: StatArg,
     /// Column labels of a rank-2 track, comma-separated or repeated.
     /// Default: all columns in stored order.
     #[arg(short('c'), long, value_name = "LABEL", value_delimiter = ',')]
@@ -113,35 +162,176 @@ struct StatArgs {
 }
 
 #[derive(Debug, Args)]
+struct RegionArgs {
+    /// Region CHROM:START-END, 0-based and half-open as in BED
+    /// (chr1:0-100 is the first 100 bases). CHROM alone selects the whole
+    /// contig, also when the name contains ':'. An end past the contig is an
+    /// error. Repeat for more regions.
+    /// Without -r or -R, the command reads the whole genome.
+    #[arg(short('r'), long = "region", value_name = "REGION")]
+    region: Vec<String>,
+    /// BED file (plain, gzip, or bgzip) with regions to read after the -r
+    /// regions. The first three tab-separated columns give CHROM, START,
+    /// END, 0-based and half-open. Lines that start with #, track, or
+    /// browser are skipped.
+    #[arg(short('R'), long = "regions", value_name = "BED")]
+    regions: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct ImportArgs {
     #[command(subcommand)]
     format: ImportCommand,
 }
 
 #[derive(Debug, Args)]
-struct ScaleArgs {
+struct AppendArgs {
+    #[command(subcommand)]
+    format: AppendCommand,
+}
+
+#[derive(Debug, Subcommand)]
+#[command(
+    after_help = "The store fixes chunks, shards, codecs and the column dimension, so \
+                  append takes no layout flags. Every root variable over the appended \
+                  dimension grows. The tracks that the append writes get values in the \
+                  new columns: --track, and with bam --mode composition also the \
+                  {track}_{field} tracks. In the other variables, the new columns read \
+                  as the fill value. A variable without that dimension, such as a \
+                  reduction across columns, keeps its shape and becomes stale. pbz does \
+                  not detect or mark it. Append cannot yet grow a track whose shard holds \
+                  more than one column, which is the import default (--shard-columns 16). \
+                  To append later, import with --shard-columns 1."
+)]
+enum AppendCommand {
+    /// Append columns decoded from tabix-indexed BED files.
+    Bed(AppendBedArgs),
+    /// Append columns decoded from BAM/CRAM files.
+    Bam(AppendBamArgs),
+    /// Append columns decoded from d4 files.
+    #[command(
+        arg_required_else_help = true,
+        after_help = "Examples:\n  pbz append d4 cohort.pbz s3.d4 s4.d4:custom_label --track depth"
+    )]
+    D4(AppendSignalArgs),
+    /// Append columns decoded from bigWig files.
+    #[command(
+        name = "bigwig",
+        arg_required_else_help = true,
+        after_help = "Examples:\n  pbz append bigwig cohort.pbz kidney.bw:kidney --track signal"
+    )]
+    BigWig(AppendBigWigArgs),
+}
+
+/// The store, the sources and the track every append names.
+#[derive(Debug, Args)]
+struct AppendTarget {
+    /// PBZ store to grow. It must exist.
+    store: PathBuf,
     #[command(flatten)]
-    global: GlobalOptions,
-    /// PBZ store containing the track.
-    #[arg(short('z'), long, value_name = "PATH")]
-    pbz: PathBuf,
-    /// Track to build a pyramid for.
-    #[arg(short('t'), long, value_name = "NAME")]
-    track: String,
-    /// Comma-separated downsampling factors (e.g. 8,64,512), strictly
-    /// ascending with no duplicates. Defaults to the built-in ladder.
-    #[arg(short('s'), long, value_name = "LIST")]
-    scales: Option<String>,
-    /// Number of scale workers.
-    #[arg(short('j'), long, value_name = "N", default_value_t = 4)]
-    workers: usize,
-    /// Show scale progress on stderr. This is the default; the flag is
-    /// accepted for symmetry with --no-progress.
+    input: ImportInputOptions,
+    /// Track to grow. It must already have a column dimension.
     #[arg(long)]
-    progress: bool,
-    /// Hide the scale progress display.
-    #[arg(long, conflicts_with = "progress")]
+    track: String,
+}
+
+/// Flags that import and append share.
+#[derive(Debug, Args)]
+struct RunOptions {
+    /// Worker threads for decode and write.
+    #[arg(short = 't', long, default_value_t = 4)]
+    threads: usize,
+    /// Position chunks each reader decodes per read pass. Default: auto
+    /// (up to 4M positions, fewer when that leaves workers short of pieces).
+    #[arg(long = "decode-chunks", value_name = "N")]
+    decode_chunks: Option<usize>,
+    /// Hide the progress display.
+    #[arg(long)]
     no_progress: bool,
+}
+
+impl RunOptions {
+    /// A progress sink labeled `label` unless `--no-progress` or `quiet` turned
+    /// it off. The pipeline sizes the sink itself.
+    fn builder(&self, label: &str, quiet: bool) -> ConfigBuilder {
+        ConfigBuilder {
+            workers: Some(self.threads),
+            decode_chunks: self.decode_chunks,
+            progress: (!self.no_progress && !quiet).then(|| label.to_owned()),
+            ..ConfigBuilder::default()
+        }
+    }
+
+    /// Pipeline config for an append. `column_dim` comes from the store, so a
+    /// single source still forms a column batch instead of a scalar track.
+    fn append_config(&self, label: &str, column_dim: String, quiet: bool) -> Config {
+        ConfigBuilder {
+            column_dim: Some(column_dim),
+            ..self.builder(label, quiet)
+        }
+        .build()
+    }
+}
+
+/// The d4 append takes no format flags.
+#[derive(Debug, Args)]
+struct AppendSignalArgs {
+    #[command(flatten)]
+    run: RunOptions,
+    #[command(flatten)]
+    target: AppendTarget,
+}
+
+#[derive(Debug, Args)]
+struct AppendBigWigArgs {
+    #[command(flatten)]
+    run: RunOptions,
+    #[command(flatten)]
+    target: AppendTarget,
+    /// Value of bases that no bigWig interval covers: a number, or na.
+    /// Default: the fill of the stored track. A different fill is refused.
+    #[arg(long, value_name = "VALUE|na", value_parser = parse_fill)]
+    fill: Option<Fill>,
+}
+
+fn parse_fill(value: &str) -> std::result::Result<Fill, String> {
+    Fill::parse(value).map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz append bam depth.pbz s3.bam --track depth\n  pbz append bam comp.pbz s3.cram --track depth --mode composition --fasta ref.fa"
+)]
+struct AppendBamArgs {
+    #[command(flatten)]
+    run: RunOptions,
+    #[command(flatten)]
+    target: AppendTarget,
+    #[command(flatten)]
+    decode: BamDecodeOptions,
+}
+
+/// `--schema` creates several tracks, so it has no append form.
+#[derive(Debug, Args)]
+#[command(
+    arg_required_else_help = true,
+    after_help = "Examples:\n  pbz append bed cohort.pbz s3.bed.gz s4.bed.gz --track depth"
+)]
+struct AppendBedArgs {
+    #[command(flatten)]
+    run: RunOptions,
+    #[command(flatten)]
+    target: AppendTarget,
+    /// BED header column that fills --track (requires a `#`-prefixed header).
+    /// Omit when the header has one BED value column.
+    #[arg(long = "field")]
+    fields: Vec<String>,
+    /// Value of bases that no interval covers: a number, true or false for a
+    /// bool track, or na. Default: the fill of the stored track. A different
+    /// fill is refused.
+    #[arg(long, value_name = "VALUE|na", value_parser = parse_fill)]
+    fill: Option<Fill>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -151,20 +341,27 @@ enum ImportCommand {
     /// Import per-base depth or composition counts from BAM/CRAM files.
     Bam(BamArgs),
     /// Import per-base depth from d4 files.
-    D4(D4Args),
-    /// Import per-base float32 signal from bigWig files (uncovered bases are NaN).
-    #[command(name = "bigwig")]
+    #[command(
+        arg_required_else_help = true,
+        after_help = "Examples:\n  pbz import d4 cohort.pbz s1.d4 s2.d4:custom_label --track depth"
+    )]
+    D4(SignalArgs),
+    /// Import per-base float32 signal from bigWig files.
+    #[command(
+        name = "bigwig",
+        arg_required_else_help = true,
+        after_help = "Examples:\n  pbz import bigwig signal.pbz sample.bw --track signal\n  pbz import bigwig cohort.pbz brain.bw:brain liver.bw:liver --track signal --dim sample\n  pbz import bigwig signal.pbz sample.bw --track signal --fill 0\n\nA bigWig does not say what a base outside its intervals means. By default such a base is missing: it reads as NaN, and the track declares NaN as its _FillValue. Give --fill 0 when the gaps mean 0."
+    )]
     BigWig(BigWigArgs),
 }
 
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth -c sample s1.bed.gz s2.bed.gz\n  pbz import bed -o mask.pbz --genome genome.fai --track callable regions.bed.gz\n  pbz import bed -o stats.pbz --genome genome.fai -c metric --schema schema.tsv wide.bed.gz\n  pbz import bed -o cohort.pbz --genome genome.fai --track depth -c sample --codecs '[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},{\"name\":\"zstd\",\"configuration\":{\"level\":3,\"checksum\":false}}]' s1.bed.gz s2.bed.gz"
+    mut_arg("input_files", |arg| arg.required_unless_present_any(["emit_schema"])),
+    after_help = "Examples:\n  pbz import bed cohort.pbz s1.bed.gz s2.bed.gz --genome genome.fai --track depth --dim sample\n  pbz import bed mask.pbz regions.bed.gz --genome genome.fai --track callable\n  pbz import bed --emit-schema wide.bed.gz > schema.tsv\n  pbz import bed stats.pbz wide.bed.gz --genome genome.fai --dim metric --schema schema.tsv\n\nTracks without --schema (S sources, V selected BED value columns):\n  BED3            one bool track, true where an interval covers the base. Needs --track,\n                  and --dim for several sources.\n  S = 1, V = 1    one track (position). Needs --track when the file has no header.\n  S = 1, V > 1    one track (position, V). The header names are the column labels.\n                  Needs --track and --dim.\n  S > 1, V = 1    one track (position, S). The source labels are the column labels.\n                  Needs --dim, and --track when the files have no header.\n  S > 1, V > 1    one track (position, S) for each value column, with the name of\n                  that column. Needs --dim.\nA file without a `#chrom start end ...` header can have one value column only.\n--dim with one source and one value column also makes a (position, S) track.\n\nBases that no interval covers are missing by default: they hold the null of the\ndtype (NaN for a float, the type maximum for an integer), which the track declares\nas its _FillValue. With this fill, inference keeps the type maximum free, and a\nvalue equal to it is an error. A bool column and a BED3 mask hold false there.\nGive --fill 0 when the gaps mean 0, as in a bedGraph that leaves out zero regions.\n\nSchema rows are BED_COLUMN[<TAB>TRACK[<TAB>DTYPE[<TAB>FILL]]]. An empty or absent\nTRACK takes the header name, an empty or absent DTYPE is inferred, and an empty\nor absent FILL takes --fill, else the default."
 )]
 struct BedArgs {
-    #[command(flatten)]
-    global: GlobalOptions,
     #[command(flatten)]
     import: ImportOptions,
     #[command(flatten)]
@@ -175,8 +372,11 @@ struct BedArgs {
 struct GlobalOptions {
     /// Increase logging verbosity: -v info, -vv debug, -vvv trace. Warnings
     /// and errors always print. `RUST_LOG` overrides this when set.
-    #[arg(short, long, action = ArgAction::Count)]
+    #[arg(short, long, action = ArgAction::Count, global = true)]
     verbose: u8,
+    /// Hide the summary line and the progress display of import and append.
+    #[arg(short, long, global = true)]
+    quiet: bool,
 }
 
 impl GlobalOptions {
@@ -216,88 +416,83 @@ fn init_logging(global: &GlobalOptions) {
 
 #[derive(Debug, Args)]
 struct ImportOptions {
-    /// Number of import workers.
-    #[arg(short = 't', long, default_value_t = 4)]
-    threads: usize,
-    /// Position spans open at once in the import engine. Bounds the open
-    /// chunk buffers, this many times --decode-chunks; more keeps workers
-    /// busy near span boundaries. Default: auto (targets 3x the worker
-    /// count in runnable pieces, clamped to 8..256).
-    #[arg(long = "in-flight", value_name = "N")]
-    in_flight: Option<usize>,
-    /// Position chunks each reader decodes per read pass. Default: auto
-    /// (up to 4M positions, fewer when that leaves workers short of pieces).
-    #[arg(long = "decode-chunks", value_name = "N")]
-    decode_chunks: Option<usize>,
-    /// Position chunk size.
-    #[arg(long)]
-    chunk_size: Option<usize>,
-    /// Column chunk size for multi-source imports.
-    #[arg(long)]
-    column_chunk_size: Option<usize>,
-    /// Position shard size.
-    #[arg(long)]
-    shard_size: Option<usize>,
-    /// Column shard size for multi-source imports.
-    #[arg(long)]
-    shard_column_size: Option<usize>,
-    /// Name for the column dimension of a 2D track (required whenever the
-    /// output is 2D: several sources, or several BED columns in one track).
-    #[arg(short = 'c', long)]
-    column_dim: Option<String>,
-    /// Zarr v3 codec metadata for created `values` arrays: a `codecs` JSON
+    #[command(flatten)]
+    run: RunOptions,
+    /// Positions per inner chunk. A 2D track has one column per inner
+    /// chunk. Default: 65,536.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    chunk: Option<u64>,
+    /// Inner chunks per shard along positions, so a shard holds chunk x N
+    /// positions. A shard is capped at the genome length, rounded up to whole
+    /// chunks. Default: 1,024.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    shard: Option<u64>,
+    /// Columns per shard of a 2D track. A shard is capped at the track
+    /// width. Default: 16. Give 1 to make a track that pbz append can grow.
+    #[arg(
+        long = "shard-columns",
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    shard_columns: Option<u64>,
+    /// Name of the second dimension of a 2D track. A single source with
+    /// --dim still makes a 2D track. Default: `sample` for several d4,
+    /// bigWig or BAM sources. BED import has no default: it needs --dim
+    /// whenever the output is 2D (several sources, or several BED columns in
+    /// one track).
+    #[arg(long, value_name = "NAME")]
+    dim: Option<String>,
+    /// Zarr v3 codec metadata for the created track arrays: a `codecs` JSON
     /// array, or a `{"chunk_grid": ..., "codecs": [...]}` fragment. Pass
     /// `@path` to read the JSON from a file. Replaces the default
-    /// Blosc(zstd-5, byte shuffle) pipeline; express sharding as a
-    /// `sharding_indexed` codec and the outer grid as `chunk_grid`.
+    /// Blosc(zstd-5, byte shuffle) pipeline and the whole chunk and shard
+    /// layout; express sharding as a `sharding_indexed` codec and the outer
+    /// grid as `chunk_grid`. Without `chunk_grid`, the outer grid is 65,536
+    /// positions by 16 columns, capped at the track width.
     #[arg(
         long,
         value_name = "JSON|@FILE",
-        conflicts_with_all = ["chunk_size", "column_chunk_size", "shard_size", "shard_column_size"]
+        conflicts_with_all = ["chunk", "shard", "shard_columns"]
     )]
     codecs: Option<String>,
-    /// Comma-separated downsampling factors (e.g. 16,256), strictly ascending
-    /// with no duplicates. Builds a multiscale pyramid on each imported track
-    /// after the base import.
-    #[arg(long, value_name = "LIST")]
-    scales: Option<String>,
-    /// Show import progress on stderr. This is the default; the flag is
-    /// accepted so scripts can be explicit.
+    /// Write a new single-file zip store. A STORE path that ends in
+    /// `.zip` also does this. The path must not exist.
     #[arg(long)]
-    progress: bool,
-    /// Hide the import progress display.
-    #[arg(long, conflicts_with = "progress")]
-    no_progress: bool,
-    /// Resolve the import, print the destination tracks and the layout
-    /// estimate to stdout, and exit without creating or writing anything.
-    #[arg(long)]
-    dry_run: bool,
+    zip: bool,
+}
+
+fn has_zip_extension(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
 }
 
 impl ImportOptions {
-    /// Base pipeline config, with a progress sink labeled `label` unless
-    /// `--no-progress` turned it off. The pipeline sizes the sink itself, so
-    /// the label is all it needs here.
-    fn config(&self, label: &str) -> Result<Config> {
-        Ok(Config {
-            workers: self.threads,
-            in_flight_spans: self.in_flight.unwrap_or(0),
-            decode_chunks: self.decode_chunks.unwrap_or(0),
-            handle_budget: 0,
-            chunk_size: self.chunk_size,
-            column_chunk_size: self.column_chunk_size,
-            shard_size: self.shard_size,
-            shard_column_size: self.shard_column_size,
-            column_dim: self.column_dim.clone(),
+    /// The import destination for `output`: a new zip store when --zip is
+    /// given or the path ends in `.zip`, otherwise a directory store.
+    fn target<'a>(&self, output: &'a Path) -> Result<Target<'a>> {
+        let zip = self.zip || has_zip_extension(output);
+        if !zip {
+            return Ok(Target::Path(output));
+        }
+        if output.exists() {
+            bail!(
+                "{} exists. A zip store is written once, so give a new path",
+                output.display()
+            );
+        }
+        Ok(Target::Zip(output))
+    }
+
+    fn config(&self, label: &str, quiet: bool) -> Result<Config> {
+        Ok(ConfigBuilder {
+            chunk: self.chunk.map(|n| n as usize),
+            shard: self.shard.map(|n| n as usize),
+            shard_columns: self.shard_columns.map(|n| n as usize),
+            column_dim: self.dim.clone(),
             codecs: self.parse_codecs()?,
-            scales: self
-                .scales
-                .as_deref()
-                .map(parse_scales)
-                .transpose()?
-                .unwrap_or_default(),
-            progress: (!self.no_progress && !self.dry_run).then(|| make_sink(label)),
-        })
+            ..self.run.builder(label, quiet)
+        }
+        .build())
     }
 
     /// Parse `--codecs`: inline JSON, or `@path` to a JSON file.
@@ -317,56 +512,44 @@ impl ImportOptions {
 }
 
 #[derive(Debug, Args)]
-#[group(required = true, multiple = false)]
+#[group(multiple = false)]
 struct ImportInputOptions {
-    /// Input files, optionally suffixed with `:LABEL`.
-    #[arg(value_name = "PATH[:LABEL]")]
+    /// Input files, optionally suffixed with `:LABEL`. The default label is the
+    /// file name without its format extension (`s1.bed.gz` gives `s1`).
+    #[arg(
+        value_name = "PATH[:LABEL]",
+        value_parser = parse_source,
+        required_unless_present = "file_list"
+    )]
     input_files: Vec<Source>,
-    /// Tab-delimited source manifest containing PATH or PATH<TAB>LABEL records.
+    /// Tab-delimited source list with PATH or PATH<TAB>LABEL records. Relative
+    /// paths start from the directory of the list file.
     #[arg(short, long, value_name = "PATH")]
     file_list: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Source {
-    path: PathBuf,
-    label: Option<String>,
-}
-
-impl Source {
-    fn validate_labels(sources: &[Self]) -> Result<()> {
-        let has_labels = sources.iter().any(|source| source.label.is_some());
-        let has_unlabeled = sources.iter().any(|source| source.label.is_none());
-        if has_labels && has_unlabeled {
-            bail!("sources must either all provide labels or none do");
-        }
-        Ok(())
+/// Parse `PATH[:LABEL]`. The text after the last `:` is a label only when it
+/// has no path separator, so URLs and Windows paths stay whole.
+fn parse_source(value: &str) -> std::result::Result<Source, String> {
+    let (path, label) = match value.rsplit_once(':') {
+        Some((path, label)) if !label.contains(['/', '\\']) => (path, Some(label)),
+        _ => (value, None),
+    };
+    if path.is_empty() {
+        return Err("source path must not be empty".into());
     }
-}
-
-impl FromStr for Source {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        let (path, label) = match value.rsplit_once(':') {
-            Some((path, label)) => (path, Some(label)),
-            None => (value, None),
-        };
-        if path.is_empty() {
-            return Err("source path must not be empty".into());
-        }
-        if label == Some("") {
-            return Err("source label must not be empty".into());
-        }
-        Ok(Self {
-            path: PathBuf::from(path),
-            label: label.map(str::to_owned),
-        })
+    if label == Some("") {
+        return Err("source label must not be empty".into());
     }
+    Ok(Source {
+        path: PathBuf::from(path),
+        column_label: label.map(str::to_owned),
+    })
 }
 
-fn read_source_list(path: &Path) -> Result<Vec<Source>> {
+fn read_source_list(path: &Path, format: &str) -> Result<Vec<Source>> {
     let file = File::open(path).with_context(|| format!("open source list {}", path.display()))?;
+    let base = path.parent().unwrap_or(Path::new(""));
     let reader = BufReader::new(file);
     let mut sources = Vec::new();
 
@@ -384,50 +567,60 @@ fn read_source_list(path: &Path) -> Result<Vec<Source>> {
                 index + 1
             );
         }
-        let label = fields.get(1).map(|label| label.to_string());
-        if label.as_deref() == Some("") {
+        let column_label = fields.get(1).map(|label| label.to_string());
+        if column_label.as_deref() == Some("") {
             bail!(
                 "source list {} line {} has an empty label",
                 path.display(),
                 index + 1
             );
         }
+        let source_path = if fields[0].contains("://") {
+            PathBuf::from(fields[0])
+        } else {
+            base.join(fields[0])
+        };
         sources.push(Source {
-            path: PathBuf::from(fields[0]),
-            label,
+            path: source_path,
+            column_label,
         });
     }
 
     if sources.is_empty() {
-        bail!("source list {} contains no BED sources", path.display());
+        bail!(
+            "source list {} contains no {format} sources",
+            path.display()
+        );
     }
-    Source::validate_labels(&sources)?;
     Ok(sources)
 }
 
 impl ImportInputOptions {
-    fn resolve_input(&self) -> Result<Vec<Source>> {
+    /// The sources in column order, from the command line or the source list.
+    fn resolve_input(&self, format: &str) -> Result<Vec<Source>> {
         let sources = match &self.file_list {
-            Some(path) => read_source_list(path)?,
+            Some(path) => read_source_list(path, format)?,
             None => self.input_files.clone(),
         };
         if sources.is_empty() {
             bail!("at least one input source is required");
         }
-        Source::validate_labels(&sources)?;
+        Source::check_labels(&sources)?;
         Ok(sources)
     }
 }
 
 #[derive(Debug, Args)]
 struct BedOptions {
-    /// PBZ output store. It is created when absent.
-    #[arg(short('o'), long, required_unless_present = "emit_schema")]
-    output: Option<PathBuf>,
+    /// PBZ store to write. Import creates it when the path does not exist,
+    /// and adds the track(s) to it when it exists.
+    #[arg(required_unless_present = "emit_schema")]
+    store: Option<PathBuf>,
     #[command(flatten)]
     input: ImportInputOptions,
-    /// FAI or chromosome-sizes file defining the genome.
-    #[arg(long, required_unless_present = "emit_schema")]
+    /// FAI or chromosome-sizes file with the contig lengths. It is needed
+    /// only when the store does not exist; an existing store gives its own.
+    #[arg(long)]
     genome: Option<PathBuf>,
     /// BED header column to import (requires a `#`-prefixed header). Repeating
     /// selects several BED columns; omit to import all BED value columns.
@@ -438,66 +631,97 @@ struct BedOptions {
     #[arg(long, conflicts_with = "schema")]
     track: Option<String>,
     /// Value dtype for headerless BED4 input (inferred when omitted).
-    #[arg(long, conflicts_with = "schema")]
-    dtype: Option<String>,
+    #[arg(long, value_enum, conflicts_with = "schema")]
+    dtype: Option<DtypeArg>,
     /// TSV schema mapping BED columns to target tracks. Unique target names
     /// create one track per BED column; repeated one-target rows create a
     /// single BED-column-axis track. A BED column is a header name or 1-based
-    /// column index.
+    /// column index. A row can also give the dtype and the fill of its track.
     #[arg(long, value_name = "PATH")]
     schema: Option<PathBuf>,
-    /// Print a schema TSV for one BED source (BED column, target track,
-    /// inferred dtype) to stdout and exit without importing. Edit it and feed
-    /// it back via --schema.
-    #[arg(long, conflicts_with_all = ["schema", "fields", "track", "dtype", "dry_run"])]
-    emit_schema: bool,
-    /// Records sampled for dtype inference, or `all`. A sample infers
-    /// conservative classes (bool/int32/float32); `all` (or a file smaller
-    /// than the sample) scans exhaustively and min-widths (uint8, int16, ...).
-    #[arg(long, default_value = "1000", value_name = "N|all")]
-    infer_rows: String,
+    /// Print a schema TSV for this BED file (BED column, target track,
+    /// inferred dtype, fill) to stdout and exit without importing. Edit it
+    /// and feed it back via --schema.
+    #[arg(
+        long,
+        value_name = "BED",
+        conflicts_with_all = [
+            "store", "input_files", "file_list", "genome", "schema", "fields", "track", "dtype",
+            "fill"
+        ]
+    )]
+    emit_schema: Option<PathBuf>,
+    /// Value of bases that no interval covers, for BED value columns: a
+    /// number, true or false for a bool column, or na. na is the null of the
+    /// dtype: NaN for a float, the type maximum for an integer.
+    /// Default: na, and false for a bool column. BED3 masks always hold false.
+    #[arg(long, value_name = "VALUE|na", value_parser = parse_fill)]
+    fill: Option<Fill>,
+    /// Records sampled for dtype inference (default 1000), or `all`. A sample
+    /// infers conservative classes (bool/int32/float32); `all` (or a file
+    /// smaller than the sample) scans exhaustively and min-widths (uint8,
+    /// int16, ...).
+    #[arg(long, value_name = "N|all")]
+    infer_rows: Option<String>,
 }
 
 #[derive(Debug, Args)]
 #[command(
     arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bam -o depth.pbz --track depth s1.bam s2.bam\n  pbz import bam -o comp.pbz --track depth --mode composition --reference ref.fa sample.cram"
+    after_help = "Examples:\n  pbz import bam depth.pbz s1.bam s2.bam --track depth\n  pbz import bam comp.pbz sample.cram --track depth --mode composition --fasta ref.fa",
+    mut_arg("track", |arg| arg.help(
+        "Output track name. In composition mode the depth track keeps this name and the \
+         per-event tracks are named `{track}_{field}`"
+    ))
 )]
 struct BamArgs {
     #[command(flatten)]
-    global: GlobalOptions,
-    #[command(flatten)]
     import: ImportOptions,
     #[command(flatten)]
-    bam: BamOptions,
+    target: ImportTarget,
+    #[command(flatten)]
+    decode: BamDecodeOptions,
 }
 
+/// The store, the sources and the track of a d4, bigWig or BAM import.
 #[derive(Debug, Args)]
-struct BamOptions {
-    /// PBZ output store. It is created when absent.
-    #[arg(short('o'), long)]
-    output: PathBuf,
+struct ImportTarget {
+    /// PBZ store to write. Import creates it from the source headers when
+    /// the path does not exist, and adds the track(s) to it when it exists.
+    store: PathBuf,
     #[command(flatten)]
     input: ImportInputOptions,
-    /// Output track name. In composition mode the depth track keeps this
-    /// name and the per-event tracks are named `{track}_{field}`.
+    /// Output track name.
     #[arg(long)]
     track: String,
+}
+
+/// BAM/CRAM decode flags, shared by `import bam` and `append bam`.
+#[derive(Debug, Args)]
+struct BamDecodeOptions {
     /// Depth counts coverage only; composition also counts per-base events,
     /// emitting `{track}_{field}` for a, c, g, t, n, ins, del, ref_skip.
     #[arg(long, value_enum, default_value_t = ImportModeArg::Depth)]
     mode: ImportModeArg,
-    /// Reference FASTA for CRAM sources (ignored for BAM).
-    #[arg(long)]
-    reference: Option<PathBuf>,
+    /// FASTA for CRAM sources (ignored for BAM).
+    #[arg(long, value_name = "FASTA")]
+    fasta: Option<PathBuf>,
     /// Minimum mapping quality for a read to count.
     #[arg(long, default_value_t = 0)]
     min_mapq: u8,
     /// Minimum per-base quality for a base to count.
     #[arg(long, default_value_t = 0)]
     min_bq: u8,
-    /// SAM flag bits that exclude a read (default: UNMAP|SECONDARY|QCFAIL|DUP).
-    #[arg(long, default_value_t = 1796)]
+    /// SAM flag bits that exclude a read: a decimal or 0x hex number, or
+    /// comma-separated samtools flag names (PAIRED, PROPER_PAIR, UNMAP,
+    /// MUNMAP, REVERSE, MREVERSE, READ1, READ2, SECONDARY, QCFAIL, DUP,
+    /// SUPPLEMENTARY).
+    #[arg(
+        long,
+        value_name = "FLAGS",
+        value_parser = parse_sam_flags,
+        default_value = "UNMAP,SECONDARY,QCFAIL,DUP"
+    )]
     exclude_flags: u16,
     /// Mate-overlap dedup mode. `proper` (default) matches mosdepth: only
     /// PROPER_PAIR-flagged overlapping mates are collapsed to one count.
@@ -513,6 +737,106 @@ struct BamOptions {
     count_deletions: bool,
 }
 
+const SAM_FLAGS: [(&str, u16); 12] = [
+    ("PAIRED", 0x1),
+    ("PROPER_PAIR", 0x2),
+    ("UNMAP", 0x4),
+    ("MUNMAP", 0x8),
+    ("REVERSE", 0x10),
+    ("MREVERSE", 0x20),
+    ("READ1", 0x40),
+    ("READ2", 0x80),
+    ("SECONDARY", 0x100),
+    ("QCFAIL", 0x200),
+    ("DUP", 0x400),
+    ("SUPPLEMENTARY", 0x800),
+];
+
+/// Parse SAM flags as samtools does: `1796`, `0x704`, or
+/// `UNMAP,SECONDARY,QCFAIL,DUP`.
+fn parse_sam_flags(value: &str) -> std::result::Result<u16, String> {
+    let mut flags = 0;
+    for item in value.split(',').map(str::trim) {
+        let bits = if let Some(hex) = item.strip_prefix("0x").or(item.strip_prefix("0X")) {
+            u16::from_str_radix(hex, 16).ok()
+        } else if item.bytes().all(|b| b.is_ascii_digit()) {
+            item.parse().ok()
+        } else {
+            SAM_FLAGS
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(item))
+                .map(|&(_, bit)| bit)
+        };
+        flags |= bits
+            .ok_or_else(|| format!("{item:?} is not a SAM flag number or a samtools flag name"))?;
+    }
+    Ok(flags)
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum StatArg {
+    Mean,
+    Min,
+    Max,
+    Median,
+    Hist,
+}
+
+impl From<StatArg> for StatKind {
+    fn from(stat: StatArg) -> Self {
+        match stat {
+            StatArg::Mean => StatKind::Mean,
+            StatArg::Min => StatKind::Min,
+            StatArg::Max => StatKind::Max,
+            StatArg::Median => StatKind::Median,
+            StatArg::Hist => StatKind::Hist,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DtypeArg {
+    Bool,
+    #[value(name = "uint8")]
+    U8,
+    #[value(name = "uint16")]
+    U16,
+    #[value(name = "uint32")]
+    U32,
+    #[value(name = "uint64")]
+    U64,
+    #[value(name = "int8")]
+    I8,
+    #[value(name = "int16")]
+    I16,
+    #[value(name = "int32")]
+    I32,
+    #[value(name = "int64")]
+    I64,
+    #[value(name = "float32")]
+    F32,
+    #[value(name = "float64")]
+    F64,
+}
+
+impl From<DtypeArg> for Dtype {
+    fn from(dtype: DtypeArg) -> Self {
+        match dtype {
+            DtypeArg::Bool => Dtype::Bool,
+            DtypeArg::U8 => Dtype::U8,
+            DtypeArg::U16 => Dtype::U16,
+            DtypeArg::U32 => Dtype::U32,
+            DtypeArg::U64 => Dtype::U64,
+            DtypeArg::I8 => Dtype::I8,
+            DtypeArg::I16 => Dtype::I16,
+            DtypeArg::I32 => Dtype::I32,
+            DtypeArg::I64 => Dtype::I64,
+            DtypeArg::F32 => Dtype::F32,
+            DtypeArg::F64 => Dtype::F64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ImportModeArg {
     Depth,
@@ -526,77 +850,136 @@ enum OverlapModeArg {
     None,
 }
 
+/// The d4 import takes no format flags.
 #[derive(Debug, Args)]
-#[command(
-    arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import d4 -o cohort.pbz --track depth s1.d4 s2.d4:custom_label"
-)]
-struct D4Args {
-    #[command(flatten)]
-    global: GlobalOptions,
+struct SignalArgs {
     #[command(flatten)]
     import: ImportOptions,
     #[command(flatten)]
-    d4: D4Options,
+    target: ImportTarget,
 }
 
 #[derive(Debug, Args)]
-struct D4Options {
-    /// PBZ output store. It is created when absent.
-    #[arg(short('o'), long)]
-    output: PathBuf,
-    #[command(flatten)]
-    input: ImportInputOptions,
-    /// Output track name.
-    #[arg(long)]
-    track: String,
-}
-
-#[derive(Debug, Args)]
-#[command(
-    arg_required_else_help = true,
-    after_help = "Examples:\n  pbz import bigwig -o signal.pbz --track signal sample.bw\n  pbz import bigwig -o cohort.pbz --track signal -c sample brain.bw:brain liver.bw:liver"
-)]
 struct BigWigArgs {
     #[command(flatten)]
-    global: GlobalOptions,
-    #[command(flatten)]
     import: ImportOptions,
     #[command(flatten)]
-    bigwig: BigWigOptions,
+    target: ImportTarget,
+    /// Value of bases that no bigWig interval covers: a number, or na. na
+    /// marks a missing value and reads as NaN. Default: na.
+    #[arg(long, value_name = "VALUE|na", value_parser = parse_fill)]
+    fill: Option<Fill>,
 }
 
-#[derive(Debug, Args)]
-struct BigWigOptions {
-    /// PBZ output store. It is created when absent.
-    #[arg(short('o'), long)]
-    output: PathBuf,
-    #[command(flatten)]
-    input: ImportInputOptions,
-    /// Output track name.
-    #[arg(long)]
-    track: String,
+impl From<ImportModeArg> for ImportMode {
+    fn from(mode: ImportModeArg) -> Self {
+        match mode {
+            ImportModeArg::Depth => ImportMode::Depth,
+            ImportModeArg::Composition => ImportMode::Composition,
+        }
+    }
 }
+
+impl From<OverlapModeArg> for OverlapMode {
+    fn from(overlap: OverlapModeArg) -> Self {
+        match overlap {
+            OverlapModeArg::Proper => OverlapMode::ProperOnly,
+            OverlapModeArg::All => OverlapMode::All,
+            OverlapModeArg::None => OverlapMode::None,
+        }
+    }
+}
+
+impl BamDecodeOptions {
+    fn filter(&self) -> DepthFilter {
+        DepthFilter {
+            min_mapq: self.min_mapq,
+            exclude_flags: self.exclude_flags,
+            min_bq: self.min_bq,
+            overlap: self.overlap.into(),
+            count_deletions: self.count_deletions,
+        }
+    }
+}
+
+/// Raises the soft open-file limit to the hard limit. An import holds one
+/// file handle per source at minimum, and macOS starts at a soft limit of 256.
+#[cfg(unix)]
+fn raise_fd_limit() {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit and setrlimit only read and write the given struct.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 || lim.rlim_cur >= lim.rlim_max {
+            return;
+        }
+        let soft = lim.rlim_cur;
+        lim.rlim_cur = lim.rlim_max;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 {
+            // macOS refuses a soft limit above OPEN_MAX (10240).
+            lim.rlim_cur = lim.rlim_max.min(10240).max(soft);
+            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_fd_limit() {}
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
-        Command::View(args) => view(args),
-        Command::Stat(args) => stat(args),
+    raise_fd_limit();
+    let cli = Cli::parse();
+    init_logging(&cli.global);
+    let quiet = cli.global.quiet;
+    match cli.command {
+        Command::View(args) => end_quietly_on_broken_pipe(view(args)),
+        Command::Stat(args) => end_quietly_on_broken_pipe(stat(args)),
         Command::Import(import) => match import.format {
-            ImportCommand::Bed(args) => import_bed(args),
-            ImportCommand::Bam(args) => import_bam(args),
-            ImportCommand::D4(args) => import_d4(args),
-            ImportCommand::BigWig(args) => import_bigwig(args),
+            ImportCommand::Bed(args) => import_bed(args, quiet),
+            ImportCommand::Bam(args) => import_bam(args, quiet),
+            ImportCommand::D4(args) => import_d4(args, quiet),
+            ImportCommand::BigWig(args) => import_bigwig(args, quiet),
         },
-        Command::Scale(args) => scale_cmd(args),
+        Command::Append(append) => match append.format {
+            AppendCommand::Bed(args) => append_bed(args, quiet),
+            AppendCommand::Bam(args) => append_bam(args, quiet),
+            AppendCommand::D4(args) => append_d4(args, quiet),
+            AppendCommand::BigWig(args) => append_bigwig(args, quiet),
+        },
+        Command::Info(args) => end_quietly_on_broken_pipe(info::run_info(&args.store, args.json)),
+        Command::Validate(args) => {
+            if !validate::run_validate(&args.store, args.json)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// A closed stdout, as from `pbz view | head`, is a normal end.
+fn end_quietly_on_broken_pipe(result: Result<()>) -> Result<()> {
+    match result {
+        Err(err)
+            if err.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
+            }) =>
+        {
+            Ok(())
+        }
+        other => other,
     }
 }
 
 fn view(args: ViewArgs) -> Result<()> {
-    init_logging(&args.global);
     view::run_view(&view::ViewSpec {
         store: args.store,
         track: args.track,
+        regions: args.regions.region,
+        regions_file: args.regions.regions,
         columns: args.columns,
         output: args.output,
         no_header: args.no_header,
@@ -606,12 +989,12 @@ fn view(args: ViewArgs) -> Result<()> {
 }
 
 fn stat(args: StatArgs) -> Result<()> {
-    init_logging(&args.global);
     stat::run_stat(&stat::StatSpec {
         store: args.store,
         track: args.track,
-        region: args.region,
-        stat: args.stat,
+        regions: args.regions.region,
+        regions_file: args.regions.regions,
+        stat: args.stat.into(),
         columns: args.columns,
         output: args.output,
         no_header: args.no_header,
@@ -620,684 +1003,268 @@ fn stat(args: StatArgs) -> Result<()> {
     })
 }
 
-fn scale_cmd(args: ScaleArgs) -> Result<()> {
-    init_logging(&args.global);
-    let factors = args.scales.as_deref().map(parse_scales).transpose()?;
-
-    let store =
-        PbzStore::open(&args.pbz).with_context(|| format!("open store {}", args.pbz.display()))?;
-    let config = ScaleConfig {
-        factors,
-        workers: args.workers,
-        progress: (!args.no_progress).then(|| make_sink(&format!("scale {}", args.track))),
-        ..ScaleConfig::default()
-    };
-
-    let start = Instant::now();
-    let report = pbzarr::scale(&store, &args.track, &config)
-        .with_context(|| format!("scale track {:?} in {}", args.track, args.pbz.display()))?;
-    let elapsed = start.elapsed();
-
-    println!(
-        "scaled '{}' in {} ({} level{}):",
-        args.track,
-        args.pbz.display(),
-        report.levels.len(),
-        if report.levels.len() == 1 { "" } else { "s" }
-    );
-    for level in &report.levels {
-        println!(
-            "  factor {:>6}: {:>10} bins, {:>12} bytes",
-            level.factor, level.bins, level.bytes_written
-        );
-    }
-    println!("done in {:.2}s", elapsed.as_secs_f64());
-    Ok(())
-}
-
-/// Parse a comma-separated `--scales` list into factors. Enforces strictly
-/// ascending, duplicate-free order here with a clear message; the rest of
-/// `ScaleConfig` validation (`>= 2`, non-empty) is left to `pbzarr::scale`.
-fn parse_scales(text: &str) -> Result<Vec<u64>> {
-    let mut factors = Vec::new();
-    let mut prev: Option<u64> = None;
-    for part in text.split(',') {
-        let part = part.trim();
-        let value: u64 = part.parse().with_context(|| {
-            format!("invalid --scales value {part:?}: expected a non-negative integer")
-        })?;
-        if let Some(prev) = prev {
-            if value == prev {
-                bail!("--scales values must be unique (duplicate {value})");
-            }
-            if value < prev {
-                bail!("--scales values must be strictly ascending (found {value} after {prev})");
-            }
-        }
-        prev = Some(value);
-        factors.push(value);
-    }
-    Ok(factors)
-}
-
-fn import_bed(args: BedArgs) -> Result<()> {
-    init_logging(&args.global);
-    let sources: Vec<pbzarr::import::Source> = args
+fn import_bed(args: BedArgs, quiet: bool) -> Result<()> {
+    let infer_rows = args
         .bed
-        .input
-        .resolve_input()?
-        .into_iter()
-        .map(|source| pbzarr::import::Source {
-            path: source.path,
-            column_label: source.label,
-        })
-        .collect();
-    let infer_rows = parse_infer_rows(&args.bed.infer_rows)?;
+        .infer_rows
+        .as_deref()
+        .map(parse_infer_rows)
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(bed) = &args.bed.emit_schema {
+        info!("emitting a schema scaffold to stdout; no store is written");
+        return emit_schema(bed, infer_rows);
+    }
+
+    let sources = args.bed.input.resolve_input("BED")?;
     debug!(
         "resolved {} BED source(s), infer rows {infer_rows:?}",
         sources.len()
     );
 
-    if args.bed.emit_schema {
-        info!("emitting a schema scaffold to stdout; no store is written");
-        if sources.len() != 1 {
-            bail!("--emit-schema requires exactly one BED source");
-        }
-        return emit_schema(&sources[0].path, infer_rows);
-    }
-
-    let genome_path = args.bed.genome.context("--genome is required to import")?;
-    let genome = Genome::from_fai(&genome_path)
-        .with_context(|| format!("read genome {}", genome_path.display()))?;
-    info!(
-        "genome {}: {} contig(s)",
-        genome_path.display(),
-        genome.contigs().len()
-    );
-    let output = args.bed.output.context("--output is required to import")?;
+    let output = args.bed.store.context("STORE is required to import")?;
+    let target = args.import.target(&output)?;
+    let genome = args
+        .bed
+        .genome
+        .as_deref()
+        .map(|path| {
+            Reference::from_fai(path).with_context(|| format!("read genome {}", path.display()))
+        })
+        .transpose()?;
+    let genome = store_reference(&output, genome)?;
+    info!("genome: {} contig(s)", genome.contigs().len());
     let label = args
         .bed
         .track
         .clone()
         .or_else(|| args.bed.schema.as_ref().map(|_| "bed-schema".to_owned()))
         .unwrap_or_else(|| "bed".to_owned());
-    let config = args.import.config(&label)?;
-    if let Some(schema_path) = &args.bed.schema {
+    let config = args.import.config(&label, quiet)?;
+    let report = if let Some(schema_path) = &args.bed.schema {
         info!("loading BED schema {}", schema_path.display());
-        let schema = load_schema(schema_path, &sources, infer_rows)?;
+        let schema = load_schema(schema_path, &sources, args.bed.fill.as_ref(), infer_rows)?;
         let plan = plan_bed_schema(&sources, &schema, &config).context("plan BED schema")?;
         debug!("BED schema planned against {} source(s)", sources.len());
-        if args.import.dry_run {
-            let tracks = plan_schema_tracks(&schema, &sources, config.column_dim.as_deref())?;
-            print_dry_run(&output, &genome, &tracks, &config, sources.len());
-            return Ok(());
-        }
-        let mut store = open_or_create(&output)?;
-        execute_bed_schema_plan(&mut store, plan, genome, config).context("import BED schema")?;
+        execute_bed_schema_plan(target, plan, genome, config).context("import BED schema")?
     } else {
         let options = BedImportOptions {
             fields: (!args.bed.fields.is_empty()).then_some(args.bed.fields),
             track: args.bed.track,
-            dtype: args
-                .bed
-                .dtype
-                .as_deref()
-                .map(Dtype::from_str)
-                .transpose()
-                .context("invalid --dtype")?,
+            dtype: args.bed.dtype.map(Dtype::from),
             infer_rows,
+            fill: args.bed.fill,
             ..BedImportOptions::default()
         };
-        if args.import.dry_run {
-            let tracks = plan_bed_option_tracks(&sources, &options, config.column_dim.as_deref())?;
-            print_dry_run(&output, &genome, &tracks, &config, sources.len());
-            return Ok(());
-        }
-        let mut store = open_or_create(&output)?;
-        from_bed_matrix(&mut store, &sources, genome, &options, config)
-            .context("import BED columns")?;
+        from_bed_matrix(target, &sources, genome, &options, config).context("import BED columns")?
+    };
+    if !quiet {
+        print_report("imported", sources.len(), &output, &report);
     }
-    info!("wrote {}", output.display());
     Ok(())
 }
 
-/// One destination track of a `--dry-run` preview.
-struct PlannedTrack {
-    name: String,
-    dtype: Dtype,
-    /// `Some((dimension, labels))` for a rank-2 track; `None` for scalar.
-    columns: Option<(String, Vec<String>)>,
-}
-
-/// Print the destination plan and the layout estimate for a dry run.
-/// Read-only: the output store is only stat'ed, never opened or created.
-fn print_dry_run(
-    output: &Path,
-    genome: &Genome,
-    tracks: &[PlannedTrack],
-    config: &Config,
-    readers: usize,
-) {
-    println!("dry run: nothing is created or written");
-    println!(
-        "output: {} ({})",
-        output.display(),
-        if output.exists() {
-            "exists; a real run would add tracks to it"
-        } else {
-            "a real run would create it"
-        }
-    );
-    println!(
-        "genome: {} contig(s), {} positions",
-        genome.contigs().len(),
-        genome.contigs().iter().map(|c| c.length).sum::<u64>()
-    );
-    for track in tracks {
-        match &track.columns {
-            Some((dim, labels)) => println!(
-                "track {}  {}  rank 2  columns ({dim}): {}",
-                track.name,
-                track.dtype.as_str(),
-                labels.join(", ")
-            ),
-            None => println!("track {}  {}  rank 1", track.name, track.dtype.as_str()),
-        }
-    }
-    println!();
-    let shapes: Vec<TrackShape> = tracks
-        .iter()
-        .map(|track| TrackShape {
-            name: track.name.clone(),
-            dtype: track.dtype,
-            columns: track
-                .columns
-                .as_ref()
-                .map(|(_, labels)| labels.len() as u64),
-        })
-        .collect();
-    let knobs = LayoutKnobs::resolve(
-        config.chunk_size.map(|v| v as u64),
-        config.column_chunk_size.map(|v| v as u64),
-        config.shard_size.map(|v| v as u64),
-        config.shard_column_size.map(|v| v as u64),
-        config.codecs.as_ref(),
-    );
-    let in_flight = match config.in_flight_spans {
-        0 => auto_in_flight_spans(config.workers, readers),
-        n => n,
-    };
-    let estimate = LayoutEstimate::compute(
-        GenomeGeometry {
-            total_len: genome.contigs().iter().map(|c| c.length).sum(),
-            contigs: genome.contigs().len() as u64,
-        },
-        &shapes,
-        &knobs,
-        readers,
-        config.workers,
-        in_flight,
-        &config.scales,
-    );
-    print!("{estimate}");
-}
-
-/// Track name a schema spec resolves to: the explicit target, else the
-/// header name a `Name` selector carries.
-fn schema_track_name(spec: &BedColumnSpec) -> Result<&str> {
-    match (&spec.track_name, &spec.selector) {
-        (Some(track), _) => Ok(track),
-        (None, ColumnSelector::Name(name)) => Ok(name),
-        (None, ColumnSelector::Index(index)) => Err(anyhow!(
-            "schema BED column {} needs a target track name",
-            index + 1
-        )),
-    }
-}
-
-/// The tracks a schema import would create, mirroring the grouped/unique
-/// layout split `plan_bed_schema` validated.
-fn plan_schema_tracks(
-    schema: &BedSchema,
-    sources: &[pbzarr::import::Source],
-    column_dim: Option<&str>,
-) -> Result<Vec<PlannedTrack>> {
-    let names = schema
-        .0
-        .iter()
-        .map(schema_track_name)
-        .collect::<Result<Vec<_>>>()?;
-    let unique: HashSet<&str> = names.iter().copied().collect();
-    if unique.len() == 1 && names.len() >= 2 {
-        let layout = read_bed_layout(&sources[0].path)?;
-        let labels = schema
-            .0
-            .iter()
-            .map(|spec| match &spec.selector {
-                ColumnSelector::Name(name) => name.clone(),
-                ColumnSelector::Index(index) => layout
-                    .header
-                    .as_ref()
-                    .and_then(|header| header.get(*index))
-                    .cloned()
-                    .unwrap_or_else(|| format!("column {}", index + 1)),
-            })
-            .collect();
-        return Ok(vec![PlannedTrack {
-            name: names[0].to_owned(),
-            dtype: schema.0[0].dtype,
-            columns: Some((column_dim.unwrap_or("BED column").to_owned(), labels)),
-        }]);
-    }
-    let source_columns = (sources.len() > 1 || column_dim.is_some()).then(|| {
-        (
-            column_dim.unwrap_or("sample").to_owned(),
-            sources
-                .iter()
-                .map(pbzarr::import::Source::label)
-                .collect::<Vec<_>>(),
-        )
-    });
-    Ok(schema
-        .0
-        .iter()
-        .zip(names)
-        .map(|(spec, name)| PlannedTrack {
-            name: name.to_owned(),
-            dtype: spec.dtype,
-            columns: source_columns.clone(),
-        })
-        .collect())
-}
-
-/// The tracks a non-schema BED import would create, mirroring the shape
-/// rules `from_bed_matrix` applies to the same options.
-fn plan_bed_option_tracks(
-    sources: &[pbzarr::import::Source],
-    options: &BedImportOptions,
-    column_dim: Option<&str>,
-) -> Result<Vec<PlannedTrack>> {
-    if sources.len() > 1 && column_dim.is_none() {
-        bail!("2D output requires a column dimension name (--column-dim)");
-    }
-    let layout = read_bed_layout(&sources[0].path)?;
-    let source_columns = (sources.len() > 1 || column_dim.is_some()).then(|| {
-        (
-            column_dim.unwrap_or("sample").to_owned(),
-            sources
-                .iter()
-                .map(pbzarr::import::Source::label)
-                .collect::<Vec<_>>(),
-        )
-    });
-    let single = |track: &Option<String>, dtype: Dtype, need: &str| -> Result<Vec<PlannedTrack>> {
-        let name = track
-            .clone()
-            .with_context(|| format!("a track name is required {need}"))?;
-        Ok(vec![PlannedTrack {
-            name,
-            dtype,
-            columns: source_columns.clone(),
-        }])
-    };
-    if layout.n_cols == 3 {
-        return single(&options.track, Dtype::Bool, "for BED3 input");
-    }
-    let Some(header) = &layout.header else {
-        if layout.n_cols > 4 {
-            bail!(
-                "{} has {} BED value columns and no header; add a header line or use a schema",
-                sources[0].path.display(),
-                layout.n_cols - 3
-            );
-        }
-        let dtype = match options.dtype {
-            Some(dtype) => dtype,
-            None => infer_bed_dtypes_for_sources(sources, &[3], options.infer_rows)?[0],
-        };
-        return single(&options.track, dtype, "for headerless input");
-    };
-    let selected = options
-        .fields
-        .clone()
-        .unwrap_or_else(|| header[3..].to_vec());
-    let columns = selected
-        .iter()
-        .map(|name| {
-            header
-                .iter()
-                .position(|field| field == name)
-                .filter(|index| *index >= 3)
-                .with_context(|| {
-                    format!("BED column {name:?} is not a value BED column of the header")
-                })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let dtypes = infer_bed_dtypes_for_sources(sources, &columns, options.infer_rows)?;
-    if sources.len() == 1 && selected.len() > 1 {
-        if column_dim.is_none() {
-            bail!("2D output requires a column dimension name (--column-dim)");
-        }
-        // The import itself merges raw observations across the selected
-        // columns before choosing one dtype; joining the per-column dtypes
-        // covers the same values but can sit one width class above it.
-        let mut joined: Option<Dtype> = None;
-        for dtype in dtypes {
-            joined = Some(match joined {
-                Some(joined) => join_dtypes(joined, dtype)?,
-                None => dtype,
-            });
-        }
-        let dtype = joined.context("no BED value columns selected")?;
-        let name = options
-            .track
-            .clone()
-            .context("a track name is required when several BED columns form one wide track")?;
-        return Ok(vec![PlannedTrack {
-            name,
-            dtype,
-            columns: Some((column_dim.unwrap_or("column").to_owned(), selected)),
-        }]);
-    }
-    Ok(selected
-        .into_iter()
-        .zip(dtypes)
-        .map(|(name, dtype)| PlannedTrack {
-            name,
-            dtype,
-            columns: source_columns.clone(),
-        })
-        .collect())
-}
-
-/// Smallest dtype whose value range covers both inputs. Floats absorb
-/// integers, matching inference (any decimal column classes as float).
-fn join_dtypes(a: Dtype, b: Dtype) -> Result<Dtype> {
-    if a == b {
-        return Ok(a);
-    }
-    if a == Dtype::F64 || b == Dtype::F64 {
-        return Ok(Dtype::F64);
-    }
-    if a == Dtype::F32 || b == Dtype::F32 {
-        return Ok(Dtype::F32);
-    }
-    fn range(dtype: Dtype) -> (i128, i128) {
-        match dtype {
-            Dtype::Bool => (0, 1),
-            Dtype::U8 => (0, i128::from(u8::MAX)),
-            Dtype::U16 => (0, i128::from(u16::MAX)),
-            Dtype::U32 => (0, i128::from(u32::MAX)),
-            Dtype::I8 => (i128::from(i8::MIN), i128::from(i8::MAX)),
-            Dtype::I16 => (i128::from(i16::MIN), i128::from(i16::MAX)),
-            Dtype::I32 => (i128::from(i32::MIN), i128::from(i32::MAX)),
-            Dtype::F32 | Dtype::F64 => unreachable!("floats are joined above"),
-        }
-    }
-    let (lo_a, hi_a) = range(a);
-    let (lo_b, hi_b) = range(b);
-    let (lo, hi) = (lo_a.min(lo_b), hi_a.max(hi_b));
-    if lo >= 0 {
-        return Ok(if hi <= i128::from(u8::MAX) {
-            Dtype::U8
-        } else if hi <= i128::from(u16::MAX) {
-            Dtype::U16
-        } else {
-            Dtype::U32
-        });
-    }
-    if lo >= i128::from(i8::MIN) && hi <= i128::from(i8::MAX) {
-        Ok(Dtype::I8)
-    } else if lo >= i128::from(i16::MIN) && hi <= i128::from(i16::MAX) {
-        Ok(Dtype::I16)
-    } else if lo >= i128::from(i32::MIN) && hi <= i128::from(i32::MAX) {
-        Ok(Dtype::I32)
-    } else {
-        bail!(
-            "BED columns of dtypes {} and {} cannot share one wide track (range exceeds int32)",
-            a.as_str(),
-            b.as_str()
-        )
-    }
-}
-
-/// Open `path` as a store, creating it when it does not exist yet. Importing
-/// into an existing store adds tracks to it, which is easy to do by accident
-/// with a stale path, so say which of the two happened.
-fn open_or_create(path: &Path) -> Result<PbzStore> {
-    if path.exists() {
-        warn!(
-            "{} exists; adding track(s) to the existing store",
-            path.display()
-        );
-        PbzStore::open(path).with_context(|| format!("open output store {}", path.display()))
-    } else {
-        debug!("creating store {}", path.display());
-        PbzStore::create(path).with_context(|| format!("create output store {}", path.display()))
-    }
-}
-
-fn import_bam(args: BamArgs) -> Result<()> {
-    init_logging(&args.global);
-    let sources: Vec<pbzarr::import::Source> = args
-        .bam
-        .input
-        .resolve_input()?
-        .into_iter()
-        .map(|source| pbzarr::import::Source {
-            path: source.path,
-            column_label: source.label,
-        })
-        .collect();
+fn import_bam(args: BamArgs, quiet: bool) -> Result<()> {
+    let sources = args.target.input.resolve_input("BAM/CRAM")?;
     let n_sources = sources.len();
     debug!("resolved {n_sources} alignment source(s)");
 
-    let config = args.import.config(&args.bam.track)?;
-    let mode = match args.bam.mode {
-        ImportModeArg::Depth => ImportMode::Depth,
-        ImportModeArg::Composition => ImportMode::Composition,
-    };
-    let overlap = match args.bam.overlap {
-        OverlapModeArg::Proper => OverlapMode::ProperOnly,
-        OverlapModeArg::All => OverlapMode::All,
-        OverlapModeArg::None => OverlapMode::None,
-    };
-    let filter = DepthFilter {
-        min_mapq: args.bam.min_mapq,
-        exclude_flags: args.bam.exclude_flags,
-        min_bq: args.bam.min_bq,
-        overlap,
-        count_deletions: args.bam.count_deletions,
-    };
-
-    let output = args.bam.output;
-    if args.import.dry_run {
-        let source = &sources[0];
-        let reader = BamReader::open(&source.path, args.bam.reference.as_deref(), mode, filter)
-            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
-        let source_columns = (n_sources > 1 || config.column_dim.is_some()).then(|| {
-            (
-                config
-                    .column_dim
-                    .clone()
-                    .unwrap_or_else(|| "sample".to_owned()),
-                sources
-                    .iter()
-                    .map(pbzarr::import::Source::label)
-                    .collect::<Vec<_>>(),
-            )
-        });
-        // Field 0 keeps the bare track name and the rest append their field
-        // name, matching `from_bam`'s composition naming.
-        let tracks: Vec<PlannedTrack> = reader
-            .output_schema()
-            .fields
-            .iter()
-            .enumerate()
-            .map(|(index, field)| PlannedTrack {
-                name: match (index, field.name.as_deref()) {
-                    (0, _) | (_, None) => args.bam.track.clone(),
-                    (_, Some(name)) => format!("{}_{name}", args.bam.track),
-                },
-                dtype: field.dtype,
-                columns: source_columns.clone(),
-            })
-            .collect();
-        print_dry_run(&output, reader.contigs(), &tracks, &config, n_sources);
-        return Ok(());
-    }
-    let mut store = open_or_create(&output)?;
-
+    let config = args.import.config(&args.target.track, quiet)?;
+    let output = args.target.store;
     let report = from_bam(
-        &mut store,
-        &args.bam.track,
+        args.import.target(&output)?,
+        &args.target.track,
         &sources,
-        mode,
-        filter,
-        args.bam.reference,
+        args.decode.mode.into(),
+        args.decode.filter(),
+        args.decode.fasta,
         config,
     )
     .context("import BAM/CRAM")?;
 
-    debug!(
-        "bam import wrote {} bytes across {} contig(s)",
-        report.bytes_written, report.contigs_written
-    );
-    println!(
-        "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
-        output.display(),
-        report.tasks_completed,
-        report.tasks_skipped
-    );
+    if !quiet {
+        print_report("imported", n_sources, &output, &report);
+    }
     Ok(())
 }
 
-fn import_d4(args: D4Args) -> Result<()> {
-    init_logging(&args.global);
-    let sources: Vec<pbzarr::import::Source> = args
-        .d4
-        .input
-        .resolve_input()?
-        .into_iter()
-        .map(|source| pbzarr::import::Source {
-            path: source.path,
-            column_label: source.label,
-        })
-        .collect();
+fn import_d4(args: SignalArgs, quiet: bool) -> Result<()> {
+    let sources = args.target.input.resolve_input("d4")?;
     let n_sources = sources.len();
     debug!("resolved {n_sources} d4 source(s)");
 
-    let config = args.import.config(&args.d4.track)?;
-    let output = args.d4.output;
+    let config = args.import.config(&args.target.track, quiet)?;
+    let output = args.target.store;
+    let report = from_d4(
+        args.import.target(&output)?,
+        &args.target.track,
+        &sources,
+        config,
+    )
+    .context("import d4")?;
 
-    if args.import.dry_run {
-        let source = &sources[0];
-        let reader = D4Reader::open(&source.path)
-            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
-        let source_columns = (n_sources > 1 || config.column_dim.is_some()).then(|| {
-            (
-                config
-                    .column_dim
-                    .clone()
-                    .unwrap_or_else(|| "sample".to_owned()),
-                sources
-                    .iter()
-                    .map(pbzarr::import::Source::label)
-                    .collect::<Vec<_>>(),
-            )
-        });
-        let tracks = vec![PlannedTrack {
-            name: args.d4.track.clone(),
-            dtype: Dtype::I32,
-            columns: source_columns,
-        }];
-        print_dry_run(&output, reader.contigs(), &tracks, &config, n_sources);
-        return Ok(());
+    if !quiet {
+        print_report("imported", n_sources, &output, &report);
     }
-    let mut store = open_or_create(&output)?;
-
-    let report = from_d4(&mut store, &args.d4.track, &sources, config).context("import d4")?;
-
-    debug!(
-        "d4 import wrote {} bytes across {} contig(s)",
-        report.bytes_written, report.contigs_written
-    );
-    println!(
-        "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
-        output.display(),
-        report.tasks_completed,
-        report.tasks_skipped
-    );
     Ok(())
 }
 
-fn import_bigwig(args: BigWigArgs) -> Result<()> {
-    init_logging(&args.global);
-    let sources: Vec<pbzarr::import::Source> = args
-        .bigwig
-        .input
-        .resolve_input()?
-        .into_iter()
-        .map(|source| pbzarr::import::Source {
-            path: source.path,
-            column_label: source.label,
-        })
-        .collect();
+fn import_bigwig(args: BigWigArgs, quiet: bool) -> Result<()> {
+    let sources = args.target.input.resolve_input("bigWig")?;
     let n_sources = sources.len();
     debug!("resolved {n_sources} bigWig source(s)");
 
-    let config = args.import.config(&args.bigwig.track)?;
-    let output = args.bigwig.output;
+    let config = args.import.config(&args.target.track, quiet)?;
+    let output = args.target.store;
+    let report = from_bigwig(
+        args.import.target(&output)?,
+        &args.target.track,
+        &sources,
+        args.fill,
+        config,
+    )
+    .context("import bigWig")?;
 
-    if args.import.dry_run {
-        let source = &sources[0];
-        let reader = BigWigReader::open(&source.path)
-            .map_err(|e| anyhow!("open {}: {e}", source.path.display()))?;
-        let source_columns = (n_sources > 1 || config.column_dim.is_some()).then(|| {
-            (
-                config
-                    .column_dim
-                    .clone()
-                    .unwrap_or_else(|| "sample".to_owned()),
-                sources
-                    .iter()
-                    .map(pbzarr::import::Source::label)
-                    .collect::<Vec<_>>(),
-            )
-        });
-        let tracks = vec![PlannedTrack {
-            name: args.bigwig.track.clone(),
-            dtype: Dtype::F32,
-            columns: source_columns,
-        }];
-        print_dry_run(&output, reader.contigs(), &tracks, &config, n_sources);
-        return Ok(());
+    if !quiet {
+        print_report("imported", n_sources, &output, &report);
     }
-    let mut store = open_or_create(&output)?;
-
-    let report =
-        from_bigwig(&mut store, &args.bigwig.track, &sources, config).context("import bigWig")?;
-
-    debug!(
-        "bigWig import wrote {} bytes across {} contig(s)",
-        report.bytes_written, report.contigs_written
-    );
-    println!(
-        "imported {n_sources} sources -> {} ({} tasks, {} skipped)",
-        output.display(),
-        report.tasks_completed,
-        report.tasks_skipped
-    );
     Ok(())
 }
 
-struct SchemaRow {
-    bed_column: String,
-    track: Option<String>,
-    dtype: Option<Dtype>,
+/// Open the store an append grows and read the column dimension of `track`.
+///
+/// The dimension comes from the store so that one source still forms a column
+/// batch; an append never names a new dimension.
+fn open_append(path: &Path, track: &str) -> Result<(Dataset, String)> {
+    if pbzarr::is_zip_store(path) || has_zip_extension(path) {
+        bail!(
+            "{} is a zip store. Zip stores are written once, so append cannot add columns to them",
+            path.display()
+        );
+    }
+    if !path.exists() {
+        bail!(
+            "append needs an existing store; {} does not exist",
+            path.display()
+        );
+    }
+    let dataset = Dataset::open(path).with_context(|| format!("open store {}", path.display()))?;
+    let info = dataset
+        .variables()
+        .get(track)
+        .ok_or_else(|| anyhow!("track {track:?} is not in {}", path.display()))?;
+    let dim = info.dims.get(1).cloned().ok_or_else(|| {
+        anyhow!(
+            "track {track:?} has dimension(s) {:?}; append grows a column dimension",
+            info.dims
+        )
+    })?;
+    Ok((dataset, dim))
 }
 
-fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<SchemaRow>> {
+fn print_report(verb: &str, sources: usize, path: &Path, report: &pbzarr::import::Report) {
+    debug!(
+        "wrote {} bytes in {:.1}s",
+        report.bytes_written, report.wall_seconds
+    );
+    eprintln!(
+        "{verb} {sources} sources -> {} ({} positions, {} chunks written, {} skipped)",
+        path.display(),
+        report.positions,
+        report.chunks_written,
+        report.chunks_skipped
+    );
+}
+
+fn append_d4(args: AppendSignalArgs, quiet: bool) -> Result<()> {
+    let sources = args.target.input.resolve_input("d4")?;
+    let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
+    let config = args.run.append_config(&args.target.track, dim, quiet);
+    let report = from_d4(
+        Target::Append(&mut dataset),
+        &args.target.track,
+        &sources,
+        config,
+    )
+    .context("append d4")?;
+    if !quiet {
+        print_report("appended", sources.len(), &args.target.store, &report);
+    }
+    Ok(())
+}
+
+fn append_bigwig(args: AppendBigWigArgs, quiet: bool) -> Result<()> {
+    let sources = args.target.input.resolve_input("bigWig")?;
+    let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
+    let config = args.run.append_config(&args.target.track, dim, quiet);
+    let report = from_bigwig(
+        Target::Append(&mut dataset),
+        &args.target.track,
+        &sources,
+        args.fill,
+        config,
+    )
+    .context("append bigWig")?;
+    if !quiet {
+        print_report("appended", sources.len(), &args.target.store, &report);
+    }
+    Ok(())
+}
+
+fn append_bam(args: AppendBamArgs, quiet: bool) -> Result<()> {
+    let sources = args.target.input.resolve_input("BAM/CRAM")?;
+    let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
+    let config = args.run.append_config(&args.target.track, dim, quiet);
+    let report = from_bam(
+        Target::Append(&mut dataset),
+        &args.target.track,
+        &sources,
+        args.decode.mode.into(),
+        args.decode.filter(),
+        args.decode.fasta,
+        config,
+    )
+    .context("append BAM/CRAM")?;
+    if !quiet {
+        print_report("appended", sources.len(), &args.target.store, &report);
+    }
+    Ok(())
+}
+
+fn append_bed(args: AppendBedArgs, quiet: bool) -> Result<()> {
+    let sources = args.target.input.resolve_input("BED")?;
+    let (mut dataset, dim) = open_append(&args.target.store, &args.target.track)?;
+    let genome = dataset.reference()?.clone();
+    let dtype = Dtype::from_str(
+        dataset.variables()[&args.target.track].metadata["data_type"]
+            .as_str()
+            .unwrap_or(""),
+    )
+    .with_context(|| format!("read the dtype of track {:?}", args.target.track))?;
+    let config = args.run.append_config(&args.target.track, dim, quiet);
+    let options = BedImportOptions {
+        fields: (!args.fields.is_empty()).then_some(args.fields),
+        track: Some(args.target.track.clone()),
+        dtype: Some(dtype),
+        append: true,
+        fill: args.fill,
+        ..BedImportOptions::default()
+    };
+    let report = from_bed_matrix(
+        Target::Append(&mut dataset),
+        &sources,
+        genome,
+        &options,
+        config,
+    )
+    .context("append BED columns")?;
+    if !quiet {
+        print_report("appended", sources.len(), &args.target.store, &report);
+    }
+    Ok(())
+}
+
+fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<BedColumnRequest>> {
     let mut rows = Vec::new();
     for (index, line) in text.lines().enumerate() {
         let record = line.trim_end();
@@ -1305,9 +1272,9 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<SchemaRow>> {
             continue;
         }
         let cells = record.split('\t').collect::<Vec<_>>();
-        if cells.len() > 3 || cells[0].is_empty() {
+        if cells.len() > 4 || cells[0].is_empty() {
             bail!(
-                "schema {} line {} must be BED_COLUMN[<TAB>TARGET_TRACK[<TAB>DTYPE]]",
+                "schema {} line {} must be BED_COLUMN[<TAB>TRACK[<TAB>DTYPE[<TAB>FILL]]]",
                 path.display(),
                 index + 1
             );
@@ -1318,13 +1285,20 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<SchemaRow>> {
             .map(|dtype| Dtype::from_str(dtype))
             .transpose()
             .with_context(|| format!("schema {} line {}", path.display(), index + 1))?;
-        rows.push(SchemaRow {
-            bed_column: cells[0].to_owned(),
+        let fill = cells
+            .get(3)
+            .filter(|fill| !fill.is_empty())
+            .map(|fill| Fill::parse(fill))
+            .transpose()
+            .with_context(|| format!("schema {} line {}", path.display(), index + 1))?;
+        rows.push(BedColumnRequest {
+            column: cells[0].to_owned(),
             track: cells
                 .get(1)
                 .filter(|t| !t.is_empty())
                 .map(|t| (*t).to_owned()),
             dtype,
+            fill,
         });
     }
     if rows.is_empty() {
@@ -1334,7 +1308,8 @@ fn read_schema_rows(text: &str, path: &Path) -> Result<Vec<SchemaRow>> {
 }
 
 /// Print a schema TSV scaffold for `bed` to stdout: one row per BED value
-/// column mapped to a target track, with its inferred dtype. Unique target
+/// column mapped to a target track, with its inferred dtype and its default
+/// fill. Unique target
 /// names create per-BED-column tracks; repeating one target creates a single
 /// BED-column-axis track. Headerless files use 1-based column selectors.
 fn emit_schema(bed: &Path, infer_rows: InferRows) -> Result<()> {
@@ -1349,90 +1324,39 @@ fn emit_schema(bed: &Path, infer_rows: InferRows) -> Result<()> {
     let columns: Vec<usize> = (3..layout.n_cols).collect();
     let dtypes = infer_bed_dtypes(bed, &columns, infer_rows)
         .with_context(|| format!("infer dtypes for {}", bed.display()))?;
-    println!("# BED column\ttarget track\tdtype");
+    let fill = |dtype: &Dtype| if *dtype == Dtype::Bool { "false" } else { "na" };
+    println!("# BED column\ttarget track\tdtype\tfill");
     match &layout.header {
         Some(names) => {
             for (name, dtype) in names[3..].iter().zip(&dtypes) {
-                println!("{name}\t{name}\t{}", dtype.as_str());
+                println!("{name}\t{name}\t{}\t{}", dtype.as_str(), fill(dtype));
             }
         }
         None => {
             for (column, dtype) in columns.iter().zip(&dtypes) {
-                println!("{}\tfield{}\t{}", column + 1, column + 1, dtype.as_str());
+                let number = column + 1;
+                println!(
+                    "{number}\tfield{number}\t{}\t{}",
+                    dtype.as_str(),
+                    fill(dtype)
+                );
             }
         }
     }
     Ok(())
 }
 
-/// Build a `BedSchema` from a TSV schema file, resolving name selectors against
-/// the first BED header and inferring omitted dtypes across every source.
+/// Build a `BedSchema` from a TSV schema file.
 fn load_schema(
     schema_path: &Path,
-    sources: &[pbzarr::import::Source],
+    sources: &[Source],
+    fill: Option<&Fill>,
     infer_rows: InferRows,
 ) -> Result<BedSchema> {
     let text = std::fs::read_to_string(schema_path)
         .with_context(|| format!("read schema {}", schema_path.display()))?;
     let rows = read_schema_rows(&text, schema_path)?;
-    let first = sources
-        .first()
-        .context("schema import requires a BED source")?;
-
-    let mut specs = Vec::with_capacity(rows.len());
-    let mut file_cols = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let (selector, file_col) = if row.bed_column.bytes().all(|byte| byte.is_ascii_digit()) {
-            let index = row.bed_column.parse::<usize>().map_err(|_| {
-                anyhow!(
-                    "invalid numeric BED-column selector {:?}: value overflows usize",
-                    row.bed_column
-                )
-            })?;
-            if index < 4 {
-                bail!(
-                    "schema BED column {index} is a coordinate column (indices are 1-based; value BED columns start at 4)"
-                );
-            }
-            if row.track.is_none() {
-                bail!(
-                    "schema BED column {index} needs a target track name (no header name is available as a default)"
-                );
-            }
-            (ColumnSelector::Index(index - 1), index - 1)
-        } else {
-            let file_col = column_index_by_name(&first.path, &row.bed_column)
-                .with_context(|| format!("resolve schema BED column {:?}", row.bed_column))?;
-            (ColumnSelector::Name(row.bed_column.clone()), file_col)
-        };
-        file_cols.push(file_col);
-        specs.push(BedColumnSpec {
-            selector,
-            dtype: row.dtype.unwrap_or(Dtype::Bool),
-            track_name: row.track.clone(),
-            description: None,
-        });
-    }
-
-    let missing: Vec<usize> = rows
-        .iter()
-        .zip(&file_cols)
-        .filter(|(row, _)| row.dtype.is_none())
-        .map(|(_, col)| *col)
-        .collect();
-    if !missing.is_empty() {
-        let inferred = infer_bed_dtypes_for_sources(sources, &missing, infer_rows)
-            .context("infer schema BED column dtypes across input sources")?;
-        let mut inferred = inferred.into_iter();
-        for (spec, row) in specs.iter_mut().zip(&rows) {
-            if row.dtype.is_none() {
-                spec.dtype = inferred
-                    .next()
-                    .context("inference returned fewer dtypes than requested")?;
-            }
-        }
-    }
-    Ok(BedSchema(specs))
+    Ok(build_bed_schema(sources, &rows, fill, infer_rows)?)
 }
 
 fn parse_infer_rows(value: &str) -> Result<InferRows> {
@@ -1454,13 +1378,15 @@ mod tests {
 
     #[test]
     fn schema_rows_parse_selectors_tracks_and_dtypes() {
-        let text = "# BED column\ttarget track\tdtype\n4\tdepth\tint32\nmapq\n\ncallable\tcallable_mask\tbool\n";
+        let text = "# BED column\ttarget track\tdtype\tfill\n4\tdepth\tint32\t0\nmapq\n\ncallable\tcallable_mask\tbool\n";
         let rows = read_schema_rows(text, Path::new("schema.tsv")).unwrap();
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].bed_column, "4");
+        assert_eq!(rows[0].fill, Some(Fill::Value(0.into())));
+        assert!(rows[1].fill.is_none());
+        assert_eq!(rows[0].column, "4");
         assert_eq!(rows[0].track.as_deref(), Some("depth"));
         assert_eq!(rows[0].dtype, Some(Dtype::I32));
-        assert_eq!(rows[1].bed_column, "mapq");
+        assert_eq!(rows[1].column, "mapq");
         assert!(rows[1].track.is_none());
         assert!(rows[1].dtype.is_none());
         assert_eq!(rows[2].track.as_deref(), Some("callable_mask"));
@@ -1469,8 +1395,61 @@ mod tests {
 
     #[test]
     fn schema_rows_reject_wide_and_empty_records() {
-        assert!(read_schema_rows("a\tb\tint32\td\n", Path::new("s.tsv")).is_err());
+        assert!(read_schema_rows("a\tb\tint32\tna\te\n", Path::new("s.tsv")).is_err());
         assert!(read_schema_rows("# only comments\n", Path::new("s.tsv")).is_err());
+    }
+
+    #[test]
+    fn store_is_first_and_track_is_a_flag() {
+        let cli = Cli::try_parse_from([
+            "pbz", "-v", "-q", "import", "d4", "out.pbz", "a.d4", "b.d4", "--track", "depth",
+        ])
+        .unwrap();
+        assert_eq!(cli.global.verbose, 1);
+        assert!(cli.global.quiet);
+        let Command::Import(import) = cli.command else {
+            panic!("expected import");
+        };
+        let ImportCommand::D4(args) = import.format else {
+            panic!("expected import d4");
+        };
+        assert_eq!(args.target.store, PathBuf::from("out.pbz"));
+        assert_eq!(args.target.input.input_files.len(), 2);
+        assert_eq!(args.target.track, "depth");
+
+        let cli = Cli::try_parse_from(["pbz", "view", "s.pbz", "--track", "af", "-c", "s1", "-v"])
+            .unwrap();
+        assert_eq!(cli.global.verbose, 1);
+        let Command::View(view) = cli.command else {
+            panic!("expected view");
+        };
+        assert_eq!(view.store, PathBuf::from("s.pbz"));
+        assert_eq!(view.track.as_deref(), Some("af"));
+
+        let err = Cli::try_parse_from([
+            "pbz", "import", "d4", "-o", "out.pbz", "--track", "depth", "a.d4",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn sources_keep_urls_and_drop_compound_extensions() {
+        let url = parse_source("https://h/x.bam").unwrap();
+        assert_eq!(url.path, PathBuf::from("https://h/x.bam"));
+        assert!(url.column_label.is_none());
+        let labeled = parse_source("https://h/x.bam:S1").unwrap();
+        assert_eq!(labeled.path, PathBuf::from("https://h/x.bam"));
+        assert_eq!(labeled.label(), "S1");
+        assert_eq!(parse_source("dir/s1.bed.gz").unwrap().label(), "s1");
+    }
+
+    #[test]
+    fn exclude_flags_take_hex_and_flag_names() {
+        let names = parse_sam_flags("UNMAP,SECONDARY,QCFAIL,DUP").unwrap();
+        assert_eq!(parse_sam_flags("0x704").unwrap(), names);
+        assert_eq!(parse_sam_flags("1796").unwrap(), names);
+        assert!(parse_sam_flags("UNMAPPED").is_err());
     }
 
     #[test]
@@ -1479,7 +1458,6 @@ mod tests {
             "pbz",
             "import",
             "bed",
-            "-o",
             "out.pbz",
             "--genome",
             "g.fai",
@@ -1487,7 +1465,7 @@ mod tests {
             "depth",
             "--codecs",
             "[]",
-            "--chunk-size",
+            "--chunk",
             "100",
             "in.bed.gz",
         ])
@@ -1496,34 +1474,43 @@ mod tests {
     }
 
     #[test]
-    fn scales_parse_ascending_list() {
-        assert_eq!(parse_scales("8,64,512").unwrap(), vec![8, 64, 512]);
+    fn removed_knobs_are_rejected() {
+        let import = |flag: &[&str]| {
+            let mut args = vec!["pbz", "import", "d4", "out.pbz", "--track", "depth"];
+            args.extend_from_slice(flag);
+            args.push("in.d4");
+            Cli::try_parse_from(args)
+        };
+        assert!(import(&[]).is_ok());
+        assert!(import(&["--no-progress", "--decode-chunks", "4"]).is_ok());
+        for flag in [
+            &["--in-flight", "8"][..],
+            &["--scales", "16"],
+            &["--progress"],
+            &["--chunk-size", "4"],
+            &["--column-chunk-size", "1"],
+            &["--shard-size", "8"],
+            &["--shard-column-size", "2"],
+        ] {
+            let err = import(flag).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+        let err = Cli::try_parse_from(["pbz", "scale", "-z", "s.pbz", "-t", "depth"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 
     #[test]
-    fn scales_parse_trims_whitespace() {
-        assert_eq!(parse_scales(" 8 , 64 , 512 ").unwrap(), vec![8, 64, 512]);
-    }
-
-    #[test]
-    fn scales_parse_single_value() {
-        assert_eq!(parse_scales("8").unwrap(), vec![8]);
-    }
-
-    #[test]
-    fn scales_reject_duplicates() {
-        let err = parse_scales("8,8,64").unwrap_err().to_string();
-        assert!(err.contains("unique"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn scales_reject_non_ascending() {
-        let err = parse_scales("64,8").unwrap_err().to_string();
-        assert!(err.contains("ascending"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn scales_reject_non_integer() {
-        assert!(parse_scales("8,abc").is_err());
+    fn dim_and_fasta_replace_the_old_flags() {
+        let bam = |flags: &[&str]| {
+            let mut args = vec!["pbz", "import", "bam", "out.pbz", "--track", "depth"];
+            args.extend_from_slice(flags);
+            args.push("in.cram");
+            Cli::try_parse_from(args)
+        };
+        assert!(bam(&["--dim", "sample", "--fasta", "ref.fa", "--threads", "2"]).is_ok());
+        for flag in [&["--column-dim", "sample"][..], &["--reference", "ref.fa"]] {
+            let err = bam(flag).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
     }
 }

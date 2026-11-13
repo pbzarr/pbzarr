@@ -11,3 +11,6 @@ __pycache__/
 *.py[cod]
 *.so
 *.pyd
+
+# Docs site build output
+/site

@@ -3,30 +3,16 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
 use tempfile::TempDir;
+
+mod common;
+use common::{run_pbz, stdout_of};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/d4")
         .join(name)
-}
-
-fn run_pbz(args: impl IntoIterator<Item = OsString>) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pbz"))
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn stdout_of(output: &Output) -> String {
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout.clone()).unwrap()
 }
 
 fn labeled(path: &Path, label: &str) -> OsString {
@@ -43,7 +29,6 @@ fn import_d4_then_stat_mean() {
     let import = run_pbz([
         "import".into(),
         "d4".into(),
-        "-o".into(),
         store.as_os_str().to_owned(),
         "--track".into(),
         "depth".into(),
@@ -56,7 +41,12 @@ fn import_d4_then_stat_mean() {
         String::from_utf8_lossy(&import.stderr)
     );
 
-    let mean = run_pbz(["stat".into(), store.into_os_string(), "depth".into()]);
+    let mean = run_pbz([
+        "stat".into(),
+        store.into_os_string(),
+        "--track".into(),
+        "depth".into(),
+    ]);
     assert_eq!(
         stdout_of(&mean),
         "#chrom\tstart\tend\tmean\nchr1\t0\t1000\t25.5\n"
@@ -67,7 +57,6 @@ fn import_d4_then_stat_mean() {
     let cohort_import = run_pbz([
         "import".into(),
         "d4".into(),
-        "-o".into(),
         cohort.as_os_str().to_owned(),
         "--track".into(),
         "depth".into(),
@@ -88,10 +77,133 @@ fn import_d4_then_stat_mean() {
         "-s".into(),
         "median".into(),
         cohort.into_os_string(),
+        "--track".into(),
         "depth".into(),
     ]);
     assert_eq!(
         stdout_of(&median),
         "#chrom\tstart\tend\ts1\ts2\nchr1\t0\t1000\t25\t25\n"
     );
+}
+
+#[test]
+fn append_d4_widens_a_cohort_track() {
+    let dir = TempDir::new().unwrap();
+    let d4 = fixture("banded_1k.d4");
+    let store = dir.path().join("cohort.pbz");
+
+    let import = run_pbz([
+        "import".into(),
+        "d4".into(),
+        store.as_os_str().to_owned(),
+        "--track".into(),
+        "depth".into(),
+        "--no-progress".into(),
+        "--shard-columns".into(),
+        "1".into(),
+        labeled(&d4, "s1"),
+        labeled(&d4, "s2"),
+    ]);
+    assert!(
+        import.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+
+    let append = run_pbz([
+        "append".into(),
+        "d4".into(),
+        store.as_os_str().to_owned(),
+        "--track".into(),
+        "depth".into(),
+        "--no-progress".into(),
+        labeled(&d4, "s3"),
+        labeled(&d4, "s4"),
+    ]);
+    assert!(
+        append.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&append.stderr)
+    );
+
+    let median = run_pbz([
+        "stat".into(),
+        "-s".into(),
+        "median".into(),
+        store.into_os_string(),
+        "--track".into(),
+        "depth".into(),
+    ]);
+    assert_eq!(
+        stdout_of(&median),
+        "#chrom\tstart\tend\ts1\ts2\ts3\ts4\nchr1\t0\t1000\t25\t25\t25\t25\n"
+    );
+}
+
+#[test]
+fn import_creates_the_store_then_adds_tracks_and_refuses_a_used_name() {
+    let dir = TempDir::new().unwrap();
+    let d4 = fixture("banded_1k.d4");
+    let store = dir.path().join("store.pbz");
+    let import = |track: &str| {
+        run_pbz([
+            "import".into(),
+            "d4".into(),
+            store.as_os_str().to_owned(),
+            "--track".into(),
+            track.into(),
+            "--no-progress".into(),
+            d4.as_os_str().to_owned(),
+        ])
+    };
+
+    stdout_of(&import("depth"));
+    stdout_of(&import("depth2"));
+    let mean = run_pbz([
+        "stat".into(),
+        store.as_os_str().to_owned(),
+        "--track".into(),
+        "depth2".into(),
+    ]);
+    assert_eq!(
+        stdout_of(&mean),
+        "#chrom\tstart\tend\tmean\nchr1\t0\t1000\t25.5\n"
+    );
+
+    let again = import("depth");
+    assert!(!again.status.success());
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        stderr.contains("already has a track named \"depth\""),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn import_view_and_stat_on_a_format_0_4_store_fail_with_the_legacy_message() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("old.pbz");
+    std::fs::create_dir(&store).unwrap();
+    std::fs::write(
+        store.join("zarr.json"),
+        r#"{"zarr_format":3,"node_type":"group","attributes":{"zarr_conventions":[{"uuid":"b7e3c1a2-5f4d-4e8a-9c1b-2d3e4f5a6b7c","name":"perbase"}]}}"#,
+    )
+    .unwrap();
+    let legacy = "This is a format 0.4 store. pbzarr 0.8 reads format 0.5 only.";
+    let import = run_pbz([
+        "import".into(),
+        "d4".into(),
+        store.as_os_str().to_owned(),
+        "--track".into(),
+        "depth".into(),
+        "--no-progress".into(),
+        fixture("banded_1k.d4").into_os_string(),
+    ]);
+    let view = run_pbz(["view".into(), store.as_os_str().to_owned()]);
+    let stat = run_pbz(["stat".into(), store.as_os_str().to_owned()]);
+    for output in [import, view, stat] {
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(legacy), "{stderr}");
+    }
 }

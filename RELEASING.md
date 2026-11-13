@@ -2,8 +2,8 @@
 
 Releases are driven by [release-please](https://github.com/googleapis/release-please)
 from [Conventional Commit](https://www.conventionalcommits.org/) messages on `main`.
-One version covers the whole repo: the `pbzarr` crate (crates.io) and the `pbzarr`
-Python wheel (PyPI) ship in lockstep.
+One version covers the whole repo: the `pbzarr` crate (crates.io), the `pbzarr`
+Python wheel (PyPI) and the `pbz` CLI binaries (GitHub release) ship in lockstep.
 
 ## How a release happens
 
@@ -19,15 +19,34 @@ Python wheel (PyPI) ship in lockstep.
 3. **Merge the release PR.** That creates the git tag and GitHub release
    (`releases_created == 'true'`), which triggers the publish jobs in
    `.github/workflows/release.yml`:
-   - **build-wheels** — `.github/workflows/wheels.yml` builds abi3 wheels for
+   - **build-wheels**: `.github/workflows/wheels.yml` builds abi3 wheels for
      linux x86_64 (manylinux_2_28, glibc 2.28 or newer) and a macOS universal2
-     wheel (Intel + Apple Silicon) on the macos-14 Apple Silicon runner, then
-     installs and imports each wheel. CI runs the same workflow on every pull
-     request, so a broken wheel build shows up before a release.
-   - **publish-pypi** — uploads the wheels via PyPI Trusted Publishing
+     wheel (Intel + Apple Silicon) on the macos-15 Apple Silicon runner. It then
+     installs each wheel, imports a d4 fixture, opens the store and reads a
+     region.
+   - **build-binaries**: `.github/workflows/binaries.yml` builds `pbz` for
+     linux x86_64 (in the manylinux_2_28 image, so glibc 2.28 or newer) and
+     macOS arm64, runs an import and a `pbz stat` on a fixture, and attaches
+     `pbz-x86_64-unknown-linux-gnu.tar.gz` and `pbz-aarch64-apple-darwin.tar.gz`
+     to the GitHub release.
+   - **publish-pypi**: uploads the wheels via PyPI Trusted Publishing
      (OIDC, environment `pypi`; no token stored).
-   - **publish-crate** — `cargo publish -p pbzarr` via crates.io Trusted
+   - **publish-crate**: `cargo publish -p pbzarr` via crates.io Trusted
      Publishing (OIDC; no token stored).
+
+   CI (`ci.yml`) runs the wheel and binary workflows on every pull request to
+   `main`, which includes the release PR, so a broken build shows up before a
+   release. A push runs only the Rust and Python tests.
+4. **Replace the release notes (optional).** release-please uses the generated
+   changelog entry as the text of the GitHub release. To use curated notes,
+   write them to a file outside the repo and replace the text:
+
+   ```bash
+   gh release edit v0.8.0 --notes-file notes.md
+   ```
+
+   This changes only the text. It does not run the publish jobs again.
+   `CHANGELOG.md` keeps the generated entry.
 
 ## Crate and wheel stay linked
 
@@ -37,9 +56,7 @@ single root package (`"."`, `release-type: simple`) and bumps that annotated lin
 through its generic updater. Every member crate inherits it with
 `version.workspace = true`, and the wheel derives it via `dynamic = ["version"]`
 (maturin reads the binding crate's inherited version). The crate and the wheel
-cannot drift, and both release from the same tag. (`simple` also keeps a
-release-please-managed `version.txt` at the repo root; it mirrors the same number
-and is not read by cargo or maturin.)
+cannot drift, and both release from the same tag.
 
 Merging the release PR fires one GitHub release, and that single event triggers
 both `publish-pypi` (through `build-wheels`) and `publish-crate`. They run as
@@ -49,12 +66,28 @@ tab; it republishes the same pinned version (a target that already exists on
 PyPI/crates.io will reject the re-push, which is the expected safety net). You
 cannot release just the wheel or just the crate, they always move together.
 
-If the wheels fail to build for a version whose crate already published (so the
-tag and GitHub release exist but PyPI is missing the wheel), re-run the `Release`
-workflow via **Run workflow** (`workflow_dispatch`) with the `ref` input set to the
-tag (e.g. `v0.2.0`). That rebuilds the wheels off the tag and runs `publish-pypi`
-through trusted publishing; `publish-crate` stays gated on a fresh release and does
-not re-fire, so the crate is untouched.
+If the wheels or binaries fail to build for a version whose crate already
+published (so the tag and GitHub release exist but PyPI or the release page is
+missing files), re-run the `Release` workflow via **Run workflow**
+(`workflow_dispatch`) with the `ref` input set to the tag (e.g. `v0.8.0`). That
+rebuilds the wheels and binaries off the tag, runs `publish-pypi` through trusted
+publishing, and attaches the binaries again (`--clobber`). `publish-crate` stays
+gated on a fresh release and does not re-fire, so the crate is untouched.
+
+## Package version and format version
+
+The package version (for example 0.8.0) and the PBZ format version (0.5, written
+as `pbz:version` in the root `zarr.json`) are different numbers. A package release
+can keep the format version. Change the format version only when the spec changes.
+
+PyPI has no 0.4.0 and no 0.6.0 wheels (the 0.6.0 release run failed).
+
+## Supported platforms
+
+- Wheels: Python 3.12 or newer; linux x86_64 with glibc 2.28 or newer (RHEL and
+  Rocky 8+, Ubuntu 20.04+, Debian 10+) and macOS (Intel and Apple Silicon).
+- `pbz` binaries: linux x86_64 with glibc 2.28 or newer, and macOS arm64.
+- Older Linux (for example CentOS 7, glibc 2.17): build from source.
 
 ## Version pinning
 
@@ -71,10 +104,22 @@ original blocker (the core crate's `d4` git dependency) is resolved: d4 import
 moved to the unpublished `pbzarr-readers` crate, so `pbzarr` itself is git-dep-free
 and `cargo publish -p pbzarr` succeeds.
 
-`pbzarr-readers` and `pbzarr-python` stay unpublished (`publish = false`):
-`pbzarr-readers` carries the `d4` git dependency, and `pbzarr-python` ships only as
-the wheel. Rust d4 import becomes publishable on crates.io only once `d4` itself is
-on crates.io (or vendored) and `pbzarr-readers` flips to published.
+`pbzarr-readers`, `pbz` and `pbzarr-python` stay unpublished (`publish = false`):
+`pbzarr-readers` (and so `pbz`) carries git dependencies (the `d4` fork and
+`rust-htslib` at a tag commit that is not on crates.io yet), and `pbzarr-python`
+ships only as the wheel. `pbz` ships only as the release binaries. The importers
+become publishable on crates.io only once their git dependencies are on crates.io
+(or vendored) and `pbzarr-readers` flips to published.
+
+## The zarrs patch
+
+The root `Cargo.toml` has a `[patch.crates-io]` entry that replaces `zarrs` and
+`zarrs_storage` with a fork commit. The fork fixes partial reads through the
+`transpose` codec and makes `transpose` faster. A patch applies only to builds
+from this repository (CI, the wheels and the `pbz` binaries). Users who add the
+`pbzarr` crate from crates.io build against upstream `zarrs`, where a partial read
+of a store that uses `transpose` fails (checked on zarrs 0.23.14). Remove the
+patch when both fixes are in an upstream release.
 
 ## First-time setup checklist
 
