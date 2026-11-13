@@ -16,6 +16,21 @@ nav = [
   { "Get started" = [
     { "Install" = "get-started/install.md" },
   ] },
+  { "Concepts" = [
+    { "Data model" = "concepts/data-model.md" },
+    { "Zarr, xarray, and Dask" = "concepts/zarr-xarray-dask.md" },
+    { "Storage layout" = "concepts/storage-layout.md" },
+    { "Common mistakes" = "concepts/common-mistakes.md" },
+  ] },
+  { "Cookbook" = [
+    "cookbook/index.md",
+    { "Build a cohort store" = "cookbook/build-a-cohort-store.md" },
+    { "Depth in regions" = "cookbook/depth-in-regions.md" },
+    { "Callable mask" = "cookbook/callable-mask.md" },
+    { "Compare samples" = "cookbook/compare-samples.md" },
+    { "Export to bedGraph" = "cookbook/export-bedgraph.md" },
+    { "Save a derived track" = "cookbook/derived-track.md" },
+  ] },
   { "Reference" = [
     { "Command line" = "reference/cli.md" },
     { "Python API" = "reference/python.md" },
