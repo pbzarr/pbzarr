@@ -37,6 +37,16 @@ Python wheel (PyPI) and the `pbz` CLI binaries (GitHub release) ship in lockstep
    CI (`ci.yml`) runs the wheel and binary workflows on every pull request to
    `main`, which includes the release PR, so a broken build shows up before a
    release. A push runs only the Rust and Python tests.
+4. **Replace the release notes (optional).** release-please uses the generated
+   changelog entry as the text of the GitHub release. To use curated notes,
+   write them to a file outside the repo and replace the text:
+
+   ```bash
+   gh release edit v0.8.0 --notes-file notes.md
+   ```
+
+   This changes only the text. It does not run the publish jobs again.
+   `CHANGELOG.md` keeps the generated entry.
 
 ## Crate and wheel stay linked
 
