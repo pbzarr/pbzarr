@@ -8,6 +8,11 @@ on:
         type: string
         required: false
         default: ""
+      cache:
+        description: "Use sccache through the GitHub Actions cache."
+        type: boolean
+        required: false
+        default: true
 
 jobs:
   build:
@@ -28,6 +33,7 @@ jobs:
           args: --release --out dist
           target: ${{ matrix.target }}
           manylinux: "2_28"
+          sccache: ${{ inputs.cache }}
           before-script-linux: |
             dnf install -y clang-devel
       - uses: actions/setup-python@v5
