@@ -18,7 +18,24 @@ python -c "import pbzarr; print(pbzarr.__version__)"
 
 ## Command-line tool
 
-The `pbz` command is a single binary. Download it from the [releases page](https://github.com/pbzarr/pbzarr/releases):
+The `pbz` command is a single binary. To install it, run:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/pbzarr/pbzarr/main/install.sh | sh
+```
+
+The script downloads `pbz` from the latest release and puts it in `~/.local/bin`. If that directory is not on your `PATH`, the script tells you. You can change two settings:
+
+| Variable | Effect | Default |
+|---|---|---|
+| `PBZ_VERSION` | The release to install, for example `0.8.0` | the latest release |
+| `PBZ_INSTALL_DIR` | The directory for `pbz` | `~/.local/bin` |
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/pbzarr/pbzarr/main/install.sh | PBZ_VERSION=0.8.0 sh
+```
+
+You can also download the binary yourself from the [releases page](https://github.com/pbzarr/pbzarr/releases):
 
 | System | File |
 |---|---|
