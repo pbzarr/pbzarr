@@ -1,5 +1,77 @@
 # Changelog
 
+## [0.8.0](https://github.com/pbzarr/pbzarr/compare/v0.7.0...v0.8.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* a store is one zarr group with each track an array at the root and the contigs in `contig_id` and `contig_length`; a format 0.4 store is refused
+* **pbz:** the store is the first argument and every command takes `--track`; `-o/--output` and the positional track of `view` and `stat` are gone
+* **pbz:** rename `--chunk-size`, `--shard-size`, `--shard-column-size`, `--column-dim` and `--reference` to `--chunk`, `--shard` (in inner chunks), `--shard-columns`, `--dim` and `--fasta`
+* **pbz:** `pbz stat -r` takes one region and the BED file moves to `-R/--regions`
+* **pbz:** remove `pbz scale`, `--scales`, `--dry-run`, `--in-flight`, `--progress` and `--column-chunk-size`
+* new default layout of 65,536 x 1 inner chunks in shards of 1,024 chunks x 16 columns
+* BED value columns default to the null value where there is no data, in place of 0
+* **python:** `pbzarr.open` returns one `xarray.Dataset`; the `.pbz` accessors and `DataTree` results are gone
+* **python:** `create_store` becomes `create(path, reference=...)` and the import keywords are renamed to `dim`, `threads`, `chunk`, `shard`, `shard_columns` and `fasta`
+* **python:** the import report has the keys `positions`, `chunks_written`, `chunks_skipped`, `bytes_written` and `wall_seconds`
+* **python:** `reduce_regions` returns rows in input order, allows overlapping intervals, takes named options and names the end coordinate `region_end`
+* **python:** native errors raise `FileNotFoundError`, `ValueError` or `PbzError`
+* **python:** require Python 3.12 and newer zarr, xarray, numpy and dask; drop `flox`
+* **rust:** `Dataset` replaces `PbzStore` and `Track`, and `Reference` replaces `Genome`; the scale writer and the import estimate are removed
+* write and read store format 0.5 only ([#27](https://github.com/pbzarr/pbzarr/issues/27))
+
+### Features
+
+* `--fill VALUE|na` for bigWig and BED imports, and a FILL column in BED schemas ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* `pbz import --zip` writes a single-file zip store, and `view`, `stat` and `pbzarr.open` read zip stores ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* `pbz import` and the Python `import_*` functions create the store from the source headers or add a track to an existing store ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* a fixed null value for each dtype; `view`, `stat` and `info` skip integer nulls ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* a store is one zarr group with each track an array at the root and the contigs in `contig_id` and `contig_length`; a format 0.4 store is refused ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* BED value columns default to the null value where there is no data, in place of 0 ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* every import, append and write ends with consolidated metadata at the store root ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* int64 and uint64 tracks ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* new default layout of 65,536 x 1 inner chunks in shards of 1,024 chunks x 16 columns ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **pbz:** `pbz append` adds columns to an existing track from BED, BAM, d4 and bigWig sources ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **pbz:** `pbz stat -r` takes one region and the BED file moves to `-R/--regions` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **pbz:** `view` and `stat` select regions with `-r CHROM:START-END` and `-R BED` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **pbz:** add `pbz info` and `pbz validate` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **pbz:** remove `pbz scale`, `--scales`, `--dry-run`, `--in-flight`, `--progress` and `--column-chunk-size` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **pbz:** rename `--chunk-size`, `--shard-size`, `--shard-column-size`, `--column-dim` and `--reference` to `--chunk`, `--shard` (in inner chunks), `--shard-columns`, `--dim` and `--fasta` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **pbz:** the store is the first argument and every command takes `--track`; `-o/--output` and the positional track of `view` and `stat` are gone ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **python:** `create_store` becomes `create(path, reference=...)` and the import keywords are renamed to `dim`, `threads`, `chunk`, `shard`, `shard_columns` and `fasta` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **python:** `pbzarr.open` returns one `xarray.Dataset`; the `.pbz` accessors and `DataTree` results are gone ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **python:** `pbzarr.region` adds `pos` and `contig:pos` labels to a region view ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **python:** `reduce_regions` returns rows in input order, allows overlapping intervals, takes named options and names the end coordinate `region_end` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **python:** add `pbzarr.write` and `pbzarr.interval_mask` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **python:** Ctrl-C stops an import ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **python:** native errors raise `FileNotFoundError`, `ValueError` or `PbzError` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **python:** require Python 3.12 and newer zarr, xarray, numpy and dask; drop `flox` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **python:** the import report has the keys `positions`, `chunks_written`, `chunks_skipped`, `bytes_written` and `wall_seconds` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **python:** type annotations, `py.typed` and `__version__` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* release binaries of `pbz` for Linux x86_64 (glibc 2.28) and macOS arm64 ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* **rust:** `Dataset` replaces `PbzStore` and `Track`, and `Reference` replaces `Genome`; the scale writer and the import estimate are removed ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* write and read store format 0.5 only ([#27](https://github.com/pbzarr/pbzarr/issues/27)) ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+
+
+### Bug Fixes
+
+* `pbz view` ends with no error on a broken pipe ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* `reduce_regions` limits the rows that one task reads ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* a d4 import no longer writes the value 63 in place of real depths when it reads a d4 file out of order ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* a whole-number fill such as `0.0` fits an integer track ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* an import fails when a worker panics, in place of hanging ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* an import no longer fails at about half of the open file limit, and idle BAM readers free their decode buffers ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* import progress counts skipped chunks ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* refuse a float `_FillValue` stored as a JSON number ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* region strings parse the same way in Python and in `pbz -r` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+
+
+### Performance Improvements
+
+* `reduce_regions` reads and reduces each batch in one task, without `flox` ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+* a sharded import encodes each inner chunk when it is complete and keeps no uncompressed shard in memory ([0634feb](https://github.com/pbzarr/pbzarr/commit/0634febde562264218540f5e502ff36e7f4aa1e9))
+
 ## [0.7.0](https://github.com/pbzarr/pbzarr/compare/v0.6.0...v0.7.0) (2026-10-22)
 
 
