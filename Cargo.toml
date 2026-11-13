@@ -26,6 +26,10 @@ debug = true
 strip = false
 split-debuginfo = "packed"
 
+[profile.dist]
+inherits = "release"
+strip = "symbols"
+
 # Temporary zarrs pin (branch perf-transpose-fixed-size): the partial-decode
 # cache below an array-to-array codec was built with the wrong-stage shape
 # (transpose + pcodec reads failed), and the transpose codec permuted byte by

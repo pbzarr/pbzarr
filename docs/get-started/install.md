@@ -21,18 +21,24 @@ python -c "import pbzarr; print(pbzarr.__version__)"
 The `pbz` command is a single binary. To install it, run:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/pbzarr/pbzarr/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/pbzarr/pbzarr/releases/latest/download/pbz-installer.sh | sh
 ```
 
-The script downloads `pbz` from the latest release and puts it in `~/.local/bin`. If that directory is not on your `PATH`, the script tells you. You can change two settings:
+The script downloads `pbz` from the latest release, checks its checksum, and puts it in `$CARGO_HOME/bin`. If `CARGO_HOME` is not set, it uses `~/.cargo/bin`, the same directory as `cargo install`. If that directory is not on your `PATH`, the script adds it to your shell profile. You can change two settings:
 
 | Variable | Effect | Default |
 |---|---|---|
-| `PBZ_VERSION` | The release to install, for example `0.8.0` | the latest release |
-| `PBZ_INSTALL_DIR` | The directory for `pbz` | `~/.local/bin` |
+| `PBZ_INSTALL_DIR` | The directory for `pbz` | `$CARGO_HOME/bin` or `~/.cargo/bin` |
+| `PBZ_NO_MODIFY_PATH` | Set to `1` to keep the script from changing your shell profile | not set |
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/pbzarr/pbzarr/main/install.sh | PBZ_VERSION=0.8.0 sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/pbzarr/pbzarr/releases/latest/download/pbz-installer.sh | PBZ_INSTALL_DIR=/opt/bin PBZ_NO_MODIFY_PATH=1 sh
+```
+
+Each release has its own script, which installs that release. To install a specific version, put the version in the URL:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/pbzarr/pbzarr/releases/download/v0.9.0/pbz-installer.sh | sh
 ```
 
 You can also download the binary yourself from the [releases page](https://github.com/pbzarr/pbzarr/releases):
@@ -42,11 +48,11 @@ You can also download the binary yourself from the [releases page](https://githu
 | Linux x86_64 (glibc 2.28 or later) | `pbz-x86_64-unknown-linux-gnu.tar.gz` |
 | macOS on Apple Silicon | `pbz-aarch64-apple-darwin.tar.gz` |
 
-Unpack the file and put `pbz` on your `PATH`:
+Each file has a `.sha256` file next to it. Unpack the file and put `pbz` on your `PATH`:
 
 ```bash
 tar -xzf pbz-x86_64-unknown-linux-gnu.tar.gz
-mv pbz ~/.local/bin/
+mv pbz-x86_64-unknown-linux-gnu/pbz ~/.local/bin/
 pbz --version
 ```
 

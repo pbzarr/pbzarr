@@ -12,10 +12,10 @@ The Python package needs Python 3.12 or later:
 pip install pbzarr
 ```
 
-The `pbz` command-line tool installs into `~/.local/bin`, on Linux x86_64 or macOS on Apple Silicon:
+The `pbz` command-line tool installs into `~/.cargo/bin`, on Linux x86_64 or macOS on Apple Silicon:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/pbzarr/pbzarr/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/pbzarr/pbzarr/releases/latest/download/pbz-installer.sh | sh
 ```
 
 See [Install](get-started/install.md) for other systems and options.

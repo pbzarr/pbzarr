@@ -1,0 +1,44 @@
+name: Test binaries
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-build-local-x86_64-unknown-linux-gnu
+          path: dist
+          merge-multiple: true
+      - name: Test the binary
+        run: |
+          tar -xzf dist/pbz-x86_64-unknown-linux-gnu.tar.gz --strip-components=1 -C "$RUNNER_TEMP"
+          pbz="$RUNNER_TEMP/pbz"
+          "$pbz" --version
+          "$pbz" import d4 "$RUNNER_TEMP/test.pbz" fixtures/d4/banded_1k.d4 --track depth -q
+          "$pbz" stat "$RUNNER_TEMP/test.pbz" -r chr1:100-110
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-build-local-aarch64-apple-darwin
+          path: dist
+          merge-multiple: true
+      - name: Test the binary
+        run: |
+          tar -xzf dist/pbz-aarch64-apple-darwin.tar.gz --strip-components=1 -C "$RUNNER_TEMP"
+          pbz="$RUNNER_TEMP/pbz"
+          "$pbz" --version
+          "$pbz" import d4 "$RUNNER_TEMP/test.pbz" fixtures/d4/banded_1k.d4 --track depth -q
+          "$pbz" stat "$RUNNER_TEMP/test.pbz" -r chr1:100-110

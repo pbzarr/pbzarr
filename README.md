@@ -44,10 +44,10 @@ pip install pbzarr
 To install the `pbz` command-line tool on Linux x86_64 or macOS on Apple Silicon:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/pbzarr/pbzarr/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/pbzarr/pbzarr/releases/latest/download/pbz-installer.sh | sh
 ```
 
-The script downloads `pbz` from the latest [release](https://github.com/pbzarr/pbzarr/releases) into `~/.local/bin`. Set `PBZ_VERSION` to get a different release, or `PBZ_INSTALL_DIR` to use a different directory. You can also build it from source:
+The script downloads `pbz` from the latest [release](https://github.com/pbzarr/pbzarr/releases), checks its checksum, and puts it in `$CARGO_HOME/bin` (by default `~/.cargo/bin`). Set `PBZ_INSTALL_DIR` to use a different directory. You can also build it from source:
 
 ```bash
 cargo install --locked --git https://github.com/pbzarr/pbzarr pbz
