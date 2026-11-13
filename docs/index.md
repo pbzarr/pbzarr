@@ -4,6 +4,24 @@ pbzarr is a single store for genomic sequencing data that allows for joint compu
 
 A store is a Zarr v3 group: a directory, a ZIP file, or a location in cloud object storage. It opens as one [xarray](https://docs.xarray.dev/) Dataset. See [Data model](concepts/data-model.md) for the details.
 
+## Install
+
+The Python package needs Python 3.12 or later:
+
+```bash
+pip install pbzarr
+```
+
+The `pbz` command-line tool installs into `~/.cargo/bin`, on Linux x86_64 or macOS on Apple Silicon:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/pbzarr/pbzarr/releases/latest/download/pbz-installer.sh | sh
+```
+
+See [Install](get-started/install.md) for other systems and options.
+
+## Example
+
 === "Python"
 
     ```python

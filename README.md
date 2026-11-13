@@ -41,7 +41,13 @@ The Python package needs Python 3.12 or newer:
 pip install pbzarr
 ```
 
-The `pbz` command-line tool is on the [releases page](https://github.com/pbzarr/pbzarr/releases). Download `pbz-x86_64-unknown-linux-gnu.tar.gz` or `pbz-aarch64-apple-darwin.tar.gz`, unpack it, and put `pbz` on your `PATH`. You can also build it from source:
+To install the `pbz` command-line tool on Linux x86_64 or macOS on Apple Silicon:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/pbzarr/pbzarr/releases/latest/download/pbz-installer.sh | sh
+```
+
+The script downloads `pbz` from the latest [release](https://github.com/pbzarr/pbzarr/releases), checks its checksum, and puts it in `$CARGO_HOME/bin` (by default `~/.cargo/bin`). Set `PBZ_INSTALL_DIR` to use a different directory. You can also build it from source:
 
 ```bash
 cargo install --locked --git https://github.com/pbzarr/pbzarr pbz
