@@ -12,10 +12,12 @@ Python wheel (PyPI) and the `pbz` CLI binaries (GitHub release) ship in lockstep
    build the changelog.
 2. **release-please opens (or updates) a release PR** titled `chore(main): release <version>`.
    It bumps the one version line in the root `Cargo.toml` `[workspace.package]`
-   table (annotated `# x-release-please-version`) and writes `CHANGELOG.md`. Every
-   crate inherits that version via `version.workspace = true`, and the wheel reads
-   it through `dynamic = ["version"]` in `pyproject.toml`, so nothing else needs a
-   per-file bump.
+   table (annotated `# x-release-please-version`), bumps the four workspace crates
+   in `Cargo.lock`, and writes `CHANGELOG.md`. Every crate inherits that version
+   via `version.workspace = true`, and the wheel reads it through
+   `dynamic = ["version"]` in `pyproject.toml`, so nothing else needs a per-file
+   bump. The `Cargo.lock` bump keeps `cargo build --locked` working on the release
+   PR.
 3. **Merge the release PR.** That creates the git tag and GitHub release
    (`releases_created == 'true'`), which triggers the publish jobs in
    `.github/workflows/release.yml`:
