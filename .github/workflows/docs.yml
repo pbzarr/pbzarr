@@ -1,0 +1,54 @@
+name: Docs
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to build; empty means the triggering commit."
+        type: string
+        required: false
+        default: ""
+      deploy:
+        description: "Push the built site to pbzarr/pbzarr.github.io."
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      DOCS_DEPLOY_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref (tag) to build the docs from; empty means the default branch."
+        required: false
+        default: ""
+      deploy:
+        description: "Push the built site to pbzarr/pbzarr.github.io."
+        type: boolean
+        required: false
+        default: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          pixi-version: v0.70.1
+          environments: docs
+          cache: true
+
+      - run: pixi run -e docs docs-build
+
+      - uses: peaceiris/actions-gh-pages@v4
+        if: ${{ inputs.deploy }}
+        with:
+          deploy_key: ${{ secrets.DOCS_DEPLOY_KEY }}
+          external_repository: pbzarr/pbzarr.github.io
+          publish_branch: gh-pages
+          publish_dir: ./site
+          force_orphan: true

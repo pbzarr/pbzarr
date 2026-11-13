@@ -54,3 +54,10 @@ jobs:
 
   binaries:
     uses: ./.github/workflows/binaries.yml
+
+  docs:
+    uses: ./.github/workflows/docs.yml
+    with:
+      deploy: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    secrets:
+      DOCS_DEPLOY_KEY: ${{ secrets.DOCS_DEPLOY_KEY }}

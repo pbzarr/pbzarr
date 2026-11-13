@@ -41,9 +41,14 @@ Python wheel (PyPI) and the `pbz` CLI binaries (GitHub release) ship in lockstep
    (`Swatinem/rust-cache` for cargo, sccache for the wheels) and saves the cache
    only from `main`. A pull request reads the cache from `main`.
 
-   CI (`ci.yml`) runs the tests and the wheel and binary builds on
-   every pull request to `main` and on every push to `main`, so a broken build
-   shows up before a release. release-please opens and updates the release PR
+   CI (`ci.yml`) runs the tests, the wheel and binary builds and the docs build
+   on every pull request to `main` and on every push to `main`, so a broken build
+   shows up before a release. On a push to `main`, the docs job also deploys the
+   site: `.github/workflows/docs.yml` builds it with Zensical
+   (`pixi run -e docs docs-build`) and pushes `site/` to the `gh-pages` branch of
+   `pbzarr/pbzarr.github.io`, which serves <https://pbzarr.github.io>. It uses the
+   `DOCS_DEPLOY_KEY` secret. The site follows `main`, so it can show changes that
+   are not in a release yet. release-please opens and updates the release PR
    with the default `GITHUB_TOKEN`, so GitHub holds those CI runs until someone
    approves them. Before you merge the release PR, click **Approve workflows to
    run** in its merge box and wait for CI to pass. release-please pushes to the PR
@@ -84,6 +89,9 @@ missing files), re-run the `Release` workflow via **Run workflow**
 rebuilds the wheels and binaries off the tag, runs `publish-pypi` through trusted
 publishing, and attaches the binaries again (`--clobber`). `publish-crate` stays
 gated on a fresh release and does not re-fire, so the crate is untouched.
+
+To deploy the docs without a push to `main`, run the `Docs` workflow via **Run
+workflow**. Leave the `ref` input empty to build from `main`, or set it to a tag.
 
 ## Package version and format version
 
@@ -139,6 +147,20 @@ patch when both fixes are in an upstream release.
   repos don't both publish the `pbzarr` project.
 - **GitHub:** the `Release` workflow needs `contents: write` + `pull-requests: write`
   (already set); the PyPI job needs `id-token: write` (already set).
+- **Docs site:** make `pbzarr/pbzarr.github.io` public (GitHub Pages on a private
+  repo needs a paid plan). Make a deploy key:
+
+  ```bash
+  ssh-keygen -t ed25519 -N "" -C "pbzarr docs deploy" -f docs-deploy
+  ```
+
+  Add `docs-deploy.pub` to `pbzarr/pbzarr.github.io` (Settings, Deploy keys) and
+  select **Allow write access**. Add the private key `docs-deploy` to
+  `pbzarr/pbzarr` as the repository secret `DOCS_DEPLOY_KEY`. Then delete both
+  key files. The first push to `main` (or a `Docs` run) makes the `gh-pages`
+  branch. Then, in `pbzarr/pbzarr.github.io` (Settings, Pages), set the source to
+  **Deploy from a branch**, branch `gh-pages`, folder `/ (root)`. Delete the old
+  `.github/workflows/deploy.yml` in that repo, because it deploys the old site.
 - **crates.io:** add a Trusted Publisher for the `pbzarr` crate: publisher type
   GitHub, repository `pbzarr/pbzarr`, workflow filename `release.yml` (leave
   environment blank, the job sets none). The crate `pbzarr@0.1.0` must already be
