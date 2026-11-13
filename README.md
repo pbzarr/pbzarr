@@ -116,7 +116,7 @@ ds = pbzarr.open("depth.pbz")
 ds = pbzarr.write(ds, {"over_10": (ds["depth"] >= 10).mean("sample")})
 ```
 
-A derived track must cover the whole reference on `position`, or have no genomic dimension. The write drops 0-d coordinates, for example `quantile` after `quantile(0.5)`. `pbzarr.write` takes a path, a URL, or a Dataset from `pbzarr.open`. It adds the track to the store, with the default Zarr codecs unless `encoding=` says otherwise, and returns the store opened again. It does not change the Dataset that you give it.
+A derived track must cover the whole reference on `position`, or have no genomic dimension. The write drops 0-d coordinates, for example `quantile` after `quantile(0.5)`. `pbzarr.write` takes a path, a URL, or a Dataset from `pbzarr.open`. It adds the track to the store and returns the store opened again. It does not change the Dataset that you give it. A new track on `position` gets the import layout of chunks and shards, unless `encoding=` sets the layout.
 
 ### Import other files
 

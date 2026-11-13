@@ -81,11 +81,11 @@ By default, every track that an import creates is sharded and uses Blosc with zs
 
 Import entry points accept an explicit Zarr v3 codec spec (`--codecs` on the CLI, `codecs=` in Python) that replaces the whole default layout: a standard `codecs` list, with sharding expressed as a `sharding_indexed` codec and an optional `chunk_grid` member for the outer grid. Without `chunk_grid`, the outer grid is one inner chunk of positions by up to 16 columns. `--codecs` conflicts with the three layout knobs.
 
-On a sharded track, the inner chunk is the shard's subchunk shape. Sharded writes append encoded subchunks through Zarr partial encoding instead of rewriting whole shards.
+On a sharded track, the inner chunk is the shard's subchunk shape.
 
 One import engine drives every format. A chunk is one inner position chunk, and it is the unit the engine writes. A span is a run of consecutive chunks, and it is the window one reader decodes in one pass. By default the engine sizes the span automatically: up to 4 million positions, and fewer when that leaves the workers short of pieces. A piece is one reader and one span. Each reader decodes each span once and fills every schema field in that one pass. Buffers still close and write per chunk, so the engine still skips an uncovered chunk inside a covered span. The engine pre-fills every buffer with the destination track’s declared fill value.
 
-The worker that completes a buffer writes it. On an unsharded track, the buffer is one whole chunk. On a sharded track, the worker compresses the buffer and appends it to its shard exactly once, and a per-shard lock serializes the appends. The engine never writes a chunk that no reader covers. An absent chunk reads back as the fill value.
+The worker that completes a buffer writes it. On an unsharded track, the buffer is one whole chunk. On a sharded track whose import covers whole shards of columns, the worker encodes the buffer as one inner chunk and keeps only the encoded bytes. The worker that closes the last chunk of a shard lays out the shard and its index and stores it in one call, so each shard file is written once. When the import does not cover whole shards of columns, the worker writes each chunk through Zarr partial encoding, and a per-shard lock serializes these writes. The engine never writes a chunk that no reader covers. An absent chunk reads back as the fill value.
 
 ## Python API
 

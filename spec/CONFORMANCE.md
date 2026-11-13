@@ -1,9 +1,8 @@
-# PBZ core conformance draft
+# PBZ conformance
 
-Updated: 2026-11-06. This defines example stores and expected validation results
-for the [core proposal](README.md). The additive Rust draft reader and `pixi run validate-dataset` now make
-these expectations executable; see the validation record for actual runs. The examples use `0.5` until
-a release format version is assigned. No conversion is included.
+This page defines example stores and the expected validation results for the
+[format 0.5 specification](README.md). `pbz validate` and
+`pixi run validate-dataset` check these results.
 
 ## Run and inspect the examples
 
@@ -19,9 +18,9 @@ and a `manifest.json` describing expected PBZ outcomes. The destination must not
 already exist. The manifest is fixture documentation outside the PBZ stores;
 it is not format metadata.
 
-The script also generates intentionally invalid stores. Their outcomes are checked by the separate Rust conformance command. Some
-invalid examples still open in Xarray: PBZ imposes additional genomic rules.
-The [validation record](../docs/proposals/format-05/VALIDATION.md) identifies what has actually run.
+The script also makes invalid stores. The Rust `check_dataset` example checks
+their results. Some invalid stores still open in Xarray, because PBZ adds
+genomic rules that Xarray does not check.
 
 ## Canonical example
 
@@ -74,7 +73,7 @@ stored numbers were computed from their dimension name.
 | `regional-fill` | A new track has all twelve positions, selected values at flat rows `[2,4)`, and ordinary zero fill elsewhere. No shortened genomic axis is stored. |
 | `values-and-missingness` | Zero stays zero without a missing sentinel; integer sentinel `-1` decodes as missing. Signed/unsigned integers above `2**53` retain exact values when no missing decoding is requested. |
 
-Zero-length and empty-reference fixtures exercise the draft's reference bounds.
+Zero-length and empty-reference fixtures test the limits of the reference rules.
 A particular windowing operation may still reject them with a specific operation
 error; that does not make their stored reference invalid.
 
@@ -84,7 +83,7 @@ Validation should distinguish these outcomes:
 
 1. **Invalid PBZ store:** recognized format, but an invariant below is violated.
 2. **Unsupported format version:** this reader does not know that version's
-   contract. Do not reinterpret it as this draft or convert it implicitly.
+   contract. Do not read it as format 0.5, and do not convert it.
 3. **Unsupported encoding or operation:** the schema permits the array, but the
    implementation cannot decode it or perform the requested command. This does
    not make the store malformed.
@@ -141,9 +140,8 @@ variables in one store. G3 prevents putting both on the same variable.
 
 ### Values and encodings
 
-The [Rust/CLI scope](../docs/proposals/format-05/RUST_CLI.md) specifies the planned primitive dtype support.
-The convention itself does not impose a codec registry or require every reader
-to support every standard encoding.
+The format does not define a codec registry, and it does not require every
+reader to support every standard encoding.
 
 For the initial portable fixtures:
 
@@ -190,16 +188,9 @@ The additional `unsupported-version` fixture has an unknown version marker.
 Its expected outcome is **unsupported version**, not a claim about that unknown
 format's validity.
 
-## Remaining implementation conformance cases
+## Other conformance cases
 
-The generated stores are a small starting corpus. The Rust public-interface tests also
-cover checks for missing labels after decoding, reference overflow, malformed
-Zarr metadata, wrong reference dimensions, repeated/empty dimension names,
-ordinary repeated non-genomic root arrays, and `bin_1`. Add cases to this corpus when those validation paths are built.
-
-Store conformance alone does not establish write safety or command behavior.
-Integration cases must also check collision/reference/label preflight before
-mutation, supported regional placement, append's fill behavior when implemented,
-and whether lazy operations read only the intended measurements. No append,
-transaction, crash-recovery, GPU, or performance result is implied by these
-small native fixtures.
+The example stores are a small set. The Rust tests also cover missing labels
+after decoding, reference overflow, bad Zarr metadata, wrong reference
+dimensions, repeated or empty dimension names, repeated values in other root
+arrays, and `bin_1`.
