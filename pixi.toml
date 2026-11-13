@@ -26,6 +26,7 @@ fmt-check = "cargo fmt --all -- --check"
 check = { depends-on = ["fmt-check", "clippy", "test"] }
 clean = "cargo clean"
 doc = "cargo doc --workspace --no-deps --open"
+docs-cli = { cmd = "cargo test -p pbz --test cli_reference", env = { UPDATE_CLI_DOCS = "1" } }
 
 # --- fixtures feature: tools for regenerating the committed fixtures/ tree ---
 [feature.fixtures.dependencies]
@@ -71,8 +72,21 @@ wheel-test = "bash scripts/wheel_test.sh"
 [feature.example.dependencies]
 ipykernel = ">=7.2.0,<8"
 
+# --- docs feature: the user docs site ---
+[feature.docs.dependencies]
+python = ">=3.12,<3.13"
+
+[feature.docs.pypi-dependencies]
+zensical = ">=0.1.1,<0.2"
+mkdocstrings-python = ">=2.0.11,<3"
+
+[feature.docs.tasks]
+docs-serve = "zensical serve"
+docs-build = "zensical build --clean"
+
 # --- environments ---
 [environments]
 default = { features = ["validate", "wheel"], solve-group = "default" }
 fixtures = { features = ["fixtures"], solve-group = "default" }
 example = { features = ["validate", "wheel", "example"], solve-group = "default" }
+docs = { features = ["docs"], solve-group = "default" }
