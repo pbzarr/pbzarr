@@ -42,17 +42,25 @@ Python wheel (PyPI) and the `pbz` CLI binaries (GitHub release) ship in lockstep
    only from `main`. A pull request reads the cache from `main`.
 
    CI (`ci.yml`) runs the tests, the wheel and binary builds and the docs build
-   on every pull request to `main` and on every push to `main`, so a broken build
-   shows up before a release. On a push to `main`, the docs job also deploys the
-   site: `.github/workflows/docs.yml` builds it with Zensical
-   (`pixi run -e docs docs-build`) and pushes `site/` to the `gh-pages` branch of
-   `pbzarr/pbzarr.github.io`, which serves <https://pbzarr.github.io>. It uses the
-   `DOCS_DEPLOY_KEY` secret. The site follows `main`, so it can show changes that
-   are not in a release yet. release-please opens and updates the release PR
-   with the default `GITHUB_TOKEN`, so GitHub holds those CI runs until someone
-   approves them. Before you merge the release PR, click **Approve workflows to
-   run** in its merge box and wait for CI to pass. release-please pushes to the PR
-   each time `main` changes, and each push needs a new approval.
+   on every push to `main` and on the release PR, so a broken build shows up
+   before a release. On other pull requests, CI runs the tests and the docs build
+   at once, but the wheel and binary builds wait in the `approve-builds` job for
+   approval through the `pr-builds` environment. To run them, open the run and
+   click **Review deployments**. Each new push to the PR asks again. If nobody
+   approves, the builds do not run.
+
+   On a push to `main`, the docs job also deploys the site:
+   `.github/workflows/docs.yml` builds it with Zensical (`pixi run -e docs
+   docs-build`) and pushes `site/` to the `gh-pages` branch of
+   `pbzarr/pbzarr.github.io`, which serves <https://pbzarr.github.io>. It uses
+   the `DOCS_DEPLOY_KEY` secret. The site follows `main`, so it can show changes
+   that are not in a release yet.
+
+   release-please opens and updates the release PR with the default
+   `GITHUB_TOKEN`, so GitHub holds those CI runs until someone approves them.
+   Before you merge the release PR, click **Approve workflows to run** in its
+   merge box and wait for CI to pass. release-please pushes to the PR each time
+   `main` changes, and each push needs a new approval.
 4. **Replace the release notes (optional).** release-please uses the generated
    changelog entry as the text of the GitHub release. To use curated notes,
    write them to a file outside the repo and replace the text:
@@ -161,6 +169,9 @@ patch when both fixes are in an upstream release.
   branch. Then, in `pbzarr/pbzarr.github.io` (Settings, Pages), set the source to
   **Deploy from a branch**, branch `gh-pages`, folder `/ (root)`. Delete the old
   `.github/workflows/deploy.yml` in that repo, because it deploys the old site.
+- **PR build approval:** create the `pr-builds` environment in `pbzarr/pbzarr`
+  (Settings, Environments) and add yourself under **Required reviewers**. Leave
+  **Prevent self-review** off, so that you can approve builds on your own PRs.
 - **crates.io:** add a Trusted Publisher for the `pbzarr` crate: publisher type
   GitHub, repository `pbzarr/pbzarr`, workflow filename `release.yml` (leave
   environment blank, the job sets none). The crate `pbzarr@0.1.0` must already be

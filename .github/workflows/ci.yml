@@ -49,10 +49,21 @@ jobs:
 
       - run: pixi run validate-roundtrip
 
+  approve-builds:
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
+    runs-on: ubuntu-latest
+    environment: pr-builds
+    steps:
+      - run: echo "Wheel and binary builds approved for this run."
+
   wheels:
+    needs: approve-builds
+    if: ${{ !cancelled() && (needs.approve-builds.result == 'success' || needs.approve-builds.result == 'skipped') }}
     uses: ./.github/workflows/wheels.yml
 
   binaries:
+    needs: approve-builds
+    if: ${{ !cancelled() && (needs.approve-builds.result == 'success' || needs.approve-builds.result == 'skipped') }}
     uses: ./.github/workflows/binaries.yml
 
   docs:
