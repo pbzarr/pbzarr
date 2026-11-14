@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/pbzarr/pbzarr/compare/v0.8.0...v0.9.0) (2026-11-13)
+
+
+### Features
+
+* release the pbz binaries and installer with dist ([#30](https://github.com/pbzarr/pbzarr/issues/30)) ([ff145de](https://github.com/pbzarr/pbzarr/commit/ff145debaed4789492b54b50d659a1a5f9eb47a2))
+
 ## [0.8.0](https://github.com/pbzarr/pbzarr/compare/v0.7.0...v0.8.0) (2026-11-13)
 
 

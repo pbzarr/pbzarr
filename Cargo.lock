@@ -1975,7 +1975,7 @@ checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "pbz"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "bigtools",
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "pbzarr"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2023,7 +2023,7 @@ dependencies = [
 
 [[package]]
 name = "pbzarr-python"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "pbzarr",
  "pbzarr-readers",
@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "pbzarr-readers"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "bigtools",
