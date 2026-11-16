@@ -152,9 +152,9 @@ The format version is not the version of the pbzarr packages.
 
 ## Validation
 
-- [root-attributes.schema.json](root-attributes.schema.json) is a JSON Schema
+- [root-attributes.schema.json](https://github.com/pbzarr/pbzarr/blob/main/spec/root-attributes.schema.json) is a JSON Schema
   for the root attributes.
-- [CONFORMANCE.md](CONFORMANCE.md) has numbered rules and the valid and
+- [CONFORMANCE.md](https://github.com/pbzarr/pbzarr/blob/main/spec/CONFORMANCE.md) has numbered rules and the valid and
   invalid example stores.
-- [examples.py](examples.py) makes the example stores.
+- [examples.py](https://github.com/pbzarr/pbzarr/blob/main/spec/examples.py) makes the example stores.
 - `pbz validate STORE` checks a store against these rules.
