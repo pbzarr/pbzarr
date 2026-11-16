@@ -15,6 +15,7 @@ nav = [
   { "Home" = "index.md" },
   { "Get started" = [
     { "Install" = "get-started/install.md" },
+    { "Try a public store" = "get-started/1000-genomes.md" },
   ] },
   { "Concepts" = [
     { "Data model" = "concepts/data-model.md" },
