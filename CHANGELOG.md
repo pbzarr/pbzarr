@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/pbzarr/pbzarr/compare/v0.9.0...v0.9.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* open stores as Zarr v3, and add a public store page ([#32](https://github.com/pbzarr/pbzarr/issues/32)) ([8b95432](https://github.com/pbzarr/pbzarr/commit/8b95432b8f9f4aa700948f3aa09b47cbebb27413))
+
 ## [0.9.0](https://github.com/pbzarr/pbzarr/compare/v0.8.0...v0.9.0) (2026-11-13)
 
 
