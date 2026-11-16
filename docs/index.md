@@ -41,6 +41,7 @@ See [Install](get-started/install.md) for other systems and options.
 ## Where to go next
 
 - [Install](get-started/install.md) the Python package and the `pbz` command.
+- [Try a public store](get-started/1000-genomes.md): open the read depth of 3,202 samples of the 1000 Genomes Project over HTTPS.
 - [Concepts](concepts/data-model.md): the data model, storage layout, and common mistakes.
 - [Cookbook](cookbook/index.md): recipes for common tasks.
 - [CLI Reference](reference/cli.md)

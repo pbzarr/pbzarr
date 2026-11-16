@@ -180,6 +180,7 @@ class _StoreRead:
             array = zarr.open_array(
                 store if store is not None else location,
                 mode="r",
+                zarr_format=3,
                 path=self.source["array_path"],
                 **kwargs,
             )

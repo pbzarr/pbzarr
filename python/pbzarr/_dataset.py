@@ -439,8 +439,10 @@ def _read(source, storage_options, chunks, *, listed: bool = False) -> _Store:
 
 
 def _read_store(store, source, storage_options, chunks, *, listed: bool) -> _Store:
+    # A PBZ store is Zarr v3. Without the format, zarr-python also asks for the
+    # v2 metadata keys, and some object stores answer 403 for a missing key.
     group = zarr.open_group(
-        store, mode="r", use_consolidated=False if listed else None,
+        store, mode="r", zarr_format=3, use_consolidated=False if listed else None,
         **_storage_kwargs(storage_options),
     )
     root_attrs = dict(group.attrs)
@@ -450,6 +452,7 @@ def _read_store(store, source, storage_options, chunks, *, listed: bool) -> _Sto
     data = xr.open_zarr(
         store,
         chunks=None if chunks is _STORED_CHUNKS else chunks,
+        zarr_format=3,
         consolidated=group.metadata.consolidated_metadata is not None,
         storage_options=_options(storage_options),
     )
